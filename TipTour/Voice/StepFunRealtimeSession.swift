@@ -167,6 +167,11 @@ final class StepFunRealtimeSession {
             self.client.sendAudioChunk(pcm16Data)
         }
 
+        // The player shares the engine that captures the microphone. Without this
+        // the engine has no player node, so startPlaying() succeeds and nothing is
+        // ever audible — the whole voice loop appears to work while silent.
+        audioPlayer.attach(to: audioEngine)
+
         audioEngine.prepare()
         try audioEngine.start()
     }
