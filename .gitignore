@@ -19,3 +19,6 @@ harnesses/jev-loop/*.jsonl
 # Local secrets for development probes — never commit
 .env
 .env.local
+
+# SwiftPM build artifacts for the investigation harness
+tools/*/.build/
