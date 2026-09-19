@@ -105,7 +105,10 @@ final class StepFunRealtimeClient {
     private let instructions: String
     private let tools: [[String: Any]]
     private let turnDetection: StepFunTurnDetection
-    private let eventHandler: @MainActor (StepFunRealtimeEvent) -> Void
+    /// Mutable so a session can bind its handler after its own stored
+    /// properties are initialized — a closure that captures the session cannot be
+    /// passed while the session's `let client` is still being constructed.
+    var eventHandler: @MainActor (StepFunRealtimeEvent) -> Void
 
     private let urlSession: URLSession
     private let stateLock = NSLock()
@@ -127,7 +130,7 @@ final class StepFunRealtimeClient {
         instructions: String,
         tools: [[String: Any]] = [],
         turnDetection: StepFunTurnDetection,
-        eventHandler: @escaping @MainActor (StepFunRealtimeEvent) -> Void
+        eventHandler: @escaping @MainActor (StepFunRealtimeEvent) -> Void = { _ in }
     ) {
         self.apiKey = apiKey
         self.model = model
