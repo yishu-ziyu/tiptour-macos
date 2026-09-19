@@ -58,41 +58,46 @@ replaces the signed bundle and macOS will re-request every permission. Use
 | Setting | Value |
 | --- | --- |
 | `CODE_SIGN_STYLE` | `Manual` |
-| `CODE_SIGN_IDENTITY` | `-` (ad-hoc) |
+| `CODE_SIGN_IDENTITY` | `Shangqiuko Local Code Signing` |
+| `ENABLE_HARDENED_RUNTIME` | `NO` |
 | `DEVELOPMENT_TEAM` | key removed |
 | `ENABLE_DEBUG_DYLIB` | `NO` |
 | `ENABLE_PREVIEWS` | `NO` |
 
-Three non-obvious rules, each learned from a build or launch that failed:
+**This configuration makes macOS permissions survive a rebuild.** That is the whole
+point of it: without it, every build resets Accessibility, Screen Recording and
+Microphone, and re-granting by hand after each build is the single biggest tax on
+iterating.
 
+Why it works: the designated requirement is
+`identifier "com.yishuziyu.tiptour" and certificate leaf = H"<cert hash>"` — it names
+the *certificate*, not the binary. Verified by changing the source and rebuilding:
+the binary's SHA-1 changed while the designated requirement stayed byte-identical.
+TCC therefore treats every build as the same app.
+
+Four rules, each learned from a build or launch that failed:
+
+- **`ENABLE_HARDENED_RUNTIME` must be `NO`.** This is what actually fixed launching.
+  Hardened runtime enforces team matching for every loaded library, and a self-signed
+  certificate has no Team ID to match on, so dyld refuses with
+  `mapping process and mapped file (non-platform) have different Team IDs` for every
+  embedded framework. The certificate itself is fine — it carries Digital Signature
+  plus the Code Signing EKU, and `codesign` accepts it without complaint. The
+  certificate was blamed for this for several rounds before the runtime flag was
+  identified as the real cause. Ad-hoc signing is the other way to make the app
+  launch, but it costs the stable-requirement property above.
 - **Remove `DEVELOPMENT_TEAM`; do not set it to an empty string.** An explicitly
   empty team makes Xcode demand a team for every target that inherits it,
   including the SPM package products (`PostHog`, `PLCrashReporter`), which then
   fail with "Signing requires a development team".
-- **The local code-signing certificate does not work here, despite signing
-  successfully.** A certificate named `Shangqiuko Local Code Signing` exists in
-  the login keychain and `codesign` accepts it without complaint, but macOS
-  refuses to load the app: launching dies in dyld with
-  `mapping process and mapped file (non-platform) have different Team IDs` for
-  every embedded framework. This happens whether the frameworks are signed
-  ad-hoc or with the same certificate, and it is not fixable by re-signing —
-  a full `codesign --force --deep` with the certificate fails identically.
-  Ad-hoc (`CODE_SIGN_IDENTITY = "-"`) is the only configuration on this machine
-  that produces a launchable app. Budget time for this: it costs several
-  build-and-crash cycles to rule out.
-- **`ENABLE_DEBUG_DYLIB` must be `NO`.** With it on (the default), Xcode emits a
-  `TipTour.debug.dylib` next to the executable — a SwiftUI Previews JIT artefact
-  this menu-bar app has no use for. The DerivedData product then refuses to
-  launch outside Xcode with the same Team ID error. `ENABLE_PREVIEWS = NO` alone
-  does **not** remove it; the two settings are independent.
-
-### Consequence: permissions reset on every rebuild
-
-Ad-hoc signatures are regenerated from the binary's hash, so macOS treats each
-build as a different app and re-requests Accessibility, Screen Recording and
-Microphone every time. There is no way around this without a paid Apple
-Developer account. During active development it is a few clicks in System
-Settings; the alternative — a stable certificate — is not available here.
+- **`ENABLE_DEBUG_DYLIB` must be `NO`.** Its default emits a `TipTour.debug.dylib`
+  beside the executable — a SwiftUI Previews JIT artefact a menu-bar app has no
+  use for — and the product then refuses to launch with the same Team ID error.
+  `ENABLE_PREVIEWS = NO` does *not* remove it; the two settings are independent.
+- **Do not pass `CODE_SIGN_IDENTITY` on the `xcodebuild` command line.** It
+  overrides the setting for every target, packages included, and reproduces the
+  "requires a development team" failure. The project file already targets the
+  right configs on its own.
 
 ### Terminal builds
 
