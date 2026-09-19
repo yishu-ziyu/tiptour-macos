@@ -119,13 +119,19 @@ final class StepFunRealtimeSession {
         state.isConnecting = false
     }
 
-    /// Ends the current spoken response without ending the session — the
-    /// barge-in path, used when the user starts talking over the model.
-    func interrupt() async {
+    /// Barge-in: the user started talking over the model.
+    ///
+    /// Stopping the audio is only half of it. Tool work that has been started but
+    /// not yet executed must be abandoned too — otherwise the desktop carries out
+    /// an action the user has just verbally countermanded. Whatever was already
+    /// executed cannot be undone, which is why actions are single-step.
+    private func beginBargeIn() {
         audioPlayer.clearQueuedAudio()
         client.cancelCurrentResponse()
-        pendingToolWork?.cancel()
-        pendingToolWork = nil
+        if let pendingToolWork {
+            pendingToolWork.cancel()
+            print("[StepFunRealtimeSession] barge-in abandoned an in-flight tool call")
+        }
     }
 
     /// Closes the user's turn and asks for a reply. Required in `.manual` mode.
@@ -187,10 +193,7 @@ final class StepFunRealtimeSession {
             state.lastOutputTranscript += text
 
         case .userStartedSpeaking:
-            // The model is talking and the user cut in. Drop what is queued —
-            // continuing to play it is what makes a voice assistant feel like it
-            // is talking over you.
-            audioPlayer.clearQueuedAudio()
+            beginBargeIn()
 
         case .toolCall(let callID, let name, let argumentsJSON):
             // Start the work now so it overlaps the speech already in progress.
@@ -207,14 +210,21 @@ final class StepFunRealtimeSession {
 
         case .turnComplete:
             // The speech is over. Now it is safe to report the result.
-            if let pendingCallID, let pendingToolWork {
+            guard let pendingToolWork else { return }
+            self.pendingToolWork = nil
+
+            if pendingToolWork.isCancelled {
+                // The user interrupted while the action was in flight. Say so
+                // plainly rather than reporting an outcome that will not happen;
+                // the model needs *some* output to close the call.
+                client.sendToolResult(callID: pendingCallID ?? "", output: "已停止：用户中断了操作。")
+            } else {
                 let output = await pendingToolWork.value
-                client.sendToolResult(callID: pendingCallID, output: output)
-                self.pendingToolWork = nil
-                self.pendingCallID = nil
-                state.lastInputTranscript = ""
-                state.lastOutputTranscript = ""
+                client.sendToolResult(callID: pendingCallID ?? "", output: output)
             }
+            pendingCallID = nil
+            state.lastInputTranscript = ""
+            state.lastOutputTranscript = ""
 
         case .unexpectedDisconnect(let error):
             state.errorMessage = "Voice connection dropped: \(error.localizedDescription)"

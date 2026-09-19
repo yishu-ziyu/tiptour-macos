@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>TipTour 二开 · Phase 1-2 汇报</title>
+<style>
+  :root{
+    --bg:#f5f5f7; --card:#ffffff; --ink:#1d1d1f; --sub:#6e6e73; --line:#d2d2d7;
+    --ok:#248a3d; --warn:#b25000; --bad:#c30010; --accent:#0071e3;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;
+    line-height:1.5;padding:40px 24px 80px}
+  .wrap{max-width:980px;margin:0 auto}
+  h1{font-size:30px;letter-spacing:-.02em;margin:0 0 6px}
+  .lede{color:var(--sub);font-size:15px;margin:0 0 36px}
+  h2{font-size:19px;margin:40px 0 14px;letter-spacing:-.01em}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:22px 24px;margin-bottom:14px}
+  .role{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .role .card{margin:0;text-align:left}
+  .tag{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--sub);margin-bottom:8px}
+  .role h3{margin:0 0 4px;font-size:16px}
+  .model{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;
+    background:#f5f5f7;border:1px solid var(--line);border-radius:6px;
+    padding:4px 8px;display:inline-block;margin:8px 0 6px}
+  .role p{margin:6px 0 0;font-size:13px;color:var(--sub)}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line)}
+  th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--sub);font-weight:600}
+  tr:last-child td{border-bottom:none}
+  .num{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+  .ok{color:var(--ok);font-weight:600}
+  .warn{color:var(--warn);font-weight:600}
+  .bad{color:var(--bad);font-weight:600}
+  .flow{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
+    background:#1d1d1f;color:#f5f5f7;border-radius:10px;padding:16px 18px;
+    overflow-x:auto;white-space:pre;line-height:1.65}
+  .flow b{color:#7ee787;font-weight:400}
+  .flow i{color:#79c0ff;font-style:normal}
+  .flow s{color:#ffa657;text-decoration:none}
+  .bar{height:8px;border-radius:4px;background:#e8e8ed;overflow:hidden;margin-top:6px}
+  .bar span{display:block;height:100%;border-radius:4px}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  ul{margin:8px 0 0;padding-left:20px;font-size:13.5px}
+  li{margin-bottom:7px}
+  .foot{margin-top:44px;color:var(--sub);font-size:12px;border-top:1px solid var(--line);padding-top:16px}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
+    background:#f5f5f7;padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>TipTour 二开 · 调研与协议层汇报</h1>
+<p class="lede">全部结论来自对 <code>yishu-ziyu</code> 账号的真实调用，可用 <code>tools/stepprobe</code> 复现。
+详细记录见 <code>docs/model-research-findings.md</code>。</p>
+
+<h2>一、三角色分工</h2>
+<div class="role">
+  <div class="card">
+    <span class="tag">嘴 + 耳 + 意图</span>
+    <h3>阶跃实时语音</h3>
+    <div class="model">stepaudio-3-realtime-preview</div>
+    <p>全双工听说、理解语气、发起工具调用。<b>走开放平台 API</b>，不走 Step Plan——套餐下的实时模型实测不触发工具调用。</p>
+  </div>
+  <div class="card">
+    <span class="tag">眼睛</span>
+    <h3>Step 3.7 Flash</h3>
+    <div class="model">step-3.7-flash · Step Plan</div>
+    <p>看图做<b>语义消歧</b>（"哪个编号是保存按钮"）。<span class="bad">不用于产出坐标</span>——实测坐标误差最高 2082px。</p>
+  </div>
+  <div class="card">
+    <span class="tag">手</span>
+    <h3>Jev</h3>
+    <div class="model">jev-1.13.0 · typesafe.ai</div>
+    <p>从本地检测出的候选中做类型化决策。参数错 5→0、误接受 2→0，代价是 11/13 需兜底。只吃文本，永远是"手"不是"眼"。</p>
+  </div>
+</div>
+
+<h2>二、闭环已验证：语音 → 工具 → 执行 → 播报</h2>
+<div class="card">
+<div class="flow"><i># 实测事件流（stepaudio-3-realtime-preview，4.98s 语音输入）</i>
+
+   165ms  <b>session.created</b>          服务端就绪，此前不可发送
+   239ms  <b>session.updated</b>          配置完成，可流式推音频
+  1286ms  <s>input_audio_buffer.speech_started</s>   VAD 判定用户开口
+  ...     <s>input_audio_transcription.delta</s>     流式 ASR 回传
+  6712ms  <b>input_audio_buffer.committed</b> + <b>response.created</b>
+  ...     <s>response.audio_transcript.delta ×15</s>  <b>← 模型先说话</b>
+  ...     <s>response.output_item.added</s>
+  ...     <s>response.function_call_arguments.delta ×2</s>
+  ...     <s>response.function_call_arguments.done</s>  <b>← 后发起工具调用</b>
+  ...     <s>response.audio.delta ×28</s>             28 块 / 199680 字节
+  9078ms  <b>response.done</b>            本轮结束，此刻才可回传结果
+  ----    客户端执行工具（与语音播放<b>并行</b>）----
+  ----    conversation.item.create(function_call_output) + response.create
+ 13651ms  <b>response.done</b>            续轮：模型复述了工具结果 ✓
+</div>
+<p style="font-size:13px;color:var(--sub);margin:14px 0 0">
+续轮原话：「您好！我看到您的屏幕上现在显示的是<b>访达（Finder）窗口，左侧是边栏，右侧是文件列表…</b>」——
+工具结果被正确消费，链路成立。</p>
+</div>
+
+<h2>三、端到端延迟预算（实测）</h2>
+<div class="card">
+<table>
+  <tr><th>环节</th><th>延迟</th><th>占比</th><th>备注</th></tr>
+  <tr><td>本地感知（AX/CoreML/OCR）</td><td class="num">未测</td><td>—</td><td>引擎既有能力，需实测补上</td></tr>
+  <tr><td>Jev 决策</td><td class="num ok">272 ms</td><td><div class="bar"><span style="width:6%;background:var(--ok)"></span></div></td><td>中位；最长 1318ms</td></tr>
+  <tr><td>step-3.7-flash 语义消歧</td><td class="num warn">1,234 ms</td><td><div class="bar"><span style="width:27%;background:var(--warn)"></span></div></td><td>low 档 + JSON Mode</td></tr>
+  <tr><td>语音模型响应（首音频）</td><td class="num bad">~2,400 ms</td><td><div class="bar"><span style="width:53%;background:var(--bad)"></span></div></td><td>说话结束 → commit → 首包</td></tr>
+  <tr><td>含一轮工具调用的续轮</td><td class="num bad">~4,600 ms</td><td><div class="bar"><span style="width:100%;background:var(--bad)"></span></div></td><td>两次 response.done 之差</td></tr>
+</table>
+<p style="font-size:13px;color:var(--sub);margin:12px 0 0">
+<b>关键结论：工具执行与语音播放并行，不占延迟预算。</b>Jev 的 272ms 被藏进模型说话的时间里。
+真正的瓶颈是语音模型本身，且无法通过调参显著改善（low→high 只差 380ms）。</p>
+</div>
+
+<h2>四、三个只在跑真机时才发现的坑</h2>
+<div class="cols">
+  <div class="card">
+    <span class="tag">坑 1</span>
+    <h3 style="margin:0 0 6px;font-size:15px">turn_detection 省略 ≠ 关闭</h3>
+    <p style="font-size:13px;color:var(--sub);margin:0">VAD 默认开启，关闭必须显式传 <code>null</code>。
+    第一次探针运行：ASR 完美回流、响应一个没有——看起来像接口坏了，实际是没人提交缓冲区。</p>
+  </div>
+  <div class="card">
+    <span class="tag">坑 2</span>
+    <h3 style="margin:0 0 6px;font-size:15px">合成音频结尾太"干净"</h3>
+    <p style="font-size:13px;color:var(--sub);margin:0">服务端 VAD 等不到静音帧就不判结束，<code>speech_stopped</code> 永不到来。
+    必须补 800ms 尾部静音。<b>真机采集同样有此要求</b>——保留用户说完后的静音。</p>
+  </div>
+  <div class="card">
+    <span class="tag">坑 3</span>
+    <h3 style="margin:0 0 6px;font-size:15px">token 被 reasoning 吃光</h3>
+    <p style="font-size:13px;color:var(--sub);margin:0"><code>max_tokens=400</code> 时 <code>finish_reason=length</code>、
+    <code>content</code> 为空字符串——模型只想完根本没开口。视觉模型调用必须给足 <code>max_tokens</code>（≥1500）。</p>
+  </div>
+  <div class="card">
+    <span class="tag">坑 4 · 架构级</span>
+    <h3 style="margin:0 0 6px;font-size:15px">VLM 坐标不可信</h3>
+    <p style="font-size:13px;color:var(--sub);margin:0">真实截图放三个已知标记，反映射误差 276 / 1763 / 2082px，
+    且无稳定标定系数。<b>结论：让眼睛选编号，不让它给坐标。</b></p>
+  </div>
+</div>
+
+<h2>五、进度</h2>
+<div class="card">
+<table>
+  <tr><th>项</th><th>状态</th><th>说明</th></tr>
+  <tr><td>账号可用性实测</td><td class="ok">已完成</td><td>文档与权限双向不一致，必须实测</td></tr>
+  <tr><td>Realtime 协议 + 闭环</td><td class="ok">已完成</td><td>含工具调用与结果回传</td></tr>
+  <tr><td>StepFunRealtimeClient</td><td class="ok">已完成</td><td>协议层，零警告编译通过</td></tr>
+  <tr><td>StepFunRealtimeSession</td><td class="ok">已完成</td><td>音频链路复用，零改动</td></tr>
+  <tr><td>StepFunVisionClient</td><td class="warn">待写</td><td>眼睛，只做编号消歧</td></tr>
+  <tr><td>工具集定义</td><td class="warn">待写</td><td>act_on_screen / describe_screen</td></tr>
+  <tr><td>接入 CompanionManager</td><td class="warn">待写</td><td>快捷键门控、权限矩阵</td></tr>
+  <tr><td>删除 Gemini</td><td class="warn">待删</td><td>约 1780 行 + 埋点</td></tr>
+</table>
+</div>
+
+<h2>六、待你确认</h2>
+<div class="card">
+<ul>
+  <li><b>本地感知延迟未测</b>——预算表里唯一缺口，需在 app 内实测补上。</li>
+  <li><b>stepaudio-2.5-realtime 不触发工具</b>。若 3.0-preview 限免到期下线，要么转付费版，要么解决 2.5 的工具调用问题。</li>
+  <li><b>中英文 Jev 准确率</b>：简单场景中英文均 confidence 1.0，但需要更难、更大的用例集才能下结论。</li>
+</ul>
+</div>
+
+<p class="foot">环境：Xcode 16.4 · Swift 6.1.2 · macOS 14.2+ 目标 · 本地证书 <code>Shangqiuko Local Code Signing</code> 签名 ·
+密钥经 git-ignored <code>.env</code> 交接，app 自身从 Keychain 读取。</p>
+
+</div>
+</body>
+</html>
