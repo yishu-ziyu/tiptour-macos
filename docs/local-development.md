@@ -58,26 +58,54 @@ replaces the signed bundle and macOS will re-request every permission. Use
 | Setting | Value |
 | --- | --- |
 | `CODE_SIGN_STYLE` | `Manual` |
-| `CODE_SIGN_IDENTITY` | `Shangqiuko Local Code Signing` |
+| `CODE_SIGN_IDENTITY` | `-` (ad-hoc) |
 | `DEVELOPMENT_TEAM` | key removed |
+| `ENABLE_DEBUG_DYLIB` | `NO` |
+| `ENABLE_PREVIEWS` | `NO` |
 
-Two non-obvious rules, both learned from a failed build:
+Three non-obvious rules, each learned from a build or launch that failed:
 
 - **Remove `DEVELOPMENT_TEAM`; do not set it to an empty string.** An explicitly
   empty team makes Xcode demand a team for every target that inherits it,
   including the SPM package products (`PostHog`, `PLCrashReporter`), which then
   fail with "Signing requires a development team".
-- **Do not pass `CODE_SIGN_IDENTITY` on the `xcodebuild` command line.** It
-  overrides the setting for every target, packages included, and produces the
-  same failure. The project file already targets only the app and test targets;
-  package targets fall back to local ad-hoc signing on their own.
+- **The local code-signing certificate does not work here, despite signing
+  successfully.** A certificate named `Shangqiuko Local Code Signing` exists in
+  the login keychain and `codesign` accepts it without complaint, but macOS
+  refuses to load the app: launching dies in dyld with
+  `mapping process and mapped file (non-platform) have different Team IDs` for
+  every embedded framework. This happens whether the frameworks are signed
+  ad-hoc or with the same certificate, and it is not fixable by re-signing —
+  a full `codesign --force --deep` with the certificate fails identically.
+  Ad-hoc (`CODE_SIGN_IDENTITY = "-"`) is the only configuration on this machine
+  that produces a launchable app. Budget time for this: it costs several
+  build-and-crash cycles to rule out.
+- **`ENABLE_DEBUG_DYLIB` must be `NO`.** With it on (the default), Xcode emits a
+  `TipTour.debug.dylib` next to the executable — a SwiftUI Previews JIT artefact
+  this menu-bar app has no use for. The DerivedData product then refuses to
+  launch outside Xcode with the same Team ID error. `ENABLE_PREVIEWS = NO` alone
+  does **not** remove it; the two settings are independent.
 
-### The one safe terminal build
+### Consequence: permissions reset on every rebuild
 
-Exactly one terminal build has been run, to validate this fork's configuration.
-It was safe because no `TipTour.app` had ever been installed on this machine, so
-there were no Accessibility / Screen Recording grants to invalidate. From now on,
-builds happen in Xcode.
+Ad-hoc signatures are regenerated from the binary's hash, so macOS treats each
+build as a different app and re-requests Accessibility, Screen Recording and
+Microphone every time. There is no way around this without a paid Apple
+Developer account. During active development it is a few clicks in System
+Settings; the alternative — a stable certificate — is not available here.
+
+### Terminal builds
+
+Terminal `xcodebuild` is what the repository's `AGENTS.md` prohibits, because it
+invalidates grants the installed app already holds. That prohibition only bites
+once permissions have been granted — before then there is nothing to lose, which
+is why the fork's configuration was validated from the terminal at all.
+
+Once the app has been run and granted Accessibility / Screen Recording /
+Microphone, all further builds belong in Xcode. Everything else keeps working
+from the terminal: source edits, `scripts/test-stepfun.sh`, `scripts/test-jev.sh`
+and the `tools/stepprobe` harness all compile into temporary directories and
+never touch an installed bundle.
 
 ## Repository remotes
 
