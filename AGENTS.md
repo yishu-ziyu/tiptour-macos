@@ -4,12 +4,16 @@ This file is the source of truth for coding agents; CLAUDE.md is a symlink.
 
 ## Product
 
-macOS 14.2+ menu bar-only SwiftUI/AppKit app (`LSUIElement=true`). Two provider modes ship together on `main`:
+macOS 14.2+ menu bar-only SwiftUI/AppKit app (`LSUIElement=true`). Three provider modes ship together on `main` — `jev`, `gemini` (being retired) and `stepfun`:
 
 - **Gemini realtime**: Ctrl+Option toggles a voice session. Audio and optional screenshots go directly to Gemini using the user's Keychain key. One tool per user turn: a single desktop workflow action or the existing Apple Notes convenience action.
+- **StepFun realtime voice**: Ctrl+Option runs a full-duplex voice session. The model
+  receives **no image input** — it cannot see the screen. It calls `describe_screen` to get a
+  numbered list of locally detected controls and `act_on_screen` to click one by number, so it
+  never handles a coordinate. Voice actions are bounded to a single step per spoken request.
 - **JEV text**: Ctrl+K opens the command panel. TypeSafe's `jev-latest` classifies locally detected screen labels and locations. JEV selects click/double-click/right-click targets, not prose or pixels. It acts on the top-ranked target without minimum probability or absent-score cutoffs. Its bounded loop stops on an explicit none choice, task completion, malformed responses, cancellation, action rejection/pause/failure, or 12 actions, with a final observation after the last action.
 
-JEV is the default selected mode. Onboarding is Choose mode → Save that mode’s API key → Grant its permissions; Gemini additionally requires microphone access. The previous onboarding flag is migrated to a new mode-setup completion flag so existing users also choose a mode. Settings → Models shows the selector and only the selected mode’s key input. Keys are stored only in macOS Keychain; no environment, sibling project, or hosted-key fallback. The UI must report Keychain errors accurately.
+JEV is the default selected mode. `stepfun` occupies the voice slot alongside the outgoing `gemini`. Onboarding is Choose mode → Save that mode’s API key → Grant its permissions; Gemini additionally requires microphone access. The previous onboarding flag is migrated to a new mode-setup completion flag so existing users also choose a mode. Settings → Models shows the selector and only the selected mode’s key input. Keys are stored only in macOS Keychain; no environment, sibling project, or hosted-key fallback. The UI must report Keychain errors accurately.
 
 No Claude/Hermes integration, separate Flash Lite matcher, image-generation service, recording/video pipeline, or Worker proxy is bundled. Do not reintroduce them without an explicit user request.
 
@@ -39,6 +43,11 @@ No Claude/Hermes integration, separate Flash Lite matcher, image-generation serv
 | `TipTour/Jev/JevStepPanelView.swift` | Decision progress in the text panel |
 | `TipTour/Voice/GeminiLiveSession.swift` | Realtime session, microphone, screenshots and tool callbacks |
 | `TipTour/Voice/GeminiLiveClient.swift` | Gemini WebSocket protocol and tool declarations |
+| `TipTour/Voice/StepFunRealtimeClient.swift` | StepFun Realtime WebSocket protocol; encodes measured event ordering (~330 lines) |
+| `TipTour/Voice/StepFunRealtimeSession.swift` | StepFun voice session: mic capture, playback, tool dispatch (~240 lines) |
+| `TipTour/Voice/StepFunRealtimeTools.swift` | The two tool declarations and the pure action-resolution rules (~210 lines) |
+| `TipTour/Voice/StepFunRealtimeToolRouter.swift` | Numbered candidates in, JEV loop out; the only path from voice to a click (~200 lines) |
+| `TipTour/Voice/StepFunVisionClient.swift` | Semantic disambiguation among numbered candidates; never returns coordinates (~250 lines) |
 | `TipTour/UI/ProviderSetupView.swift` | The two Keychain key cards |
 | `TipTour/UI/CompanionPanelView.swift` | Compact mode hints, permissions and action controls |
 | `TipTour/UI/TipTourSettingsView.swift` | Models, desktop actions, privacy, permissions and advanced options |
@@ -50,9 +59,11 @@ See `docs/source-layout.md` for the remaining directory responsibilities.
 
 ## Build and verification
 
-Open `tiptour-macos.xcodeproj`, select TipTour, build/run in Xcode. This fork is set up for local machine signing; see `docs/local-development.md` for the signing identity, bundle identifier, Sparkle feed and remote conventions used here.
+Open `tiptour-macos.xcodeproj`, select the `tiptour-macos` scheme, build/run in Xcode.
+Run `scripts/test-stepfun.sh` and `scripts/test-jev.sh` for the decision suites, which compile
+into temporary packages and never touch the installed app. This fork is set up for local machine signing; see `docs/local-development.md` for the signing identity, bundle identifier, Sparkle feed and remote conventions used here.
 
-**Do NOT run `xcodebuild` from the terminal** — it invalidates TCC permissions and the app will need to re-request screen recording/accessibility access. Pure Swift parsing/typechecking and isolated tests are permitted without replacing or launching the installed app. Run `scripts/test-jev.sh` for the JEV decision suite.
+**Do NOT run `xcodebuild` from the terminal** — it invalidates TCC permissions and the app will need to re-request screen recording/accessibility access. Pure Swift parsing/typechecking and isolated tests are permitted without replacing or launching the installed app. Run `scripts/test-jev.sh` and `scripts/test-stepfun.sh` for the two decision suites.
 
 Known non-blocking Swift 6 concurrency and deprecated `onChange` warnings must not be fixed as incidental cleanup.
 

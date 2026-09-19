@@ -279,6 +279,120 @@ final class CompanionManager: ObservableObject {
             }
     }
 
+    // MARK: - StepFun realtime voice
+
+    private var stepfunSession: StepFunRealtimeSession?
+    private var stepfunToolRouter: StepFunRealtimeToolRouter?
+    private var stepfunStateCancellables = Set<AnyCancellable>()
+
+    /// Instructions for the StepFun voice session.
+    ///
+    /// Unlike the Gemini path, this model cannot see the screen — it gets no
+    /// image input at all. Everything it knows about the desktop arrives through
+    /// `describe_screen`, so the instructions must make that explicit and must
+    /// keep it inside the numbered-candidate contract rather than letting it ask
+    /// for coordinates.
+    static let stepfunVoiceInstructions = """
+        你是用户的桌面助手，用简短的中文口语交流。你看不到屏幕：所有屏幕信息都通过
+        describe_screen 工具获得，它返回带编号的控件列表。要点某个控件时，调用
+        act_on_screen 并传入那个编号。
+
+        规则：
+        - 永远不要猜测或编造坐标，也不要描述你没在 describe_screen 结果里看到的东西。
+        - 每次只做一个操作，做完等用户下一句话。
+        - 找不到用户要的控件时，直接说明，并提示用户说出屏幕上可见的名称。
+        - 回复保持一两句话，不要长篇大论。
+        """
+
+    /// Build and launch a StepFun voice session for the current mode.
+    private func startStepFunVoiceSession() {
+        guard let apiKey = KeychainStore.stepfunAPIKey, !apiKey.isEmpty else {
+            // Missing key vs unreadable keychain are different problems for the
+            // user; both must be visible rather than a silent no-op.
+            voiceState = .idle
+            lastTranscript = "Add your StepFun key in Settings → Models"
+            return
+        }
+
+        let router = StepFunRealtimeToolRouter(engine: engineFacade)
+        let session = StepFunRealtimeSession(
+            apiKey: apiKey,
+            model: TipTourDefaults.StepFunConfiguration.realtimeModel,
+            voice: TipTourDefaults.StepFunConfiguration.realtimeVoice,
+            instructions: Self.stepfunVoiceInstructions,
+            tools: StepFunRealtimeToolDeclarations.all,
+            turnDetection: .serverVAD,
+            toolHandler: router
+        )
+
+        self.stepfunToolRouter = router
+        self.stepfunSession = session
+        bindStepFunSessionPublishers(session)
+
+        voiceState = .processing
+        Task { await session.start() }
+    }
+
+    /// Map the StepFun session's state onto the properties the existing UI reads.
+    ///
+    /// Binding rather than forwarding keeps one source of truth for what the menu
+    /// bar and panel render, so the voice mode swap does not fork the UI.
+    private func bindStepFunSessionPublishers(_ session: StepFunRealtimeSession) {
+        stepfunStateCancellables.removeAll()
+        let state = session.state
+
+        state.$isModelSpeaking
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isSpeaking in
+                guard let self, self.stepfunSession != nil else { return }
+                self.voiceState = isSpeaking ? .responding : .listening
+            }
+            .store(in: &stepfunStateCancellables)
+
+        state.$isSessionActive
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isActive in
+                guard let self, !isActive, self.stepfunSession != nil else { return }
+                self.voiceState = .idle
+            }
+            .store(in: &stepfunStateCancellables)
+
+        state.$lastOutputTranscript
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] transcript in
+                guard let self, !transcript.isEmpty else { return }
+                self.lastTranscript = transcript
+            }
+            .store(in: &stepfunStateCancellables)
+
+        state.$errorMessage
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] message in
+                guard let self, let message else { return }
+                self.lastTranscript = message
+            }
+            .store(in: &stepfunStateCancellables)
+    }
+
+    /// Release every StepFun resource before returning to idle.
+    ///
+    /// The session is dropped first so the publisher guards above stop firing
+    /// while teardown is still in flight — otherwise a late state change can put
+    /// the manager back into `.listening` after the user has already stopped.
+    private func tearDownStepFunVoiceSession() {
+        let session = stepfunSession
+        stepfunSession = nil
+        stepfunToolRouter = nil
+        stepfunStateCancellables.removeAll()
+        voiceState = .idle
+        Task { await session?.stop() }
+    }
+
+    /// True when a StepFun voice session is live or starting.
+    private var isStepFunVoiceActive: Bool {
+        stepfunSession != nil || (selectedMode == .stepfun && voiceStartTask != nil)
+    }
+
     // MARK: - Gemini spatial hints → screenshot-pixel conversion
 
     /// Convert Gemini's `box_2d` (in normalized [y1, x1, y2, x2] form, each
@@ -1544,7 +1658,15 @@ final class CompanionManager: ObservableObject {
         // Voice is intentionally a single realtime path. Text commands can
         // use JEV, while speech should not branch into
         // a second STT/TTS stack.
-        if voiceBackend.isActive || voiceStartTask != nil {
+        //
+        // `voiceBackend` is only consulted for the Gemini path: it constructs a
+        // Gemini session on first access, so touching it while StepFun is
+        // selected would build a provider the user is not using — and would need
+        // a Gemini key that was never entered.
+        let isVoiceActive = selectedMode == .stepfun
+            ? isStepFunVoiceActive
+            : (voiceBackend.isActive || voiceStartTask != nil)
+        if isVoiceActive {
             stopVoiceSession()
             voiceState = .idle
         } else {
@@ -2511,6 +2633,12 @@ final class CompanionManager: ObservableObject {
 
         voiceStartTask = Task {
             defer { voiceStartTask = nil }
+            // The provider is chosen by the selected mode, not by a second code
+            // path the caller has to know about.
+            if selectedMode == .stepfun {
+                await MainActor.run { startStepFunVoiceSession() }
+                return
+            }
             do {
                 try await voiceBackend.start(initialScreenshot: nil)
             } catch {
@@ -2614,10 +2742,14 @@ final class CompanionManager: ObservableObject {
         _ = await ElementResolver.shared.tryAccessibilityTree(label: "__warmup__")
     }
 
-    /// End the Gemini Live session.
+    /// End the active voice session, whichever provider owns it.
     func stopVoiceSession() {
         voiceStartTask?.cancel()
         WorkflowRunner.shared.stop()
-        _voiceBackend?.stop()
+        if selectedMode == .stepfun {
+            tearDownStepFunVoiceSession()
+        } else {
+            _voiceBackend?.stop()
+        }
     }
 }

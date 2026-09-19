@@ -3,7 +3,7 @@
 | Directory | Responsibility |
 | --- | --- |
 | `TipTour/App` | Lifecycle, hotkeys, shared state, and mode coordination |
-| `TipTour/Voice` | Gemini Live WebSocket, microphone, audio playback, session |
+| `TipTour/Voice` | Gemini Live WebSocket (retiring), StepFun Realtime WebSocket, microphone, audio playback, voice sessions |
 | `TipTour/Jev` | TypeSafe client, validated target decisions, bounded click loop, results view |
 | `TipTour/Core` | Shared engine, action requests, highlight source resolution, harness contract |
 | `TipTour/Actions` | Desktop input facade and CUA driver |
