@@ -17,7 +17,17 @@ nonisolated enum TipTourMode: String, CaseIterable, Identifiable {
         switch self {
         case .jev: return "JEV"
         case .gemini: return "Gemini"
-        case .stepfun: return "阶跃语音"
+        case .stepfun: return "阶跃"
+        }
+    }
+
+    /// The interaction form, shown beside the title in the mode picker. Kept
+    /// separate from the title so a name never has to repeat it.
+    var kindLabel: String {
+        switch self {
+        case .jev: return "文字"
+        case .gemini: return "语音"
+        case .stepfun: return "实时语音"
         }
     }
     var keyName: String {
@@ -43,21 +53,21 @@ nonisolated enum TipTourMode: String, CaseIterable, Identifiable {
     var summary: String {
         switch self {
         case .jev:
-            return "Type a task. JEV finds and clicks screen controls."
+            return "输入任务，JEV 会找到并点击屏幕上的控件。"
         case .gemini:
-            return "Talk naturally. Gemini can click, type, and guide you."
+            return "自然地说话，Gemini 可以点击、输入并引导你。"
         case .stepfun:
-            return "Talk naturally in Chinese. StepFun decides what to ask for."
+            return "用中文自然对话，由阶跃实时语音决定下一步该做什么。"
         }
     }
     var privacySummary: String {
         switch self {
         case .jev:
-            return "Your task and detected screen labels go to TypeSafe. Images stay on your Mac."
+            return "你的任务和检测到的屏幕文字会发送到 TypeSafe，图片只留在本机。"
         case .gemini:
-            return "Your voice and optional screenshots go to Google."
+            return "你的语音和可选的屏幕截图会发送到 Google。"
         case .stepfun:
-            return "Your voice goes to StepFun. Screen content is read on your Mac and only described in text."
+            return "你的语音会发送到阶跃星辰；屏幕内容在本机解析，只以文字描述后发出。"
         }
     }
 

@@ -9,7 +9,7 @@ struct ProviderSetupView: View {
             ProviderKeyCard(mode: companionManager.selectedMode,
                 onKeyChanged: companionManager.refreshProviderKeyStatus)
                 .id(companionManager.selectedMode)
-            Text("Your choice is saved. You can switch modes here any time.")
+            Text("你的选择已保存，之后可以随时在这里切换。")
                 .font(.system(size: 11))
                 .foregroundColor(DS.Colors.textTertiary)
         }
@@ -26,7 +26,7 @@ struct ModeSelectionView: View {
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: mode.systemImage).frame(width: 18)
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(mode.title + (mode == .jev ? " · Text" : " · Voice"))
+                            Text("\(mode.title) · \(mode.kindLabel)")
                                 .font(.system(size: 13, weight: .semibold))
                             Text(mode.summary).font(.system(size: 11))
                                 .foregroundColor(DS.Colors.textSecondary)
@@ -45,7 +45,7 @@ struct ModeSelectionView: View {
                 .buttonStyle(.plain)
                 .pointerCursor()
                 .disabled(companionManager.isTextCommandRunning)
-                .accessibilityLabel("Select \(mode.title)")
+                .accessibilityLabel("选择 \(mode.title)")
                 .accessibilityValue(companionManager.selectedMode == mode ? "Selected" : "Not selected")
             }
         }
@@ -55,7 +55,7 @@ struct ModeSelectionView: View {
 struct ProviderKeyCard: View {
     let mode: TipTourMode
     var onKeyChanged: () -> Void = {}
-    private var title: String { mode == .jev ? "JEV / TypeSafe key" : "\(mode.title) key" }
+    private var title: String { mode == .jev ? "JEV / TypeSafe 密钥" : "\(mode.title) 密钥" }
     private var detail: String { mode.privacySummary }
     private var keyName: String { mode.keyName }
     @State private var input = ""
@@ -67,7 +67,7 @@ struct ProviderKeyCard: View {
             HStack {
                 Text(title).font(.system(size: 14, weight: .semibold))
                 Spacer()
-                Text(hasSavedKey ? "Key saved" : "Key needed")
+                Text(hasSavedKey ? "密钥已保存" : "需要密钥")
                     .font(.system(size: 11))
                     .foregroundColor(hasSavedKey ? DS.Colors.success : DS.Colors.textTertiary)
             }
@@ -75,22 +75,22 @@ struct ProviderKeyCard: View {
                 .font(.system(size: 12))
                 .foregroundColor(DS.Colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            SecureField(hasSavedKey ? "Paste a replacement key" : "Paste your API key", text: $input)
+            SecureField(hasSavedKey ? "粘贴新的密钥以替换" : "粘贴你的 API 密钥", text: $input)
                 .textFieldStyle(.roundedBorder)
-                .accessibilityLabel("\(title) API key")
+                .accessibilityLabel("\(title) API 密钥")
                 .onSubmit { save() }
             HStack {
-                Button("Save key", action: save)
+                Button("保存密钥", action: save)
                     .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .pointerCursor()
-                Button("Remove key") {
+                Button("删除密钥") {
                     if KeychainStore.delete(forKey: keyName) {
                         hasSavedKey = false
                         input = ""
-                        status = "Removed"
+                        status = "已删除"
                         onKeyChanged()
                     } else {
-                        status = "Could not remove the key. Try again."
+                        status = "删除失败，请重试。"
                     }
                 }
                 .disabled(!hasSavedKey)
@@ -100,7 +100,7 @@ struct ProviderKeyCard: View {
             if !status.isEmpty {
                 Text(status).font(.system(size: 11)).foregroundColor(DS.Colors.textSecondary)
             }
-            Text("Stored securely in macOS Keychain.")
+            Text("安全存储在 macOS 钥匙串中。")
                 .font(.system(size: 10)).foregroundColor(DS.Colors.textTertiary)
         }
         .padding(12)
@@ -114,10 +114,10 @@ struct ProviderKeyCard: View {
         if KeychainStore.set(trimmed, forKey: keyName) {
             hasSavedKey = true
             input = ""
-            status = "Saved"
+            status = "已保存"
             onKeyChanged()
         } else {
-            status = "Could not save to Keychain. Try again."
+            status = "保存到钥匙串失败，请重试。"
         }
     }
 }

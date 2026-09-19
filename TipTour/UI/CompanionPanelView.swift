@@ -147,7 +147,7 @@ struct CompanionPanelView: View {
                 .font(.system(size: 11)).foregroundColor(DS.Colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             Button(action: companionManager.openSelectedMode) {
-                Text("\(companionManager.selectedMode.isVoiceMode ? (companionManager.voiceState == .idle ? "Start voice" : "Stop voice") : "Open JEV")  ·  \(companionManager.selectedMode.shortcut)")
+                Text("\(companionManager.selectedMode.isVoiceMode ? (companionManager.voiceState == .idle ? "开始语音" : "停止语音") : "打开 JEV")  ·  \(companionManager.selectedMode.shortcut)")
                     .font(.system(size: 12, weight: .semibold))
                     .frame(maxWidth: .infinity).padding(.vertical, 10)
             }
@@ -161,16 +161,16 @@ struct CompanionPanelView: View {
     private var onboardingSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 5) {
-                Text("SETUP · \(setupStep.rawValue) OF 3")
+                Text("设置 · 第 \(setupStep.rawValue) / 3 步")
                     .font(.system(size: 9, weight: .semibold)).foregroundColor(DS.Colors.textTertiary)
-                Text(setupStep == .mode ? "Choose how to work" : setupStep == .key ? "Connect \(companionManager.selectedMode.title)" : "Allow desktop access")
+                Text(setupStep == .mode ? "选择你的工作方式" : setupStep == .key ? "连接 \(companionManager.selectedMode.title)" : "允许桌面访问权限")
                     .font(.system(size: 16, weight: .semibold)).foregroundColor(DS.Colors.textPrimary)
             }
 
             switch setupStep {
             case .mode:
                 ModeSelectionView(companionManager: companionManager)
-                Text("JEV is selected by default. You can switch later in Settings.")
+                Text("默认选择 JEV，之后可在「设置」中切换。")
                     .font(.system(size: 11)).foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             case .key:
@@ -179,8 +179,8 @@ struct CompanionPanelView: View {
                     .id(companionManager.selectedMode)
             case .permissions:
                 Text(companionManager.selectedMode == .jev
-                    ? "JEV needs access to see screen controls and click them. No microphone needed."
-                    : "\\(companionManager.selectedMode.title) needs desktop access and your microphone for voice commands.")
+                    ? "JEV 需要「辅助功能」和「屏幕录制」权限来查看并点击屏幕控件，不需要麦克风。"
+                    : "\(companionManager.selectedMode.title) 需要桌面访问权限和麦克风，才能用语音操作电脑。")
                     .font(.system(size: 11)).foregroundColor(DS.Colors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 permissionsListSection
@@ -188,14 +188,14 @@ struct CompanionPanelView: View {
 
             HStack {
                 if setupStep != .mode {
-                    Button("Back") {
+                    Button("上一步") {
                         setupStep = setupStep == .permissions ? .key : .mode
                     }
                     .buttonStyle(.plain).pointerCursor()
                     .foregroundColor(DS.Colors.textSecondary)
                 }
                 Spacer()
-                Button(setupStep == .permissions ? "Start with \(companionManager.selectedMode.title)" : "Continue") {
+                Button(setupStep == .permissions ? "开始使用 \(companionManager.selectedMode.title)" : "继续") {
                     switch setupStep {
                     case .mode: setupStep = .key
                     case .key: setupStep = .permissions
@@ -324,7 +324,7 @@ struct CompanionPanelView: View {
 
     private var permissionsListSection: some View {
         VStack(spacing: 2) {
-            Text("PERMISSIONS")
+            Text("权限")
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
                 .foregroundColor(DS.Colors.textTertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -353,10 +353,10 @@ struct CompanionPanelView: View {
                     .padding(.top, 1)
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Accessibility")
+                    Text("辅助功能")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(DS.Colors.textSecondary)
-                    Text("So I can move the cursor and read what's on screen.")
+                    Text("这样我才能移动光标并读取屏幕上的内容。")
                         .font(.system(size: 10))
                         .foregroundColor(DS.Colors.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -376,7 +376,7 @@ struct CompanionPanelView: View {
                         WindowPositionManager.revealAppInFinder()
                         WindowPositionManager.openAccessibilitySettings()
                     }) {
-                        Text("Find App")
+                        Text("在访达中显示")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(DS.Colors.textSecondary)
                             .padding(.horizontal, 10)
@@ -404,7 +404,7 @@ struct CompanionPanelView: View {
                     .frame(width: 16)
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Screen Recording")
+                    Text("屏幕录制")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(DS.Colors.textSecondary)
                     Text(isGranted
@@ -439,10 +439,10 @@ struct CompanionPanelView: View {
                     .padding(.top, 1)
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Screen Content")
+                    Text("屏幕内容")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(DS.Colors.textSecondary)
-                    Text("Lets me read the screen continuously without picking a window each time.")
+                    Text("让我持续读取屏幕，无需每次手动选择窗口。")
                         .font(.system(size: 10))
                         .foregroundColor(DS.Colors.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -473,10 +473,10 @@ struct CompanionPanelView: View {
                     .padding(.top, 1)
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Microphone · voice only")
+                    Text("麦克风 · 仅语音模式")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(DS.Colors.textSecondary)
-                    Text("So you can hold ⌃⌥ and talk to me.")
+                    Text("这样你就能按住 ⌃⌥ 和我对话。")
                         .font(.system(size: 10))
                         .foregroundColor(DS.Colors.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -508,7 +508,7 @@ struct CompanionPanelView: View {
             Circle()
                 .fill(DS.Colors.success)
                 .frame(width: 6, height: 6)
-            Text("Granted")
+            Text("已授权")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(DS.Colors.success)
         }
@@ -516,7 +516,7 @@ struct CompanionPanelView: View {
 
     private func grantButton(action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text("Grant")
+            Text("授权")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(DS.Colors.textOnAccent)
                 .padding(.horizontal, 10)
@@ -534,12 +534,12 @@ struct CompanionPanelView: View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
 
-                footerIconButton("Settings", systemImage: "gearshape") {
+                footerIconButton("设置", systemImage: "gearshape") {
                     NotificationCenter.default.post(name: .tipTourOpenSettings, object: nil)
                     NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
                 }
 
-                footerIconButton("Logs", systemImage: "doc.text.magnifyingglass") {
+                footerIconButton("日志", systemImage: "doc.text.magnifyingglass") {
                     PipelineLogStore.shared.record(
                         category: "ui",
                         name: "open_logs_window",
@@ -552,7 +552,7 @@ struct CompanionPanelView: View {
 
                 Spacer()
 
-                footerIconButton("Quit", systemImage: "power") {
+                footerIconButton("退出", systemImage: "power") {
                     NSApp.terminate(nil)
                 }
             }
@@ -603,20 +603,20 @@ struct CompanionPanelView: View {
 
     private var statusText: String {
         if !isReady {
-            return "Setup"
+            return "设置"
         }
         if !companionManager.isOverlayVisible {
-            return "Ready"
+            return "就绪"
         }
         switch companionManager.voiceState {
         case .idle:
-            return "Active"
+            return "进行中"
         case .listening:
-            return "Listening"
+            return "聆听中"
         case .processing:
-            return "Processing"
+            return "处理中"
         case .responding:
-            return "Responding"
+            return "回应中"
         }
     }
 }

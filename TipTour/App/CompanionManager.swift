@@ -310,7 +310,7 @@ final class CompanionManager: ObservableObject {
             // Missing key vs unreadable keychain are different problems for the
             // user; both must be visible rather than a silent no-op.
             voiceState = .idle
-            lastTranscript = "Add your StepFun key in Settings → Models"
+            lastTranscript = "请在「设置 → 模型」中添加阶跃 API 密钥"
             return
         }
 
@@ -2620,7 +2620,7 @@ final class CompanionManager: ObservableObject {
         guard selectedMode.isVoiceMode, hasCompletedOnboarding else { return }
         guard voiceStartTask == nil else { return }
         guard !isTextCommandRunning else {
-            textCommandActivityText = "Stop JEV before starting voice"
+            textCommandActivityText = "开始语音前请先停止 JEV"
             return
         }
         if shouldRunNativeDetection {
@@ -2653,7 +2653,7 @@ final class CompanionManager: ObservableObject {
     func submitTextCommand(_ prompt: String) {
         guard !isTextCommandRunning, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         guard !(KeychainStore.jevAPIKey ?? "").isEmpty else {
-            textCommandActivityText = "Add your JEV key in Settings → Models"
+            textCommandActivityText = "请在「设置 → 模型」中添加 JEV 密钥"
             return
         }
         let runID = UUID()
