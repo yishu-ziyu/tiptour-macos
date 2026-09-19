@@ -258,8 +258,9 @@ struct StepProbe {
     private static func runRealtimeProbe(options: [String: [String]]) async throws {
         let apiKey = try EnvLoader.require("STEPFUN_API_KEY")
         let route = RealtimeRoute(rawValue: OptionParser.singleValue(options, "route") ?? "open") ?? .openPlatform
-        // Each route bills a different account and exposes a different model set,
-        // so the default model depends on the route.
+        // Realtime voice runs on the open-platform route only. The Step Plan
+        // channel restricts realtime models (no reliable tool calling, and a
+        // different model set), so it is kept for the vision models instead.
         let defaultModel = route == .stepPlan ? "stepaudio-2.5-realtime" : "stepaudio-3-realtime-preview"
 
         let configuration = RealtimeProbeConfiguration(

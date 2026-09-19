@@ -3,6 +3,24 @@
 所有结论均来自对 `yishu-ziyu` 账号的真实调用，密钥存放于 git-ignored 的 `.env`。
 复现方式见 `tools/stepprobe`。
 
+## 0. 已确定的模型分工（本文档的结论浓缩）
+
+| 角色 | 模型 | 通道 | 状态 |
+| --- | --- | --- | --- |
+| 嘴 + 耳 + 意图 | `stepaudio-3-realtime-preview` | **开放平台** `/v1/realtime` | ✅ 闭环已验证 |
+| 眼睛（语义消歧） | `step-3.7-flash` | Step Plan `/step_plan/v1` | ✅ 可用，禁用于坐标 |
+| 眼睛（备用） | `step-5-preview` | Step Plan `/step_plan/v1` | ✅ 可用但 12.4s |
+| 手（点击决策） | `jev-1.13.0` | `api.typesafe.ai/v1/systemone` | ✅ 中位 272ms |
+
+**实时语音不走 Step Plan**：该通道下的实时模型受限（实测 `stepaudio-2.5-realtime`
+在同一Prompt下不触发工具调用，只回复"好的，我这就帮你看看"），且模型集不同。
+眼睛模型走 Step Plan，因为有编程套餐额度。
+
+> 风险：`stepaudio-3-realtime-preview` 是限免预览版，官方说明到期后会下线并推出正式
+> 付费版。届时要么转开放平台付费版，要么回到 Step Plan 的 2.5 并解决其工具调用问题。
+> 模型名不要写死，需要留出迁移路径。
+
+
 ## 1. 账号可用性（Step Plan 通道 `/step_plan/v1`）
 
 | 模型 | 纯文本 | 图像输入 | 备注 |
