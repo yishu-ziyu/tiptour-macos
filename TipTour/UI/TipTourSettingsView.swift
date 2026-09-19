@@ -180,7 +180,7 @@ struct TipTourSettingsView: View {
 
     private var permissionsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if companionManager.selectedMode == .gemini {
+            if companionManager.selectedMode.isVoiceMode {
             permissionRow(
                 title: "Microphone",
                 subtitle: "Required for voice input.",

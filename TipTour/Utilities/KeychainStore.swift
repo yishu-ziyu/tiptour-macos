@@ -107,4 +107,11 @@ enum KeychainStore {
         set { set(newValue ?? "", forKey: "jevAPIKey") }
     }
 
+    /// StepFun API key for the realtime voice session. One key covers both the
+    /// realtime model and the vision model used for grounding.
+    static var stepfunAPIKey: String? {
+        get { get(forKey: "stepfunAPIKey") }
+        set { set(newValue ?? "", forKey: "stepfunAPIKey") }
+    }
+
 }

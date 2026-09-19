@@ -147,7 +147,7 @@ struct CompanionPanelView: View {
                 .font(.system(size: 11)).foregroundColor(DS.Colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             Button(action: companionManager.openSelectedMode) {
-                Text("\(companionManager.selectedMode == .jev ? "Open JEV" : (companionManager.voiceState == .idle ? "Start voice" : "Stop voice"))  ·  \(companionManager.selectedMode.shortcut)")
+                Text("\(companionManager.selectedMode.isVoiceMode ? (companionManager.voiceState == .idle ? "Start voice" : "Stop voice") : "Open JEV")  ·  \(companionManager.selectedMode.shortcut)")
                     .font(.system(size: 12, weight: .semibold))
                     .frame(maxWidth: .infinity).padding(.vertical, 10)
             }
@@ -180,7 +180,7 @@ struct CompanionPanelView: View {
             case .permissions:
                 Text(companionManager.selectedMode == .jev
                     ? "JEV needs access to see screen controls and click them. No microphone needed."
-                    : "Gemini needs desktop access and your microphone for voice commands.")
+                    : "\\(companionManager.selectedMode.title) needs desktop access and your microphone for voice commands.")
                     .font(.system(size: 11)).foregroundColor(DS.Colors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 permissionsListSection
@@ -243,7 +243,7 @@ struct CompanionPanelView: View {
                     companionManager.setAccurateGroundingEnabled(!companionManager.isAccurateGroundingEnabled)
                 }
 
-                if companionManager.selectedMode == .gemini {
+                if companionManager.selectedMode.isVoiceMode {
                 compactControlButton(
                     title: companionManager.isScreenshotStreamingEnabled ? "Screens" : "Private",
                     subtitle: companionManager.isScreenshotStreamingEnabled ? "remote" : "local",
@@ -330,7 +330,7 @@ struct CompanionPanelView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.bottom, 6)
 
-            if companionManager.selectedMode == .gemini { microphonePermissionRow }
+            if companionManager.selectedMode.isVoiceMode { microphonePermissionRow }
             accessibilityPermissionRow
             screenRecordingPermissionRow
 

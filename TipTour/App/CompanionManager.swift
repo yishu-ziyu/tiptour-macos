@@ -53,7 +53,7 @@ final class CompanionManager: ObservableObject {
         guard hasCompletedOnboarding, hasSelectedModeKey, hasSelectedModePermissions else { return }
         switch selectedMode {
         case .jev: presentTextCommandPanel()
-        case .gemini: startVoiceInputFromUserGesture(reason: "menu bar")
+        case .gemini, .stepfun: startVoiceInputFromUserGesture(reason: "menu bar")
         }
     }
 
@@ -1524,8 +1524,8 @@ final class CompanionManager: ObservableObject {
             presentTransientOverlayHint("Finish setup from the TipTour menu bar icon.")
             return
         }
-        guard selectedMode == .gemini else {
-            presentTransientOverlayHint("JEV is selected. Press Ctrl+K to type, or choose Gemini in Settings.")
+        guard selectedMode.isVoiceMode else {
+            presentTransientOverlayHint("JEV is selected. Press Ctrl+K to type, or choose a voice mode in Settings.")
             return
         }
         guard !isTextCommandRunning else { return }
@@ -2495,7 +2495,7 @@ final class CompanionManager: ObservableObject {
     /// path: by the time the first CUA plan arrives,
     /// resolution returns in ~10-30ms instead of 100-400ms.
     func startVoiceSession() {
-        guard selectedMode == .gemini, hasCompletedOnboarding else { return }
+        guard selectedMode.isVoiceMode, hasCompletedOnboarding else { return }
         guard voiceStartTask == nil else { return }
         guard !isTextCommandRunning else {
             textCommandActivityText = "Stop JEV before starting voice"

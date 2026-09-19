@@ -42,15 +42,42 @@ absent.
 
 ## Build
 
-Open `tiptour-macos.xcodeproj` in Xcode and run the `TipTour` scheme. Swift
-package dependencies are pinned in
+Open `tiptour-macos.xcodeproj` in Xcode and run the `tiptour-macos`
+scheme (the README calls it `TipTour`, which is wrong). Swift package
+dependencies are pinned in
 `tiptour-macos.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`
 and are already resolved in `~/Library/Developer/Xcode/DerivedData/tiptour-macos-*`.
 
-Do not build or archive from the terminal once the app has been run locally: it
+**Do not build or archive from the terminal once the app has been run locally**: it
 replaces the signed bundle and macOS will re-request every permission. Use
 `scripts/test-jev.sh` for isolated JEV decision tests, which compiles only the
 `JevCore` sources into a temporary SwiftPM package.
+
+### Signing settings that matter
+
+| Setting | Value |
+| --- | --- |
+| `CODE_SIGN_STYLE` | `Manual` |
+| `CODE_SIGN_IDENTITY` | `Shangqiuko Local Code Signing` |
+| `DEVELOPMENT_TEAM` | key removed |
+
+Two non-obvious rules, both learned from a failed build:
+
+- **Remove `DEVELOPMENT_TEAM`; do not set it to an empty string.** An explicitly
+  empty team makes Xcode demand a team for every target that inherits it,
+  including the SPM package products (`PostHog`, `PLCrashReporter`), which then
+  fail with "Signing requires a development team".
+- **Do not pass `CODE_SIGN_IDENTITY` on the `xcodebuild` command line.** It
+  overrides the setting for every target, packages included, and produces the
+  same failure. The project file already targets only the app and test targets;
+  package targets fall back to local ad-hoc signing on their own.
+
+### The one safe terminal build
+
+Exactly one terminal build has been run, to validate this fork's configuration.
+It was safe because no `TipTour.app` had ever been installed on this machine, so
+there were no Accessibility / Screen Recording grants to invalidate. From now on,
+builds happen in Xcode.
 
 ## Repository remotes
 

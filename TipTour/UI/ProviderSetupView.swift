@@ -26,7 +26,7 @@ struct ModeSelectionView: View {
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: mode.systemImage).frame(width: 18)
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(mode == .jev ? "JEV · Text" : "Gemini · Voice")
+                            Text(mode.title + (mode == .jev ? " · Text" : " · Voice"))
                                 .font(.system(size: 13, weight: .semibold))
                             Text(mode.summary).font(.system(size: 11))
                                 .foregroundColor(DS.Colors.textSecondary)
@@ -55,7 +55,7 @@ struct ModeSelectionView: View {
 struct ProviderKeyCard: View {
     let mode: TipTourMode
     var onKeyChanged: () -> Void = {}
-    private var title: String { mode == .jev ? "JEV / TypeSafe key" : "Gemini key" }
+    private var title: String { mode == .jev ? "JEV / TypeSafe key" : "\(mode.title) key" }
     private var detail: String { mode.privacySummary }
     private var keyName: String { mode.keyName }
     @State private var input = ""
