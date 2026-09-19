@@ -341,7 +341,12 @@ final class CompanionManager: ObservableObject {
         stepfunStateCancellables.removeAll()
         let state = session.state
 
+        // `@Published` emits its current value the moment a sink attaches, so
+        // both of these drop the first emission. Without that, subscribing while
+        // the session is still starting overwrites `.processing` with `.listening`
+        // or `.idle` before anything has actually happened.
         state.$isModelSpeaking
+            .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isSpeaking in
                 guard let self, self.stepfunSession != nil else { return }
@@ -350,6 +355,7 @@ final class CompanionManager: ObservableObject {
             .store(in: &stepfunStateCancellables)
 
         state.$isSessionActive
+            .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isActive in
                 guard let self, !isActive, self.stepfunSession != nil else { return }

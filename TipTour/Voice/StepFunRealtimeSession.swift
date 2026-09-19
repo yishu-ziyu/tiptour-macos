@@ -135,6 +135,7 @@ final class StepFunRealtimeSession {
     /// an action the user has just verbally countermanded. Whatever was already
     /// executed cannot be undone, which is why actions are single-step.
     private func beginBargeIn() {
+        setModelSpeaking(false)
         audioPlayer.clearQueuedAudio()
         client.cancelCurrentResponse()
         if let pendingToolWork {
@@ -170,8 +171,22 @@ final class StepFunRealtimeSession {
 
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
             guard let self else { return }
+
+            // CRITICAL: drop mic audio while the model is speaking. macOS does no
+            // echo cancellation on AVAudioEngine, so the speaker output re-enters
+            // the microphone and the server's VAD hears it as the user talking.
+            // That fires input_audio_buffer.speech_started, which triggers
+            // barge-in and cancels the model's own reply — forever. The result is
+            // an assistant that can never finish a sentence, with every other
+            // part of the loop working perfectly. The session this replaces
+            // carries the same guard for exactly this reason.
+            //
+            // Read on the real-time audio thread, so it must be a lock and not
+            // an actor hop: hopping to the main actor from here starves Core
+            // Audio and stutters playback.
+            guard !self.isModelCurrentlySpeaking() else { return }
+
             // Converted on the audio thread and handed straight to the socket.
-            // Hopping to the main actor here would stall the tap.
             guard let pcm16Data = self.pcm16Converter.convertToPCM16Data(from: buffer) else { return }
             self.client.sendAudioChunk(pcm16Data)
         }
@@ -211,9 +226,8 @@ final class StepFunRealtimeSession {
 
         case .audioChunk(let pcm16Data):
             audioPlayer.enqueueAudioChunk(pcm16Data)
-            if !state.isModelSpeaking {
-                state.isModelSpeaking = true
-            }
+            setModelSpeaking(true)
+            state.isModelSpeaking = true
 
         case .inputTranscript(let text):
             state.lastInputTranscript += text
@@ -238,6 +252,7 @@ final class StepFunRealtimeSession {
             self.pendingCallID = callID
 
         case .turnComplete:
+            setModelSpeaking(false)
             state.isModelSpeaking = false
             // The speech is over. Now it is safe to report the result.
             guard let pendingToolWork else { return }
@@ -267,6 +282,21 @@ final class StepFunRealtimeSession {
 
     private var pendingCallID: String?
 
+    /// Set while the model's voice is being played, read from the audio tap.
+    ///
+    /// A plain lock rather than actor-isolated state because the tap runs on a
+    /// real-time thread: reaching the main actor from there would stall it.
+    private let modelSpeakingLock = NSLock()
+    private var modelSpeakingFlag = false
+
+    func isModelCurrentlySpeaking() -> Bool {
+        modelSpeakingLock.withLock { modelSpeakingFlag }
+    }
+
+    private func setModelSpeaking(_ isSpeaking: Bool) {
+        modelSpeakingLock.withLock { modelSpeakingFlag = isSpeaking }
+    }
+
     /// Stops the session before the server's own 30-minute cap fires.
     ///
     /// Deliberately not a reconnect. A fresh socket loses the conversation
@@ -276,4 +306,14 @@ final class StepFunRealtimeSession {
     /// happens next.
     private var sessionLifetimeTask: Task<Void, Never>?
     private static let sessionLifetimeStopAfter: TimeInterval = 29 * 60
+}
+
+// MARK: - Locking helper
+
+extension NSLock {
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock()
+        defer { unlock() }
+        return try body()
+    }
 }

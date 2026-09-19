@@ -121,6 +121,12 @@ final class StepFunRealtimeClient {
     /// rather than silently ignored by the server.
     private var isReadyForInput = false
 
+    /// Set when the server rejects the session or the configuration cannot be
+    /// sent. Without it, connect() keeps polling for a `session.updated` that is
+    /// never coming and fails 15 seconds later with "no session.created" — a
+    /// misleading message that sends you looking in the wrong place entirely.
+    private var handshakeError: Error?
+
     /// Incremented every time a connection starts or ends. The receive loop
     /// captures the value it began with and drops any event that arrives under a
     /// later generation.
@@ -195,9 +201,13 @@ final class StepFunRealtimeClient {
         // into a socket that is still handshaking.
         let createdDeadline = Date().addingTimeInterval(15)
         while !isReadyForInput {
+            if let handshakeError = stateLock.withLock({ handshakeError }) {
+                disconnect()
+                throw handshakeError
+            }
             if Date() > createdDeadline {
                 disconnect()
-                throw connectionError("No session.created within 15s")
+                throw connectionError("No session.updated within 15s. The socket opened but the server never accepted the configuration — check the model name, the voice, and whether the account has access to it.")
             }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
@@ -322,7 +332,13 @@ final class StepFunRealtimeClient {
         }
 
         Task {
-            try? await self.sendJSON(["type": "session.update", "session": session])
+            do {
+                try await self.sendJSON(["type": "session.update", "session": session])
+            } catch {
+                // Swallowing this leaves the server permanently unconfigured and
+                // the caller waiting for an event that can never arrive.
+                self.stateLock.withLock { self.handshakeError = error }
+            }
         }
     }
 
@@ -339,7 +355,10 @@ final class StepFunRealtimeClient {
     }
 
     private func startReceiveLoop() {
-        stateLock.withLock { sessionGeneration += 1 }
+        stateLock.withLock {
+            sessionGeneration += 1
+            handshakeError = nil
+        }
         let generation = stateLock.withLock { sessionGeneration }
 
         let task = Task.detached { [weak self] in
@@ -423,6 +442,11 @@ final class StepFunRealtimeClient {
         case "error":
             let error = payload["error"] as? [String: Any]
             let message = (error?["message"] as? String) ?? "unknown realtime error"
+            // Only fatal while configuring. Once the session is up an error is
+            // recoverable and the socket stays open.
+            stateLock.withLock {
+                if !isSessionConfigured { handshakeError = StepFunRealtimeError.serverReported(message) }
+            }
             await emit(.error(StepFunRealtimeError.serverReported(message)))
 
         default:
