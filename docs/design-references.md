@@ -42,3 +42,19 @@
 `apple-design` 里三条对语音交互尤其重要：**可中断性是第一原则**（用户说话时必须能
 立即反转当前状态，不能等动画播完）；**反馈分四类**（status / completion / warning /
 error）；**响应要发生在按下瞬间，而不是抬起**。
+
+## ui-skills 注册表
+
+`npx ui-skills categories` 浏览分类，`npx ui-skills list --category <c>` 列举，
+`npx ui-skills get <slug>` 取内容。选型规则：优先 1 个，最多 3 个；按主题 → 技术栈 → 具体度路由。
+
+与 TipTour 相关的几条：
+
+| slug | 分类 | 用途 |
+| --- | --- | --- |
+| `dimillian/swiftui-ui-patterns` | swiftui | **本仓库唯一 SwiftUI skill**。核心结论是「跟随本地约定」——本仓库已确立 `ObservableObject` + `@Published`，不要为单个新视图改用 `@Observable` |
+| `emilkowalski/animate` | motion | 从零做动效时的决策顺序：该不该动、为什么、用什么工具、如何中断、如何退出 |
+| `jakubkrehel/better-ui` | visual | 组件打磨：hover、阴影、圆角、光学对齐、微交互 |
+| `emilkowalski/apple-design` | motion | 与本地 `apple-design` skill 同源，含可中断转换与材质 |
+
+注意 ui-skills 大部分内容是 Web/CSS 向的，取原则而非照搬实现。
