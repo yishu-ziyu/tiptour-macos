@@ -50,7 +50,7 @@ See `docs/source-layout.md` for the remaining directory responsibilities.
 
 ## Build and verification
 
-Open `tiptour-macos.xcodeproj`, select TipTour, set the signing team, and build/run in Xcode.
+Open `tiptour-macos.xcodeproj`, select TipTour, build/run in Xcode. This fork is set up for local machine signing; see `docs/local-development.md` for the signing identity, bundle identifier, Sparkle feed and remote conventions used here.
 
 **Do NOT run `xcodebuild` from the terminal** — it invalidates TCC permissions and the app will need to re-request screen recording/accessibility access. Pure Swift parsing/typechecking and isolated tests are permitted without replacing or launching the installed app. Run `scripts/test-jev.sh` for the JEV decision suite.
 
