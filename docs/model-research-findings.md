@@ -98,13 +98,75 @@
 Jev 相对本地规则：参数错 5→0、误接受 2→0，代价是 11/13 需要正向兜底。
 **「不会编造」是真的，Jev 选择宁可回退。**
 
-## 7. 待验证
+## 7. Realtime WebSocket 实测（已补齐）
 
-- [ ] `stepaudio-3-realtime-preview`（开放平台通道）与 `stepaudio-2.5-realtime`（Step Plan 通道）的
-      实际延迟与音质差异
-- [ ] Realtime 的 function call 事件流：文档自相矛盾（`response.output_item.added` 说 item 仅支持
-      `message`，function call 示例却是 `type:"function_call"`）
-- [ ] 24kHz mono pcm16 输入假设（官方 demo 写 24000，正文未说明）
-- [ ] Jev 在**中文**候选控件集上的准确率 vs 英文
+用本地 `say` 合成真实语音、转 24kHz PCM16 后流式推入，无需麦克风权限。
+生成器与用法见 `tools/stepprobe`。
+
+### 三个必须知道的坑
+
+1. **`turn_detection` 省略 ≠ 关闭**。VAD 默认开启，关闭必须显式传
+   `turn_detection: null`。早期探针漏了这一点，结果音频被正常接收和转写，
+   但永远不产生响应——因为没人提交缓冲区。
+2. **手动模式下必须 `input_audio_buffer.commit` + `response.create`**，
+   否则同样只有转写、没有回复。
+3. **本地合成音频结尾太“干净”**。`say` 输出的语音戛然而止，服务端 VAD 等不到
+   静音帧就不判结束，`speech_stopped` 永不到来。必须补 800ms 尾部静音。
+   （这也意味着真机采集时必须保留说话后的静音段。）
+
+### 事件顺序（这是文档矛盾点的答案）
+
+实测 `stepaudio-3-realtime-preview`，语音输入后：
+
+```
+input_audio_buffer.speech_started
+conversation.item.input_audio_transcription.delta   ← 流式 ASR
+input_audio_buffer.committed / response.created
+response.audio_transcript.delta ×15                 ← 先说话
+response.output_item.added
+conversation.item.created
+response.function_call_arguments.delta ×2           ← 后发起工具调用
+response.function_call_arguments.done
+response.audio.delta ×28 / response.done
+```
+
+**模型先说话、后调用工具，两者在同一轮。** 文档“注意要在语音播放完后才调用
+`response.create`”的警告得到证实。产品侧含义：`function_call_output` 必须等
+本轮 `response.done` 之后（或至少语音播完）再回传，否则续轮会打断当前发言。
+
+function call 通过 `response.output_item.added` + `conversation.item.created` +
+`response.function_call_arguments.delta/.done` 返回，**不是**文档里
+`response.output_item.added` 声称的“仅支持 `message`”。文档该处已过时。
+
+### 闭环已验证
+
+回传 `conversation.item.create`（`function_call_output`）+ `response.create` 后，
+模型第二轮准确复述了工具结果（“我看到您的屏幕上现在显示的是访达（Finder）窗口，
+左侧是边栏…”）。**语音→工具调用→本地执行→结果回传→语音播报 全链路成立。**
+
+### 两条通道的实测差异
+
+| 通道 / 模型 | 首音频 | 首转写 | 音频量 | 工具调用 |
+| --- | --- | --- | --- | --- |
+| 开放平台 `stepaudio-3-realtime-preview` | 7359 ms | 6901 ms | 107 delta / 771 KB | **1 次** |
+| Step Plan `stepaudio-2.5-realtime` | 7214 ms | 6641 ms | 12 delta / 92 KB | **0 次** |
+
+延迟相当，但**3.0-preview 会在语音轮内主动调用工具，2.5 不会**（只回答
+“好的，我这就帮你看看”）。对桌面控制场景，工具调用的可靠性比延迟更关键，
+这直接影响模型选型：`stepaudio-2.5-realtime` 虽然能用套餐额度，但需要验证它
+在更明确的指令下是否可靠触发工具。
+
+端到端延迟预算（一次完整交互）：说话结束 → commit → 首音频 ≈ 2.4s；
+若含一轮工具调用续轮，总计 ≈ 4.6s。这还没有叠加本地感知与 Jev 的 272ms。
+
+## 8. 待验证
+
+- [ ] `stepaudio-2.5-realtime` 在更强指令下能否可靠触发工具调用（若不能，
+      实时语音需走开放平台的 3.0-preview，即不能花套餐额度）
+- [ ] 打断（barge-in）：`input_audio_buffer.speech_started` 期间清空播放缓冲是否即时
+- [ ] 服务端 VAD 模式下的话轮关闭与尾部静音阈值调优
+- [ ] Jev 在**中文**候选控件集上的准确率 vs 英文（简单场景已验证中英文均
+      confidence 1.0，但需要更难、更大的用例集）
 - [ ] state 增大（10/50/200 个候选控件）时 Jev confidence 的退化曲线
 - [ ] 「编号语义消歧」方案的实际准确率（替代 VLM 直接给坐标）
+- [ ] 单会话 30 分钟上限的重连策略

@@ -33,6 +33,8 @@ struct StepProbe {
                 vision   measure coordinate accuracy and latency for a screenshot
                 jev      measure Jev latency, cost and confidence on English vs
                          Chinese candidate lists
+                realtime  exercise the StepFun Realtime WebSocket: session setup,
+                         streamed speech, tool calling, time to first audio
 
               credentials are read from the repository root .env (see .env.example)
               """).errorDescription ?? "")
@@ -49,6 +51,8 @@ struct StepProbe {
                 try await runVisionProbe(options: options)
             case "jev":
                 try await runJevProbe(options: options)
+            case "realtime":
+                try await runRealtimeProbe(options: options)
             default:
                 throw ProbeError.usage("Unknown command `\(command)`. Run `swift run stepprobe` for help.")
             }
@@ -249,6 +253,56 @@ struct StepProbe {
         """)
     }
 
+    // MARK: realtime
+
+    private static func runRealtimeProbe(options: [String: [String]]) async throws {
+        let apiKey = try EnvLoader.require("STEPFUN_API_KEY")
+        let route = RealtimeRoute(rawValue: OptionParser.singleValue(options, "route") ?? "open") ?? .openPlatform
+        // Each route bills a different account and exposes a different model set,
+        // so the default model depends on the route.
+        let defaultModel = route == .stepPlan ? "stepaudio-2.5-realtime" : "stepaudio-3-realtime-preview"
+
+        let configuration = RealtimeProbeConfiguration(
+            route: route,
+            model: OptionParser.singleValue(options, "model") ?? defaultModel,
+            voice: OptionParser.singleValue(options, "voice") ?? "qingchunshaonv",
+            instructions: OptionParser.singleValue(options, "instructions")
+                ?? "你是用户的桌面助手。用简短的中文口语回答。如果用户要求操作电脑，调用 report_screen_summary 工具。",
+            spokenText: OptionParser.singleValue(options, "speak")
+                ?? "你好，请帮我看看现在屏幕上有什么，然后告诉我。",
+            chunkMilliseconds: Int(OptionParser.singleValue(options, "chunk-ms") ?? "") ?? 20,
+            secondsToListenAfterStreaming: Double(OptionParser.singleValue(options, "listen") ?? "") ?? 20,
+            declaresTool: !OptionParser.isFlagSet(options, "no-tool"),
+            serverVAD: !OptionParser.isFlagSet(options, "no-vad")
+        )
+
+        print("""
+
+          == realtime probe: \(configuration.model) via \(route == .stepPlan ? "Step Plan" : "open platform") ==
+            \(route.webSocketBaseURL)?model=\(configuration.model)
+
+        """)
+
+        let result = try await RealtimeProbe(apiKey: apiKey).run(configuration)
+
+        print("""
+
+          == summary ==
+            spoken input        \(String(format: "%.2f", result.spokenDurationSeconds))s
+            first audio delta   \(result.firstAudioMilliseconds.map { "\($0) ms" } ?? "never")
+            first transcript    \(result.firstTranscriptMilliseconds.map { "\($0) ms" } ?? "never")
+            audio deltas        \(result.audioDeltaCount) (\(result.audioBytesReceived) bytes)
+            function calls      \(result.functionCallArguments.count)
+            transcript          \(result.assistantTranscript.isEmpty ? "(empty)" : result.assistantTranscript)
+
+        """)
+        for call in result.functionCallArguments {
+            print("    tool call  \(call.name)  call_id=\(call.callID)")
+            print("    arguments  \(call.arguments)")
+        }
+        print("    full event timeline: \(result.events.count) events")
+    }
+
     private static func prettyJSON(_ object: Any) -> String {
         guard JSONSerialization.isValidJSONObject(object),
               let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
@@ -291,6 +345,13 @@ struct OptionParser {
     static func singleValue(_ options: [String: [String]], _ key: String) -> String? {
         guard let values = options[key], let first = values.first, !first.isEmpty else { return nil }
         return first
+    }
+
+    /// True when a flag was present without a value, e.g. `--no-vad`. Note that
+    /// `singleValue` cannot be used for these: a valueless flag stores an empty
+    /// string, which `singleValue` reports as absent.
+    static func isFlagSet(_ options: [String: [String]], _ key: String) -> Bool {
+        options[key] != nil
     }
 }
 

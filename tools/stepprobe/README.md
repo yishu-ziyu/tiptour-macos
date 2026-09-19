@@ -60,6 +60,38 @@ Two failure modes this command exists to catch — see
   these models is not reliable, which is why the product asks the vision model to
   *pick among locally detected candidate regions* rather than to emit coordinates.
 
+### `realtime` — does the voice loop actually close?
+
+```bash
+# open platform route, the free preview model
+swift run --package-path tools/stepprobe stepprobe realtime --route open --model stepaudio-3-realtime-preview
+
+# Step Plan route (bills the subscription)
+swift run --package-path tools/stepprobe stepprobe realtime --route plan --model stepaudio-2.5-realtime
+
+# text-only, custom question, manual turn control
+swift run --package-path tools/stepprobe stepprobe realtime --speak "帮我打开 Safari" --listen 25
+```
+
+Renders the question locally with `say`, converts it to 24 kHz mono PCM16, streams it in
+20 ms pieces, declares one `function` tool, then closes the loop by returning a stubbed
+tool result and requesting a follow-up. Prints the timestamped event timeline plus
+time-to-first-audio, time-to-first-transcript, and any function calls.
+
+Options: `--route open|plan`, `--model`, `--voice`, `--instructions`, `--speak`,
+`--chunk-ms`, `--listen`, `--no-tool`, `--no-vad`.
+
+Three traps this command exists to catch, all hit during development:
+
+- Omitting `turn_detection` does **not** disable VAD — it is on by default and must be
+  set to `null` explicitly. Without either VAD or a manual commit, audio is accepted and
+  transcribed but never produces a response.
+- Locally rendered speech ends abruptly, so server VAD never sees the silence it needs to
+  close the turn. The synthesizer appends 800 ms of trailing silence. Real microphone
+  capture has the same requirement — keep the silence after the user stops talking.
+- The model **speaks first and calls the tool afterwards**, in the same turn. Sending
+  `function_call_output` before the speech finishes interrupts it.
+
 ### `jev` — is the hand reliable in Chinese?
 
 ```bash
