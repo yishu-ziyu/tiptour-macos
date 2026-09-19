@@ -15,3 +15,7 @@ releases/
 # Local profiling and JEV experiments
 *.profraw
 harnesses/jev-loop/*.jsonl
+
+# Local secrets for development probes — never commit
+.env
+.env.local
