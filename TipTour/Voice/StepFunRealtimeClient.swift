@@ -121,6 +121,16 @@ final class StepFunRealtimeClient {
     /// rather than silently ignored by the server.
     private var isReadyForInput = false
 
+    /// Incremented every time a connection starts or ends. The receive loop
+    /// captures the value it began with and drops any event that arrives under a
+    /// later generation.
+    ///
+    /// Without this, a socket that is closed mid-stream still delivers whatever
+    /// the server had already sent — audio chunks, a transcript, a tool call —
+    /// after the app has moved on. Those late events act on a screen the user has
+    /// since left, which is indistinguishable from a click in the wrong place.
+    private var sessionGeneration = 0
+
     private var sessionStartedAt: Date?
 
     init(
@@ -203,6 +213,9 @@ final class StepFunRealtimeClient {
             isReadyForInput = false
             wasIntentionallyDisconnected = true
             sessionStartedAt = nil
+            // Retire the generation so anything still in flight from this socket
+            // is discarded rather than delivered after teardown.
+            sessionGeneration += 1
             return taken
         }
         capturedReceiveTask?.cancel()
@@ -326,6 +339,9 @@ final class StepFunRealtimeClient {
     }
 
     private func startReceiveLoop() {
+        stateLock.withLock { sessionGeneration += 1 }
+        let generation = stateLock.withLock { sessionGeneration }
+
         let task = Task.detached { [weak self] in
             guard let self else { return }
             let webSocketTask = self.stateLock.withLock { self.webSocketTask }
@@ -343,6 +359,11 @@ final class StepFunRealtimeClient {
                     }
                     return
                 }
+
+                // Anything from an earlier generation is stale by definition: the
+                // session it belonged to has already been torn down.
+                let currentGeneration = self.stateLock.withLock { self.sessionGeneration }
+                guard generation == currentGeneration else { return }
 
                 guard case .string(let text) = message,
                       let data = text.data(using: .utf8),

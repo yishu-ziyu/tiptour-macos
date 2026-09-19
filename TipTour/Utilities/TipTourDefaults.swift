@@ -22,6 +22,26 @@ enum TipTourDefaults {
         case hasPreviouslyConfirmedScreenRecordingPermission = "com.learningbuddy.hasPreviouslyConfirmedScreenRecordingPermission"
     }
 
+    /// Provider wiring that is a deployment choice rather than a user preference.
+    ///
+    /// Kept here so a model going offline or gaining a paid successor is a one-line
+    /// change instead of a hunt through the voice layer. `stepaudio-3-realtime-preview`
+    /// is a limited-time free preview that StepFun has said will be retired in favour
+    /// of a paid version, so the name must never be written inline.
+    enum StepFunConfiguration {
+        /// Realtime voice. Runs on the open-platform route: the Step Plan channel
+        /// restricts its realtime models, and its `stepaudio-2.5-realtime` did not
+        /// call tools at all under the same prompt.
+        static let realtimeModel = "stepaudio-3-realtime-preview"
+
+        /// Vision. Runs on the Step Plan route, where the coding subscription's
+        /// credits apply.
+        static let visionModel = "step-3.7-flash"
+
+        /// Must be one of StepFun's published voices; the session rejects an empty one.
+        static let realtimeVoice = "qingchunshaonv"
+    }
+
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
             "NSInitialToolTipDelay": 0,

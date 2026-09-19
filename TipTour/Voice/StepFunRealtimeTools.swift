@@ -94,7 +94,7 @@ enum StepFunRealtimeToolDeclarations {
 /// Carries only what the model may see. Coordinates live in the resolved target
 /// and are never put in this structure, so there is no path by which a
 /// hallucinated number becomes a hallucinated point.
-struct StepFunScreenControlEntry {
+struct StepFunScreenControlEntry: Equatable {
     let index: Int
     let label: String
     let kind: String
@@ -108,7 +108,11 @@ struct StepFunScreenControlEntry {
 /// against whatever happens to be on screen now, because "control 3" after the
 /// screen changed is a guess, and a guess that clicks is the worst outcome
 /// available.
-@MainActor
+/// No actor annotation on purpose: this is plain data, and the decision
+/// function below has to be callable from wherever a tool call arrives. In the app
+/// target the project-wide default isolation makes both MainActor-isolated anyway;
+/// in the isolated test package both are nonisolated. Either way they stay
+/// consistent with each other, which is what matters.
 final class StepFunScreenDescription {
     private(set) var entries: [StepFunScreenControlEntry]
     private(set) var activeAppName: String?
@@ -119,10 +123,14 @@ final class StepFunScreenDescription {
     /// conversation pause cannot act on a screen the user has since left.
     static let validitySeconds: TimeInterval = 20
 
-    init(entries: [StepFunScreenControlEntry], activeAppName: String?) {
+    init(
+        entries: [StepFunScreenControlEntry],
+        activeAppName: String?,
+        capturedAt: Date = Date()
+    ) {
         self.entries = entries
         self.activeAppName = activeAppName
-        self.capturedAt = Date()
+        self.capturedAt = capturedAt
     }
 
     var isExpired: Bool {
@@ -145,4 +153,39 @@ final class StepFunScreenDescription {
         let header = activeAppName.map { "Active app: \($0)" } ?? "Active app: unknown"
         return ([header] + lines).joined(separator: "\n")
     }
+}
+
+/// Why an `act_on_screen` call was refused, or that it may proceed.
+///
+/// Pure data in, decision out — no engine, no network, no clock beyond the one the
+/// caller passes. That is what makes the refusal behaviour verifiable in a test
+/// instead of being argued about in review: every way a voice model can ask for
+/// the wrong click ends up as one of these cases.
+enum StepFunActionResolution: Equatable {
+    /// The number names exactly one control in a live description.
+    case proceed(StepFunScreenControlEntry)
+    /// No usable description at all — expired, or none was ever taken.
+    case staleDescription
+    /// The number is not in the current list.
+    case unknownIndex(availableIndices: [Int])
+    /// The named control exists more than once, so "that one" is not a target.
+    case ambiguousLabel(label: String, occurrences: Int)
+}
+
+/// Decides whether a numbered request may become a click.
+///
+/// Separated from the router so the rules can be exercised without a live desktop.
+func resolveStepFunAction(
+    description: StepFunScreenDescription?,
+    requestedIndex: Int
+) -> StepFunActionResolution {
+    guard let description, !description.isExpired else { return .staleDescription }
+    guard let entry = description.entry(forIndex: requestedIndex) else {
+        return .unknownIndex(availableIndices: description.entries.map(\.index))
+    }
+    let occurrences = description.entries.filter { $0.label == entry.label }.count
+    if occurrences > 1 {
+        return .ambiguousLabel(label: entry.label, occurrences: occurrences)
+    }
+    return .proceed(entry)
 }

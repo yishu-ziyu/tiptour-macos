@@ -35,6 +35,11 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
         self.engine = engine
     }
 
+    /// True while one `act_on_screen` is running. A voice model that repeats a
+    /// call — or issues a second one before the first has landed — would
+    /// otherwise produce two clicks from one spoken request.
+    private var isActionInFlight = false
+
     func handleToolCall(name: String, argumentsJSON: String) async throws -> String {
         switch name {
         case "describe_screen":
@@ -148,33 +153,49 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
         guard let index = integerArgument("index", in: argumentsJSON) else {
             return "Missing or unreadable index. Pass the number from describe_screen."
         }
-        guard let entry = description.entry(forIndex: index) else {
-            let available = description.entries.map { String($0.index) }.joined(separator: ", ")
+        guard !isActionInFlight else {
+            return "另一个操作正在进行中，请等它完成。"
+        }
+
+        switch resolveStepFunAction(description: description, requestedIndex: index) {
+        case .staleDescription:
+            return "屏幕描述已过期，请重新调用 describe_screen。"
+
+        case .unknownIndex(let available):
+            let list = available.map(String.init).joined(separator: ", ")
             return """
-                Control \(index) is not in the current list (available: \(available)). \
-                Call describe_screen again.
+                编号 \(index) 不在当前列表中（可用：\(list)）。请重新调用 describe_screen。
                 """
+
+        case .ambiguousLabel(let label, let occurrences):
+            return """
+                屏幕上有 \(occurrences) 个名为「\(label)」的控件，无法确定要点哪一个。
+                请让用户说明具体位置或更完整的名称。
+                """
+
+        case .proceed(let entry):
+            // Consumed the moment it is used: whatever happens next, the numbering
+            // on screen is about to change, and acting twice on one description is
+            // a bug.
+            currentDescription = nil
+            isActionInFlight = true
+            defer { isActionInFlight = false }
+
+            let labelForTask = entry.label.isEmpty ? "unlabelled control" : entry.label
+
+            // One step per spoken request. The text-command path is allowed a long
+            // bounded loop because the user is watching a panel; over voice, each
+            // extra step is another turn of the user waiting without knowing why.
+            let loop = JevPointerLoop(engine: engine) { snapshot in
+                // Progress is reported through the session's own channel; the loop
+                // itself must not know a voice conversation exists.
+                print("[StepFunRealtimeTools] jev step \(snapshot.step): \(snapshot.note)")
+            }
+            let outcome = await loop.run(task: labelForTask, app: description.activeAppName, maxSteps: 1)
+
+            let prefix = outcome.ok ? "Done." : "Could not do it."
+            return "\(prefix) \(outcome.message)"
         }
-
-        // Consumed the moment it is used: whatever happens next, the numbering on
-        // screen is about to change, and acting twice on one description is a bug.
-        currentDescription = nil
-
-        let labelForTask = entry.label.isEmpty ? "unlabelled control" : entry.label
-        let appName = description.activeAppName
-
-        // One step per spoken request. The text-command path is allowed a long
-        // bounded loop because the user is watching a panel; over voice, each
-        // extra step is another turn of the user waiting without knowing why.
-        let loop = JevPointerLoop(engine: engine) { snapshot in
-            // Progress is reported through the session's own channel; the loop
-            // itself must not know a voice conversation exists.
-            print("[StepFunRealtimeTools] jev step \(snapshot.step): \(snapshot.note)")
-        }
-        let outcome = await loop.run(task: labelForTask, app: appName, maxSteps: 1)
-
-        let prefix = outcome.ok ? "Done." : "Could not do it."
-        return "\(prefix) \(outcome.message)"
     }
 
     // MARK: - Argument parsing

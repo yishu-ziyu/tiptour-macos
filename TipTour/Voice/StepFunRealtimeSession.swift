@@ -37,6 +37,10 @@ final class StepFunRealtimeSessionState: ObservableObject {
     @Published var lastOutputTranscript = ""
     @Published var lastToolActivity = ""
     @Published var errorMessage: String?
+    /// True while the model's voice is being played. Drives the speaking
+    /// indicator, and is what makes an interruption feel responsive rather than
+    /// lagging behind the audio it is cutting off.
+    @Published var isModelSpeaking = false
 }
 
 @MainActor
@@ -100,6 +104,7 @@ final class StepFunRealtimeSession {
             audioPlayer.startPlaying()
             state.isConnecting = false
             state.isSessionActive = true
+            startSessionLifetimeGuard()
         } catch {
             state.isConnecting = false
             state.isSessionActive = false
@@ -110,10 +115,14 @@ final class StepFunRealtimeSession {
 
     func stop() async {
         stopMicrophoneCapture()
+        sessionLifetimeTask?.cancel()
+        sessionLifetimeTask = nil
         audioPlayer.detach()
         audioPlayer.clearQueuedAudio()
+        state.isModelSpeaking = false
         pendingToolWork?.cancel()
         pendingToolWork = nil
+        pendingCallID = nil
         client.disconnect()
         state.isSessionActive = false
         state.isConnecting = false
@@ -176,6 +185,18 @@ final class StepFunRealtimeSession {
         try audioEngine.start()
     }
 
+    private func startSessionLifetimeGuard() {
+        sessionLifetimeTask?.cancel()
+        sessionLifetimeTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.sessionLifetimeStopAfter * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            // Surface it as a notice rather than an error: nothing went wrong, the
+            // server simply would have dropped us a minute later.
+            self.state.errorMessage = "语音会话即将达到服务端上限，已安全停止。再次按下快捷键即可继续。"
+            await self.stop()
+        }
+    }
+
     private func stopMicrophoneCapture() {
         audioEngine.inputNode.removeTap(onBus: 0)
         audioEngine.stop()
@@ -190,6 +211,9 @@ final class StepFunRealtimeSession {
 
         case .audioChunk(let pcm16Data):
             audioPlayer.enqueueAudioChunk(pcm16Data)
+            if !state.isModelSpeaking {
+                state.isModelSpeaking = true
+            }
 
         case .inputTranscript(let text):
             state.lastInputTranscript += text
@@ -214,6 +238,7 @@ final class StepFunRealtimeSession {
             self.pendingCallID = callID
 
         case .turnComplete:
+            state.isModelSpeaking = false
             // The speech is over. Now it is safe to report the result.
             guard let pendingToolWork else { return }
             self.pendingToolWork = nil
@@ -241,4 +266,14 @@ final class StepFunRealtimeSession {
     }
 
     private var pendingCallID: String?
+
+    /// Stops the session before the server's own 30-minute cap fires.
+    ///
+    /// Deliberately not a reconnect. A fresh socket loses the conversation
+    /// history and any in-flight tool call, so silently re-establishing one would
+    /// resume a task whose context is gone — and could repeat an action the user
+    /// has already seen. Stopping and saying so keeps the user in control of what
+    /// happens next.
+    private var sessionLifetimeTask: Task<Void, Never>?
+    private static let sessionLifetimeStopAfter: TimeInterval = 29 * 60
 }
