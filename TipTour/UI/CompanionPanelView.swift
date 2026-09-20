@@ -14,14 +14,20 @@ import SwiftUI
 struct CompanionPanelView: View {
     @ObservedObject var companionManager: CompanionManager
     @State private var setupStep: SetupStep = .mode
+    /// Expanded from the main panel when a permission is missing, so re-granting
+    /// never means going hunting through System Settings.
+    @State private var isPermissionHelpVisible = false
 
     private enum SetupStep: Int {
         case mode = 1, key, permissions
     }
 
+    /// Ready = onboarded with a saved key. Permissions are deliberately NOT
+    /// part of this: a permission revoked after onboarding must swap in the
+    /// callout below the same 开始 button, not teleport the user back into
+    /// setup where that callout can never appear.
     private var isReady: Bool {
         companionManager.hasCompletedOnboarding && companionManager.hasSelectedModeKey
-            && companionManager.hasSelectedModePermissions
     }
 
     var body: some View {
@@ -132,22 +138,28 @@ struct CompanionPanelView: View {
         .buttonStyle(.plain)
         .pointerCursor()
         .help(companionManager.isPanelPinned
-            ? "Unpin: panel will close when you click outside"
-            : "Pin: panel will stay open when you click outside")
+            ? "取消固定：点击面板外时会关闭"
+            : "固定：点击面板外时保持打开")
     }
 
     // MARK: - Primary Message
 
     private var primaryMessageSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("\(companionManager.selectedMode.title) is ready", systemImage: companionManager.selectedMode.systemImage)
+            // Permissions can be revoked underneath the app — an update, a reset,
+            // a change of signing identity — and the only symptom would be a
+            // "Start" button that silently does nothing. Say so here instead.
+            if !companionManager.hasSelectedModePermissions {
+                permissionNeededCallout
+            }
+            Label("\(companionManager.selectedMode.title) 已就绪", systemImage: companionManager.selectedMode.systemImage)
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(DS.Colors.textPrimary)
             Text(companionManager.selectedMode.summary)
                 .font(.system(size: 11)).foregroundColor(DS.Colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Button(action: companionManager.openSelectedMode) {
-                Text("\(companionManager.selectedMode.isVoiceMode ? (companionManager.voiceState == .idle ? "开始语音" : "停止语音") : "打开 JEV")  ·  \(companionManager.selectedMode.shortcut)")
+            Button(action: handlePrimaryActionButtonPress) {
+                Text("\(primaryActionButtonTitle)  ·  \(companionManager.selectedMode.shortcut)")
                     .font(.system(size: 12, weight: .semibold))
                     .frame(maxWidth: .infinity).padding(.vertical, 10)
             }
@@ -155,7 +167,118 @@ struct CompanionPanelView: View {
             .tint(DS.Colors.accent)
             .pointerCursor()
             .disabled(companionManager.isTextCommandRunning)
+
+            if companionManager.selectedMode.isVoiceMode {
+                voiceSessionStatusSection
+            }
         }
+    }
+
+    /// Voice starts are allowed without desktop permissions (pure conversation
+    /// still works); JEV cannot run at all without them, so its tap routes to
+    /// the permission list instead of a silent no-op.
+    private func handlePrimaryActionButtonPress() {
+        if companionManager.selectedMode.isVoiceMode || companionManager.hasSelectedModePermissions {
+            companionManager.openSelectedMode()
+        } else {
+            withAnimation { isPermissionHelpVisible = true }
+        }
+    }
+
+    private var primaryActionButtonTitle: String {
+        companionManager.selectedMode.isVoiceMode
+            ? (companionManager.voiceState == .idle ? "开始语音" : "停止语音")
+            : "打开 JEV"
+    }
+
+    /// The live voice story in one place: 连接 / 聆听 / 回应 state, the last spoken
+    /// reply, and any error. This is what makes a failed start diagnosable from
+    /// the panel instead of a button that seems to do nothing.
+    private var voiceSessionStatusSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let voiceError = companionManager.voiceSessionErrorMessage, !voiceError.isEmpty {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.warning)
+                    Text(voiceError)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(DS.Colors.warningText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            if companionManager.voiceState != .idle {
+                Label(voiceStateText, systemImage: voiceStateSymbol)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(DS.Colors.blue400)
+            }
+
+            if let transcript = companionManager.lastTranscript, !transcript.isEmpty {
+                Text(transcript)
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// `.processing` during a voice run means the session is still connecting;
+    /// once it is live, state alternates between listening and responding.
+    private var voiceStateText: String {
+        switch companionManager.voiceState {
+        case .idle: return ""
+        case .listening: return "聆听中，请说话"
+        case .processing: return "连接中…"
+        case .responding: return "回应中"
+        }
+    }
+
+    private var voiceStateSymbol: String {
+        switch companionManager.voiceState {
+        case .idle, .listening: return "waveform"
+        case .processing: return "dot.radiowaves.left.and.right"
+        case .responding: return "speaker.wave.2.fill"
+        }
+    }
+
+    /// A one-tap route back to the permission list from the main panel.
+    ///
+    /// Without this the permissions only exist during onboarding, so anything
+    /// revoked afterwards leaves the user hunting through System Settings while the
+    /// voice button quietly does nothing.
+    private var permissionNeededCallout: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.warning)
+                Text(companionManager.selectedMode.isVoiceMode
+                    ? "缺少桌面权限：语音对话可用，但我看不到屏幕、无法替你点击。"
+                    : "权限不完整：JEV 需要桌面权限才能查看并点击屏幕控件。")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(DS.Colors.textPrimary)
+            }
+
+            Button(isPermissionHelpVisible ? "收起" : "去授权") {
+                isPermissionHelpVisible.toggle()
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(DS.Colors.accent)
+            .buttonStyle(.plain)
+            .pointerCursor()
+
+            if isPermissionHelpVisible {
+                permissionsListSection
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(DS.Colors.warning.opacity(0.10))
+        )
     }
 
     private var onboardingSection: some View {
@@ -222,34 +345,36 @@ struct CompanionPanelView: View {
                 spacing: 8
             ) {
                 compactControlButton(
-                    title: companionManager.isAutopilotEnabled ? "Auto-click" : "Point only",
-                    subtitle: companionManager.isAutopilotEnabled ? "acts" : "guides",
+                    title: companionManager.isAutopilotEnabled ? "自动点击" : "仅指引",
+                    subtitle: companionManager.isAutopilotEnabled ? "自动执行" : "指引位置",
                     systemImage: companionManager.isAutopilotEnabled ? "wand.and.stars" : "hand.tap",
                     isActive: companionManager.isAutopilotEnabled,
                     helpText: companionManager.isAutopilotEnabled
-                        ? "TipTour clicks and types after grounding one action"
-                        : "TipTour points at the target and waits for you"
+                        ? "定位到目标后由 TipTour 自动完成点击"
+                        : "仅指向目标，等你手动点击"
                 ) {
                     companionManager.setAutopilotEnabled(!companionManager.isAutopilotEnabled)
                 }
 
                 compactControlButton(
-                    title: companionManager.isAccurateGroundingEnabled ? "Local" : "AX/DOM",
-                    subtitle: "grounding",
+                    title: companionManager.isAccurateGroundingEnabled ? "本地检测" : "AX 与 DOM",
+                    subtitle: "定位方式",
                     systemImage: "scope",
                     isActive: companionManager.isAccurateGroundingEnabled,
-                    helpText: "Toggle local YOLO/OCR grounding"
+                    helpText: "切换本地视觉定位（YOLO/OCR）"
                 ) {
                     companionManager.setAccurateGroundingEnabled(!companionManager.isAccurateGroundingEnabled)
                 }
 
-                if companionManager.selectedMode.isVoiceMode {
+                // StepFun never sends screenshots, so the remote-screenshot
+                // toggle would be a dead control there — Gemini only.
+                if companionManager.selectedMode == .gemini {
                 compactControlButton(
-                    title: companionManager.isScreenshotStreamingEnabled ? "Screens" : "Private",
-                    subtitle: companionManager.isScreenshotStreamingEnabled ? "remote" : "local",
+                    title: companionManager.isScreenshotStreamingEnabled ? "发送屏幕" : "隐私模式",
+                    subtitle: companionManager.isScreenshotStreamingEnabled ? "远端可见" : "仅本机",
                     systemImage: companionManager.isScreenshotStreamingEnabled ? "eye" : "eye.slash",
                     isActive: companionManager.isScreenshotStreamingEnabled,
-                    helpText: "Toggle remote screenshot context"
+                    helpText: "切换是否把屏幕截图发给模型"
                 ) {
                     companionManager.setScreenshotStreamingEnabled(!companionManager.isScreenshotStreamingEnabled)
                 }
@@ -408,8 +533,8 @@ struct CompanionPanelView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(DS.Colors.textSecondary)
                     Text(isGranted
-                         ? "So I can see your screen when you ask for help."
-                         : "Quit and reopen after granting.")
+                         ? "这样我才能在你求助时看到屏幕。"
+                         : "授权后需退出并重新打开应用。")
                         .font(.system(size: 10))
                         .foregroundColor(DS.Colors.textTertiary)
                 }

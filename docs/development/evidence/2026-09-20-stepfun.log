@@ -1,0 +1,48 @@
+Building for debugging...
+[0/7] /private/var/folders/k6/7c96rbxd1r782myg_bnlqshw0000gn/T/tiptour-stepfun-tests.iZuBlo/.build/arm64-apple-macosx/debug/StepFunVoiceCorePackageTests.derived/runner.swift
+[1/7] Write sources
+[4/7] Write swift-version--58304C5D6DBC2206.txt
+[6/9] Compiling StepFunVoiceCore StepFunRealtimeTools.swift
+[7/9] Emitting module StepFunVoiceCore
+[8/11] Compiling StepFunVoiceCoreTests StepFunTests.swift
+[9/11] Emitting module StepFunVoiceCoreTests
+[10/13] Compiling StepFunVoiceCorePackageTests runner.swift
+[11/13] Emitting module StepFunVoiceCorePackageTests
+[11/13] Write Objects.LinkFileList
+[12/13] Linking StepFunVoiceCorePackageTests
+Build complete! (5.29s)
+Test Suite 'All tests' started at 2026-09-20 04:39:16.978.
+Test Suite 'All tests' passed at 2026-09-20 04:39:16.980.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.002) seconds
+◇ Test run started.
+↳ Testing Library Version: 124.4
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Test missingDescriptionIsRefused() started.
+◇ Test indexBeyondTheListIsRefusedAndListsWhatIsAvailable() started.
+◇ Test freshDescriptionIsStillUsable() started.
+◇ Test unambiguouslyNamedControlAmongDuplicatesStillResolves() started.
+◇ Test duplicatedLabelIsRefused() started.
+◇ Test emptyDescriptionSaysSoRatherThanRenderingAnEmptyList() started.
+◇ Test toolDeclarationsExposeExactlyTheTwoSupportedTools() started.
+◇ Test descriptionRendersEveryControlWithItsNumber() started.
+◇ Test actOnScreenRequiresNothingButAnIndex() started.
+◇ Test modelIsNeverOfferedACoordinateParameter() started.
+◇ Test validIndexResolvesToTheNamedControl() started.
+◇ Test zeroAndNegativeIndicesAreRefused() started.
+◇ Test threeCopiesOfTheSameLabelAreAlsoRefused() started.
+◇ Test expiredDescriptionIsRefused() started.
+✔ Test missingDescriptionIsRefused() passed after 0.001 seconds.
+✔ Test actOnScreenRequiresNothingButAnIndex() passed after 0.001 seconds.
+✔ Test emptyDescriptionSaysSoRatherThanRenderingAnEmptyList() passed after 0.001 seconds.
+✔ Test validIndexResolvesToTheNamedControl() passed after 0.001 seconds.
+✔ Test freshDescriptionIsStillUsable() passed after 0.001 seconds.
+✔ Test zeroAndNegativeIndicesAreRefused() passed after 0.001 seconds.
+✔ Test toolDeclarationsExposeExactlyTheTwoSupportedTools() passed after 0.001 seconds.
+✔ Test descriptionRendersEveryControlWithItsNumber() passed after 0.001 seconds.
+✔ Test threeCopiesOfTheSameLabelAreAlsoRefused() passed after 0.001 seconds.
+✔ Test expiredDescriptionIsRefused() passed after 0.001 seconds.
+✔ Test duplicatedLabelIsRefused() passed after 0.001 seconds.
+✔ Test unambiguouslyNamedControlAmongDuplicatesStillResolves() passed after 0.001 seconds.
+✔ Test indexBeyondTheListIsRefusedAndListsWhatIsAvailable() passed after 0.001 seconds.
+✔ Test modelIsNeverOfferedACoordinateParameter() passed after 0.001 seconds.
+✔ Test run with 14 tests passed after 0.001 seconds.

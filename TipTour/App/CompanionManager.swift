@@ -43,6 +43,7 @@ final class CompanionManager: ObservableObject {
         stopVoiceSession()
         textCommandPanelManager.hide()
         textCommandActivityText = nil
+        voiceSessionErrorMessage = nil
         voiceState = .idle
         selectedMode = mode
         TipTourDefaults.selectedMode = mode
@@ -50,15 +51,29 @@ final class CompanionManager: ObservableObject {
     }
 
     func openSelectedMode() {
-        guard hasCompletedOnboarding, hasSelectedModeKey, hasSelectedModePermissions else { return }
+        guard hasCompletedOnboarding, hasSelectedModeKey else { return }
         switch selectedMode {
-        case .jev: presentTextCommandPanel()
-        case .gemini, .stepfun: startVoiceInputFromUserGesture(reason: "menu bar")
+        case .jev:
+            // JEV reads the screen through local detection; without desktop
+            // permissions there is nothing to start, so the hard gate stays.
+            guard hasSelectedModePermissions else { return }
+            presentTextCommandPanel()
+        case .gemini, .stepfun:
+            // Voice must still start when desktop permissions are missing:
+            // talking works, and starting is what surfaces a missing
+            // microphone or key instead of a button that quietly does nothing.
+            // Screen actions inside the session simply fail until the
+            // permissions are granted — the panel callout explains that.
+            startVoiceInputFromUserGesture(reason: "menu bar")
         }
     }
 
     @Published private(set) var voiceState: CompanionVoiceState = .idle
     @Published private(set) var lastTranscript: String?
+    /// Latest voice-session failure — missing key, missing microphone, provider
+    /// error. Kept separate from `lastTranscript` so a spoken reply and an
+    /// error can coexist on the panel instead of overwriting each other.
+    @Published private(set) var voiceSessionErrorMessage: String?
     @Published private(set) var textCommandActivityText: String?
     /// The Jev loop's latest decision, drawn under the Ctrl+K input.
     @Published private(set) var jevStep: JevStepSnapshot?
@@ -135,6 +150,10 @@ final class CompanionManager: ObservableObject {
     }
 
     private var voiceStartTask: Task<Void, Never>?
+    /// Identifies which start attempt owns `voiceStartTask`. A stop (or a newer
+    /// start) rotates it, so a cancelled starter's cleanup can never clear a
+    /// slot that now belongs to someone else.
+    private var voiceStartRunID = UUID()
     private var textCommandTask: Task<Void, Never>?
     private var textCommandRunID: UUID?
     @Published private(set) var textCommandFocusRequest = UUID()
@@ -305,15 +324,11 @@ final class CompanionManager: ObservableObject {
         """
 
     /// Build and launch a StepFun voice session for the current mode.
-    private func startStepFunVoiceSession() {
-        guard let apiKey = KeychainStore.stepfunAPIKey, !apiKey.isEmpty else {
-            // Missing key vs unreadable keychain are different problems for the
-            // user; both must be visible rather than a silent no-op.
-            voiceState = .idle
-            lastTranscript = "请在「设置 → 模型」中添加阶跃 API 密钥"
-            return
-        }
-
+    ///
+    /// `apiKey` comes from the synchronous preflight in `startVoiceSession`, so
+    /// a missing key is refused before anything is torn down, and the session
+    /// gets that exact read instead of a second Keychain trip.
+    private func startStepFunVoiceSession(apiKey: String) {
         let router = StepFunRealtimeToolRouter(engine: engineFacade)
         let session = StepFunRealtimeSession(
             apiKey: apiKey,
@@ -329,6 +344,13 @@ final class CompanionManager: ObservableObject {
         self.stepfunSession = session
         bindStepFunSessionPublishers(session)
 
+        // Fresh run: drop the previous run's transcript and error so the panel
+        // reports THIS session, not the one before it.
+        lastTranscript = nil
+        voiceSessionErrorMessage = nil
+
+        // `.processing` renders as 连接中 — the honest state between the press
+        // and the session reporting itself active (which flips it to 聆听中).
         voiceState = .processing
         Task { await session.start() }
     }
@@ -337,6 +359,12 @@ final class CompanionManager: ObservableObject {
     ///
     /// Binding rather than forwarding keeps one source of truth for what the menu
     /// bar and panel render, so the voice mode swap does not fork the UI.
+    ///
+    /// Every sink captures the session it was bound to and refuses events from
+    /// any other instance. Teardown removes the subscriptions, but between a
+    /// stop and the next start a stopped session can still emit a final state
+    /// change; without the identity check that late event would speak for the
+    /// NEW session and flip the panel back to 聆听中 after the user stopped.
     private func bindStepFunSessionPublishers(_ session: StepFunRealtimeSession) {
         stepfunStateCancellables.removeAll()
         let state = session.state
@@ -348,8 +376,8 @@ final class CompanionManager: ObservableObject {
         state.$isModelSpeaking
             .dropFirst()
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] isSpeaking in
-                guard let self, self.stepfunSession != nil else { return }
+            .sink { [weak self, weak session] isSpeaking in
+                guard let self, let session, self.stepfunSession === session else { return }
                 self.voiceState = isSpeaking ? .responding : .listening
             }
             .store(in: &stepfunStateCancellables)
@@ -357,25 +385,51 @@ final class CompanionManager: ObservableObject {
         state.$isSessionActive
             .dropFirst()
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] isActive in
-                guard let self, !isActive, self.stepfunSession != nil else { return }
-                self.voiceState = .idle
+            .sink { [weak self, weak session] isActive in
+                guard let self, let session, self.stepfunSession === session else { return }
+                // Active → listening is what turns 连接中 into 聆听中; inactive
+                // → idle covers every stop: user toggle, error teardown, and
+                // the server-side lifetime guard.
+                self.voiceState = isActive ? .listening : .idle
+                // A session that reports itself down while nothing is
+                // connecting will never come back on its own. Left installed,
+                // `isStepFunVoiceActive` stays true and the next hotkey press
+                // is treated as a stop instead of a fresh start.
+                if !isActive && !session.state.isConnecting {
+                    // Delivery lands on a later runloop turn than the session's
+                    // synchronous failure block, so `errorMessage` is already
+                    // assigned by now. Republish it before tearing down:
+                    // teardown rejects the session's own queued error callback,
+                    // and the failure must stay readable on the panel/overlay.
+                    if let failureMessage = session.state.errorMessage,
+                       self.voiceSessionErrorMessage == nil {
+                        self.voiceSessionErrorMessage = failureMessage
+                        self.presentTransientOverlayHint(failureMessage)
+                    }
+                    self.tearDownStepFunVoiceSession()
+                }
             }
             .store(in: &stepfunStateCancellables)
 
         state.$lastOutputTranscript
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] transcript in
-                guard let self, !transcript.isEmpty else { return }
+            .sink { [weak self, weak session] transcript in
+                guard let self, let session, self.stepfunSession === session,
+                      !transcript.isEmpty else { return }
                 self.lastTranscript = transcript
             }
             .store(in: &stepfunStateCancellables)
 
         state.$errorMessage
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] message in
-                guard let self, let message else { return }
-                self.lastTranscript = message
+            .sink { [weak self, weak session] message in
+                guard let self, let session, self.stepfunSession === session,
+                      let message else { return }
+                self.voiceSessionErrorMessage = message
+                // The panel is usually already closed by the time a live
+                // session fails, so mirror the failure onto the transient
+                // overlay hint — the one surface that is always visible.
+                self.presentTransientOverlayHint(message)
             }
             .store(in: &stepfunStateCancellables)
     }
@@ -1651,7 +1705,9 @@ final class CompanionManager: ObservableObject {
         guard !isTextCommandRunning else { return }
         captureTargetAppContextForShortcutPress(reason: reason)
 
-        NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
+        // The panel is dismissed below only when a session actually starts (or
+        // toggles off) — a refused start needs the panel to stay open so its
+        // error message is visible.
         clearDetectedElementLocation()
         WorkflowRunner.shared.stop()
 
@@ -1675,9 +1731,17 @@ final class CompanionManager: ObservableObject {
         if isVoiceActive {
             stopVoiceSession()
             voiceState = .idle
-        } else {
-            startVoiceSession()
-            voiceState = .listening
+            NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
+        } else if startVoiceSession() {
+            // Dismiss only once a session is really on its way up. A refused
+            // start (no microphone / no key) must leave the panel open —
+            // otherwise the error it just published closes itself with the
+            // panel and is never seen.
+            NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
+        } else if let refusalMessage = voiceSessionErrorMessage {
+            // Hotkey presses have no panel; surface the refusal on the one
+            // overlay that is always visible.
+            presentTransientOverlayHint(refusalMessage)
         }
     }
 
@@ -2608,52 +2672,114 @@ final class CompanionManager: ObservableObject {
             .joined(separator: " ")
     }
 
-    /// Start a Gemini Live session on hotkey press. Two things run in
-    /// parallel from the instant the hotkey fires:
-    ///   1. WebSocket open + Gemini session setup (~300-500ms)
+    /// Start the selected realtime voice session. Two things run in parallel
+    /// from the instant the hotkey fires (Gemini path):
+    ///   1. WebSocket open + provider session setup (~300-500ms)
     ///   2. Real AX-tree prefetch on the user's target app — walks the
     ///      frontmost app's AX tree and primes the set-of-marks cache so
-    ///      the moment Gemini emits its first tool call, the resolver
+    ///      the moment the model emits its first tool call, the resolver
     ///      already has the AX data it needs.
     ///
-    /// The prefetch overlaps the user's first words / Gemini's session
-    /// setup, so the latency cost (typically 50-300ms on Cocoa apps,
-    /// up to 1s on heavy Electron trees) lands entirely in "free" time.
-    /// This is the single biggest perceived-latency win on the warm
-    /// path: by the time the first CUA plan arrives,
-    /// resolution returns in ~10-30ms instead of 100-400ms.
-    func startVoiceSession() {
-        guard selectedMode.isVoiceMode, hasCompletedOnboarding else { return }
-        guard voiceStartTask == nil else { return }
+    /// Returns false (and publishes `voiceSessionErrorMessage`) when the start
+    /// is refused up front — no microphone, or no key for the selected
+    /// provider. Callers use that to keep the panel open so the refusal is
+    /// actually readable.
+    @discardableResult
+    func startVoiceSession() -> Bool {
+        guard selectedMode.isVoiceMode, hasCompletedOnboarding else { return false }
+        guard voiceStartTask == nil else { return false }
+        // One live voice session at a time, whichever provider owns it. The
+        // gesture path already toggles, but a direct call must not stack a
+        // second session on top of a live one — the old socket and microphone
+        // would leak with nobody left to stop them.
+        if selectedMode == .stepfun {
+            guard stepfunSession == nil else { return false }
+        } else if _voiceBackend?.isActive == true {
+            return false
+        }
         guard !isTextCommandRunning else {
             textCommandActivityText = "开始语音前请先停止 JEV"
-            return
+            return false
+        }
+        // Both voice providers need the microphone; refuse here rather than
+        // letting the audio engine fail deep inside a half-started session.
+        guard hasMicrophonePermission else {
+            voiceState = .idle
+            voiceSessionErrorMessage = "缺少麦克风权限：在面板里点「去授权」，允许后重新开始语音。"
+            return false
+        }
+        var stepfunAPIKey: String?
+        if selectedMode == .stepfun {
+            // One synchronous Keychain read, before anything is torn down — a
+            // missing key must be a visible refusal, not a session that dies
+            // the moment it tries to connect.
+            stepfunAPIKey = KeychainStore.stepfunAPIKey
+            guard let apiKey = stepfunAPIKey, !apiKey.isEmpty else {
+                voiceState = .idle
+                voiceSessionErrorMessage = "未读到阶跃密钥：请在「设置 → 模型」保存密钥后重试。"
+                return false
+            }
         }
         if shouldRunNativeDetection {
             scheduleNativeDetectionOverlayRefresh(reason: "voice session started", debounceNanoseconds: 0)
         }
 
-        Task.detached(priority: .userInitiated) {
-            await Self.prefetchAccessibilityTreeForTargetApp()
+        // The AX prefetch warms caches for Gemini's tool calls. StepFun's
+        // describe_screen goes through local detection instead, and pure
+        // voice must work with desktop permissions missing — so skip the
+        // walk there; without AX permission it would only produce noise.
+        if selectedMode != .stepfun {
+            Task.detached(priority: .userInitiated) {
+                await Self.prefetchAccessibilityTreeForTargetApp()
+            }
         }
 
+        let runID = UUID()
+        voiceStartRunID = runID
         voiceStartTask = Task {
-            defer { voiceStartTask = nil }
-            // The provider is chosen by the selected mode, not by a second code
-            // path the caller has to know about.
+            defer {
+                // Only the run that still owns the slot may clear it: after a
+                // stop (or a newer start) the slot belongs to someone else.
+                // Plain `if`, not `guard`: a `return` cannot transfer control
+                // out of a `defer` statement.
+                if voiceStartRunID == runID {
+                    voiceStartTask = nil
+                }
+            }
+            // The provider is chosen by the selected mode, not by a second
+            // code path the caller has to know about.
             if selectedMode == .stepfun {
-                await MainActor.run { startStepFunVoiceSession() }
+                // A stop between the press and here cancels this task; honour
+                // it so a cancelled start cannot resurrect a session the
+                // user already stopped.
+                guard !Task.isCancelled, let stepfunAPIKey else { return }
+                startStepFunVoiceSession(apiKey: stepfunAPIKey)
                 return
             }
+            // Fresh run: drop the previous session's transcript and error so
+            // the panel reports THIS session, not the one before it.
+            voiceSessionErrorMessage = nil
+            lastTranscript = nil
+            voiceState = .processing
             do {
                 try await voiceBackend.start(initialScreenshot: nil)
+                guard !Task.isCancelled else {
+                    // Stopped mid-connect: the backend may have finished
+                    // opening after stop() already ran, so make sure the
+                    // socket is really closed.
+                    _voiceBackend?.stop()
+                    return
+                }
+                voiceState = .listening
             } catch {
                 guard !Task.isCancelled else { return }
                 voiceState = .idle
-                lastTranscript = error.localizedDescription
+                voiceSessionErrorMessage = error.localizedDescription
+                lastTranscript = nil
                 print("[GeminiLive] Failed to start session: \(error.localizedDescription)")
             }
         }
+        return true
     }
 
     func submitTextCommand(_ prompt: String) {
@@ -2750,12 +2876,20 @@ final class CompanionManager: ObservableObject {
 
     /// End the active voice session, whichever provider owns it.
     func stopVoiceSession() {
+        // Cancel AND release the startup slot synchronously. Releasing it is
+        // what makes 停止后再启动 work immediately: `isStepFunVoiceActive` and
+        // the `voiceStartTask == nil` guard both consult this slot, so leaving
+        // a cancelled-but-present task here would swallow the next press until
+        // the old task happened to finish resuming.
+        voiceStartRunID = UUID()
         voiceStartTask?.cancel()
+        voiceStartTask = nil
         WorkflowRunner.shared.stop()
         if selectedMode == .stepfun {
             tearDownStepFunVoiceSession()
         } else {
             _voiceBackend?.stop()
+            voiceState = .idle
         }
     }
 }

@@ -1,0 +1,50 @@
+Building for debugging...
+[0/7] /private/var/folders/k6/7c96rbxd1r782myg_bnlqshw0000gn/T/tiptour-jev-tests.dxIuXE/.build/arm64-apple-macosx/debug/JevCorePackageTests.derived/runner.swift
+[1/7] Write sources
+[4/7] Write swift-version--58304C5D6DBC2206.txt
+[6/13] Compiling JevCore KeychainStore.swift
+[7/13] Compiling JevCore TipTourMode.swift
+[8/13] Compiling JevCore LocalTargetContinuity.swift
+[9/13] Compiling JevCore JevGrounding.swift
+[10/13] Emitting module JevCore
+[11/13] Compiling JevCore JevClient.swift
+[12/15] Compiling JevCoreTests JevTests.swift
+[13/15] Emitting module JevCoreTests
+[14/17] Emitting module JevCorePackageTests
+[15/17] Compiling JevCorePackageTests runner.swift
+[15/17] Write Objects.LinkFileList
+[16/17] Linking JevCorePackageTests
+Build complete! (6.64s)
+Test Suite 'All tests' started at 2026-09-20 04:39:25.168.
+Test Suite 'All tests' passed at 2026-09-20 04:39:25.170.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.002) seconds
+◇ Test run started.
+↳ Testing Library Version: 124.4
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite JevTests started.
+◇ Test microphoneIsRequiredOnlyForGemini() started.
+◇ Test requestsStayUnderAPILimitAndKeepNoneOption() started.
+◇ Test noneChoiceStopsInsteadOfClickingRunnerUp() started.
+◇ Test defaultModeIsJevAndSavedChoiceIsRespected() started.
+◇ Test selectedModeUsesItsOwnKeyAndShortcut() started.
+◇ Test targetContinuityAllowsJitterButRejectsDifferentControls() started.
+◇ Test roundedTieHonorsTheSelectedOption() started.
+◇ Test validClickUsesSuppliedTarget() started.
+◇ Test missingKeyFailsBeforeNetworkRequest() started.
+◇ Test inventedTargetOrActionAndIncompleteResponsesAreRejected() started.
+◇ Test topTargetIsAllowedRegardlessOfAbsentScoreOrProbability() started.
+◇ Test duplicateAndReservedIDsCannotCrashCandidateDictionary() started.
+✔ Test requestsStayUnderAPILimitAndKeepNoneOption() passed after 0.005 seconds.
+✔ Test defaultModeIsJevAndSavedChoiceIsRespected() passed after 0.005 seconds.
+✔ Test microphoneIsRequiredOnlyForGemini() passed after 0.005 seconds.
+✔ Test validClickUsesSuppliedTarget() passed after 0.005 seconds.
+✔ Test noneChoiceStopsInsteadOfClickingRunnerUp() passed after 0.005 seconds.
+✔ Test roundedTieHonorsTheSelectedOption() passed after 0.005 seconds.
+✔ Test targetContinuityAllowsJitterButRejectsDifferentControls() passed after 0.006 seconds.
+✔ Test topTargetIsAllowedRegardlessOfAbsentScoreOrProbability() passed after 0.006 seconds.
+✔ Test selectedModeUsesItsOwnKeyAndShortcut() passed after 0.006 seconds.
+✔ Test inventedTargetOrActionAndIncompleteResponsesAreRejected() passed after 0.006 seconds.
+✔ Test duplicateAndReservedIDsCannotCrashCandidateDictionary() passed after 0.006 seconds.
+✔ Test missingKeyFailsBeforeNetworkRequest() passed after 0.006 seconds.
+✔ Suite JevTests passed after 0.006 seconds.
+✔ Test run with 12 tests passed after 0.006 seconds.

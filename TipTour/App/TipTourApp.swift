@@ -55,7 +55,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         self.harnessServer = harnessServer
         // Auto-open the panel if the user still needs to do something:
         // either they haven't onboarded yet, or permissions were revoked.
-        if !companionManager.hasCompletedOnboarding || !companionManager.hasSelectedModeKey || !companionManager.hasSelectedModePermissions {
+        if CommandLine.arguments.contains("--show-panel") || !companionManager.hasCompletedOnboarding || !companionManager.hasSelectedModeKey || !companionManager.hasSelectedModePermissions {
             menuBarPanelManager?.showPanelOnLaunch()
         }
         registerAsLoginItemIfNeeded()
@@ -64,6 +64,11 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         // INFOPLIST_KEY_* settings in the project's build settings).
         // Until then this is a no-op so debug builds don't error.
         startSparkleUpdater()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        menuBarPanelManager?.showPanelOnLaunch()
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -43,8 +43,8 @@ No Claude/Hermes integration, separate Flash Lite matcher, image-generation serv
 | `TipTour/Jev/JevStepPanelView.swift` | Decision progress in the text panel |
 | `TipTour/Voice/GeminiLiveSession.swift` | Realtime session, microphone, screenshots and tool callbacks |
 | `TipTour/Voice/GeminiLiveClient.swift` | Gemini WebSocket protocol and tool declarations |
-| `TipTour/Voice/StepFunRealtimeClient.swift` | StepFun Realtime WebSocket protocol; encodes measured event ordering (~330 lines) |
-| `TipTour/Voice/StepFunRealtimeSession.swift` | StepFun voice session: mic capture, playback, tool dispatch (~240 lines) |
+| `TipTour/Voice/StepFunRealtimeClient.swift` | StepFun Realtime WebSocket protocol; serial sending and ordered connection-scoped events (~580 lines) |
+| `TipTour/Voice/StepFunRealtimeSession.swift` | StepFun voice session: echo cancellation, playback drain, interruption and tool lifecycle (~690 lines) |
 | `TipTour/Voice/StepFunRealtimeTools.swift` | The two tool declarations and the pure action-resolution rules (~210 lines) |
 | `TipTour/Voice/StepFunRealtimeToolRouter.swift` | Numbered candidates in, JEV loop out; the only path from voice to a click (~200 lines) |
 | `TipTour/Voice/StepFunVisionClient.swift` | Semantic disambiguation among numbered candidates; never returns coordinates (~250 lines) |
@@ -62,6 +62,8 @@ See `docs/source-layout.md` for the remaining directory responsibilities.
 Open `tiptour-macos.xcodeproj`, select the `tiptour-macos` scheme, build/run in Xcode.
 Run `scripts/test-stepfun.sh` and `scripts/test-jev.sh` for the decision suites, which compile
 into temporary packages and never touch the installed app. This fork is set up for local machine signing; see `docs/local-development.md` for the signing identity, bundle identifier, Sparkle feed and remote conventions used here.
+
+Run `scripts/test-stepfun-voice-lifecycle.sh` for isolated voice turn-lifecycle tests; it compiles the realtime client, session and audio dependencies without launching the app or opening the microphone.
 
 **Do NOT run `xcodebuild` from the terminal** — it invalidates TCC permissions and the app will need to re-request screen recording/accessibility access. Pure Swift parsing/typechecking and isolated tests are permitted without replacing or launching the installed app. Run `scripts/test-jev.sh` and `scripts/test-stepfun.sh` for the two decision suites.
 

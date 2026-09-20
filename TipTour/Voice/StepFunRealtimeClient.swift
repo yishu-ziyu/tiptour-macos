@@ -23,15 +23,25 @@
 //  5. The server streams response.audio.delta for playback,
 //     response.audio_transcript.delta for captions, and — after the speech —
 //     the function call arguments.
-//  6. The caller runs the tool, then sendToolResult() closes the loop and
-//     requestFollowUpResponse() makes the model speak again.
+//  6. The caller runs the tool, then sendToolResult() closes the loop and asks
+//     the model to speak again.
 //
 //  Measurement notes that shape this implementation:
 //  - The model SPEAKS FIRST and emits its tool call afterwards, in the same
 //    turn. A tool result sent while audio is still playing interrupts it, so
-//    the caller must wait for `turnComplete` before responding.
+//    the caller must wait for playback to drain — `response.done` only says the
+//    server stopped *generating*, not that the speaker stopped sounding.
 //  - Omitting `turn_detection` does not disable VAD; it is on by default.
 //  - A session is capped at 30 minutes server-side.
+//
+//  Ordering: every outbound frame — configuration, audio, commits, tool
+//  results — goes through one serial writer. Sending each audio chunk from its
+//  own Task, as this client used to, lets a later chunk reach the socket before
+//  an earlier one; the server then transcribes scrambled audio or answers an
+//  empty turn, and the conversation never gets off the ground.
+//
+//  Errors: a failed send is emitted as `.error` and, during the handshake, also
+//  remembered so connect() throws the real reason instead of its own timeout.
 //
 
 import Foundation
@@ -50,12 +60,18 @@ enum StepFunRealtimeEvent {
     /// Streaming transcript of what the model is saying.
     case outputTranscript(String)
 
+    /// The server started generating a response. This is the point where an
+    /// interrupted response is definitively superseded, so the session stops
+    /// waiting for the cancelled response's completion.
+    case responseCreated
+
     /// The model asked for a tool. Arguments are the complete JSON string once
     /// `response.function_call_arguments.done` arrives — the deltas are only
     /// useful for progress display, so this fires once, complete.
     case toolCall(callID: String, name: String, arguments: String)
 
-    /// The response finished. Safe to send a tool result or start new input.
+    /// The response finished on the server. This does NOT mean playback has
+    /// finished: audio chunks may still be queued in the player.
     case turnComplete
 
     /// The server began hearing the user — the cue to stop playing audio.
@@ -64,7 +80,7 @@ enum StepFunRealtimeEvent {
     /// The socket closed without the app asking. Reconnectable.
     case unexpectedDisconnect(Error)
 
-    /// Fatal error; the client disconnects itself.
+    /// A failed send or a server-reported error. Never swallowed.
     case error(Error)
 }
 
@@ -108,12 +124,20 @@ final class StepFunRealtimeClient {
     /// Mutable so a session can bind its handler after its own stored
     /// properties are initialized — a closure that captures the session cannot be
     /// passed while the session's `let client` is still being constructed.
+    ///
+    /// Called on the main actor and awaited by the receive loop, so handlers run
+    /// in the order the server sent them. The handler must return quickly; long
+    /// work belongs in a task the session owns.
     var eventHandler: @MainActor (StepFunRealtimeEvent) -> Void
 
     private let urlSession: URLSession
     private let stateLock = NSLock()
     private var webSocketTask: URLSessionWebSocketTask?
     private var receiveLoopTask: Task<Void, Never>?
+    /// The single consumer of the outbound stream. One writer is what makes
+    /// audio order a property of the design instead of a hope.
+    private var outboundWriterTask: Task<Void, Never>?
+    private var outboundContinuation: AsyncStream<[String: Any]>.Continuation?
     private var isConnected = false
     private var isSessionConfigured = false
     private var wasIntentionallyDisconnected = false
@@ -121,15 +145,19 @@ final class StepFunRealtimeClient {
     /// rather than silently ignored by the server.
     private var isReadyForInput = false
 
-    /// Set when the server rejects the session or the configuration cannot be
-    /// sent. Without it, connect() keeps polling for a `session.updated` that is
+    /// Set when the server rejects the session or a handshake send fails.
+    /// Without it, connect() keeps polling for a `session.updated` that is
     /// never coming and fails 15 seconds later with "no session.created" — a
     /// misleading message that sends you looking in the wrong place entirely.
     private var handshakeError: Error?
 
-    /// Incremented every time a connection starts or ends. The receive loop
-    /// captures the value it began with and drops any event that arrives under a
-    /// later generation.
+    /// Set when the socket closes before the handshake completed, so connect()
+    /// fails with the socket's real error instead of its own timeout.
+    private var socketClosedError: Error?
+
+    /// Incremented every time a connection starts or ends. The receive loop and
+    /// the outbound writer capture the value they began with and stop once it
+    /// changes.
     ///
     /// Without this, a socket that is closed mid-stream still delivers whatever
     /// the server had already sent — audio chunks, a transcript, a tool call —
@@ -190,44 +218,71 @@ final class StepFunRealtimeClient {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
 
         let task = urlSession.webSocketTask(with: request)
-        stateLock.withLock { webSocketTask = task }
+        let generation = stateLock.withLock { () -> Int in
+            sessionGeneration += 1
+            handshakeError = nil
+            socketClosedError = nil
+            isSessionConfigured = false
+            isReadyForInput = false
+            webSocketTask = task
+            return sessionGeneration
+        }
+
+        // The writer starts before the receive loop so the very first
+        // `session.update` travels the same ordered path as everything else —
+        // and so a failure to send it is attributed to the handshake instead of
+        // disappearing into a detached task.
+        startOutboundWriter(for: task, generation: generation)
+        startReceiveLoop(for: task, generation: generation)
         task.resume()
         print("[StepFunRealtime] WebSocket opened for \(model)")
 
-        startReceiveLoop()
-
-        // The server's first event is `session.created`. Nothing can be sent
-        // before it, and skipping the wait is how you end up streaming audio
-        // into a socket that is still handshaking.
         let createdDeadline = Date().addingTimeInterval(15)
-        while !isReadyForInput {
-            if let handshakeError = stateLock.withLock({ handshakeError }) {
-                disconnect()
-                throw handshakeError
+        do {
+            // The server's first event is `session.created`. Nothing can be sent
+            // before it, and skipping the wait is how you end up streaming audio
+            // into a socket that is still handshaking.
+            while !stateLock.withLock({ isReadyForInput }) {
+                if let error = stateLock.withLock({ handshakeError ?? socketClosedError }) {
+                    throw error
+                }
+                if stateLock.withLock({ wasIntentionallyDisconnected }) {
+                    // stop() closed the session while the handshake was still
+                    // running; fail fast rather than waiting out the deadline.
+                    throw connectionError("Connection was closed before the session became ready")
+                }
+                if Date() > createdDeadline {
+                    throw connectionError("No session.updated within 15s. The socket opened but the server never accepted the configuration — check the model name, the voice, and whether the account has access to it.")
+                }
+                try await Task.sleep(nanoseconds: 50_000_000)
             }
-            if Date() > createdDeadline {
-                disconnect()
-                throw connectionError("No session.updated within 15s. The socket opened but the server never accepted the configuration — check the model name, the voice, and whether the account has access to it.")
-            }
-            try await Task.sleep(nanoseconds: 50_000_000)
+        } catch {
+            disconnect()
+            throw error
         }
     }
 
     func disconnect() {
-        let (capturedReceiveTask, capturedWebSocketTask) = stateLock.withLock {
-            let taken = (receiveLoopTask, webSocketTask)
+        let (capturedReceiveTask, capturedWriterTask, capturedContinuation, capturedWebSocketTask) = stateLock.withLock {
+            let taken = (receiveLoopTask, outboundWriterTask, outboundContinuation, webSocketTask)
             receiveLoopTask = nil
+            outboundWriterTask = nil
+            outboundContinuation = nil
             webSocketTask = nil
             isConnected = false
             isSessionConfigured = false
             isReadyForInput = false
             wasIntentionallyDisconnected = true
             sessionStartedAt = nil
+            handshakeError = nil
+            socketClosedError = nil
             // Retire the generation so anything still in flight from this socket
             // is discarded rather than delivered after teardown.
             sessionGeneration += 1
             return taken
         }
+        capturedContinuation?.finish()
+        capturedWriterTask?.cancel()
         capturedReceiveTask?.cancel()
         capturedWebSocketTask?.cancel(with: .normalClosure, reason: nil)
         print("[StepFunRealtime] WebSocket closed")
@@ -245,15 +300,15 @@ final class StepFunRealtimeClient {
 
     /// Stream one chunk of PCM16 24 kHz mono microphone audio.
     ///
-    /// Callable from the audio tap's real-time thread: the base64 work and the
-    /// WebSocket write are handed off, so this never blocks the tap.
+    /// Callable from the audio tap's real-time thread: base64 encoding happens
+    /// here because it is cheap, and yielding to the serial writer only takes a
+    /// lock. It never blocks the tap on the socket.
     func sendAudioChunk(_ pcm16Data: Data) {
         guard stateLock.withLock({ isReadyForInput }) else { return }
-        let message: [String: Any] = [
+        enqueueOutbound([
             "type": "input_audio_buffer.append",
             "audio": pcm16Data.base64EncodedString(),
-        ]
-        Task { try? await self.sendJSON(message) }
+        ])
     }
 
     /// Close the current user turn and ask for a spoken reply.
@@ -263,42 +318,89 @@ final class StepFunRealtimeClient {
     /// empty buffer, which the server rejects.
     func commitAndRequestResponse() {
         guard stateLock.withLock({ isReadyForInput }) else { return }
-        Task {
-            try? await self.sendJSON(["type": "input_audio_buffer.commit"])
-            try? await self.sendJSON(["type": "response.create"])
-        }
+        // Enqueued together on purpose: the writer sends them in this order, so
+        // `response.create` can never overtake the commit it depends on.
+        enqueueOutbound(["type": "input_audio_buffer.commit"])
+        enqueueOutbound(["type": "response.create"])
     }
 
     /// Report the result of a tool call and ask the model to speak again.
     ///
-    /// Must not be called while the model is still playing audio from the turn
-    /// that requested the tool: the follow-up response would cut it off. Wait
-    /// for `.turnComplete`.
+    /// Must not be called while the model's audio is still playing: the
+    /// follow-up response would cut it off. Wait for the player to drain, which
+    /// is later than `response.done`.
     func sendToolResult(callID: String, output: String) {
         guard stateLock.withLock({ isReadyForInput }) else { return }
-        Task {
-            try? await self.sendJSON([
-                "type": "conversation.item.create",
-                "item": [
-                    "type": "function_call_output",
-                    "call_id": callID,
-                    "output": output,
-                ],
-            ])
-            try? await self.sendJSON(["type": "response.create"])
-        }
+        enqueueOutbound([
+            "type": "conversation.item.create",
+            "item": [
+                "type": "function_call_output",
+                "call_id": callID,
+                "output": output,
+            ],
+        ])
+        enqueueOutbound(["type": "response.create"])
     }
 
     /// Stop the current spoken response — the barge-in path.
     func cancelCurrentResponse() {
         guard stateLock.withLock({ isReadyForInput }) else { return }
-        Task { try? await self.sendJSON(["type": "response.cancel"]) }
+        enqueueOutbound(["type": "response.cancel"])
     }
 
     /// Discard buffered input audio that has not been committed yet.
     func clearInputBuffer() {
         guard stateLock.withLock({ isReadyForInput }) else { return }
-        Task { try? await self.sendJSON(["type": "input_audio_buffer.clear"]) }
+        enqueueOutbound(["type": "input_audio_buffer.clear"])
+    }
+
+    // MARK: - Serial outbound writer
+
+    /// Queue one client event on the single writer.
+    ///
+    /// Order is the whole point: a WebSocket frame that overtakes the one sent
+    /// before it turns speech into noise, and a `response.create` that arrives
+    /// before its `input_audio_buffer.commit` makes the server answer an empty
+    /// turn.
+    private func enqueueOutbound(_ message: [String: Any]) {
+        let continuation = stateLock.withLock { outboundContinuation }
+        continuation?.yield(message)
+    }
+
+    private func startOutboundWriter(for socketTask: URLSessionWebSocketTask, generation: Int) {
+        let (messageStream, continuation) = AsyncStream.makeStream(of: [String: Any].self)
+        stateLock.withLock { outboundContinuation = continuation }
+
+        let writerTask = Task { [weak self] in
+            for await message in messageStream {
+                guard let self else { return }
+                let generationIsCurrent = self.stateLock.withLock { self.sessionGeneration == generation }
+                guard generationIsCurrent else {
+                    continuation.finish()
+                    return
+                }
+
+                do {
+                    try await self.sendJSON(message, to: socketTask)
+                } catch {
+                    // A failure to send the configuration is why connect() would
+                    // otherwise poll a server that never heard it.
+                    let shouldReportError = self.stateLock.withLock { () -> Bool in
+                        guard self.sessionGeneration == generation else { return false }
+                        if !self.isSessionConfigured {
+                            self.handshakeError = error
+                        }
+                        return true
+                    }
+                    continuation.finish()
+                    if shouldReportError {
+                        await self.emit(.error(error))
+                    }
+                    return
+                }
+            }
+        }
+        stateLock.withLock { outboundWriterTask = writerTask }
     }
 
     // MARK: - Session configuration
@@ -331,49 +433,38 @@ final class StepFunRealtimeClient {
             session["tools"] = tools
         }
 
-        Task {
-            do {
-                try await self.sendJSON(["type": "session.update", "session": session])
-            } catch {
-                // Swallowing this leaves the server permanently unconfigured and
-                // the caller waiting for an event that can never arrive.
-                self.stateLock.withLock { self.handshakeError = error }
-            }
-        }
+        enqueueOutbound(["type": "session.update", "session": session])
     }
 
     // MARK: - Wire
 
-    private func sendJSON(_ message: [String: Any]) async throws {
+    private func sendJSON(_ message: [String: Any], to task: URLSessionWebSocketTask) async throws {
         guard let data = try? JSONSerialization.data(withJSONObject: message),
               let text = String(data: data, encoding: .utf8) else {
             throw connectionError("Cannot encode client event")
         }
-        let task = stateLock.withLock { webSocketTask }
-        guard let task else { return }
         try await task.send(.string(text))
     }
 
-    private func startReceiveLoop() {
-        stateLock.withLock {
-            sessionGeneration += 1
-            handshakeError = nil
-        }
-        let generation = stateLock.withLock { sessionGeneration }
-
-        let task = Task.detached { [weak self] in
+    private func startReceiveLoop(for socketTask: URLSessionWebSocketTask, generation: Int) {
+        let receiveTask = Task.detached { [weak self] in
             guard let self else { return }
-            let webSocketTask = self.stateLock.withLock { self.webSocketTask }
-            guard let webSocketTask else { return }
 
             while true {
                 let message: URLSessionWebSocketTask.Message
                 do {
-                    message = try await webSocketTask.receive()
+                    message = try await socketTask.receive()
                 } catch {
                     // A cancelled or closed socket is the normal way out.
                     let wasIntentional = self.stateLock.withLock { self.wasIntentionallyDisconnected }
+                    let isCurrentGeneration = self.stateLock.withLock { self.sessionGeneration == generation }
+                    guard isCurrentGeneration else { return }
                     if !wasIntentional {
+                        self.stateLock.withLock {
+                            if self.sessionGeneration == generation, self.socketClosedError == nil {
+                                self.socketClosedError = error
+                            }
+                        }
                         await self.emit(.unexpectedDisconnect(error))
                     }
                     return
@@ -381,8 +472,8 @@ final class StepFunRealtimeClient {
 
                 // Anything from an earlier generation is stale by definition: the
                 // session it belonged to has already been torn down.
-                let currentGeneration = self.stateLock.withLock { self.sessionGeneration }
-                guard generation == currentGeneration else { return }
+                let isCurrentGeneration = self.stateLock.withLock { self.sessionGeneration == generation }
+                guard isCurrentGeneration else { return }
 
                 guard case .string(let text) = message,
                       let data = text.data(using: .utf8),
@@ -392,7 +483,7 @@ final class StepFunRealtimeClient {
                 await self.handle(eventType: eventType, payload: object)
             }
         }
-        stateLock.withLock { receiveLoopTask = task }
+        stateLock.withLock { receiveLoopTask = receiveTask }
     }
 
     private func handle(eventType: String, payload: [String: Any]) async {
@@ -423,10 +514,13 @@ final class StepFunRealtimeClient {
                 await emit(.inputTranscript(delta))
             }
 
+        case "response.created":
+            await emit(.responseCreated)
+
         case "response.function_call_arguments.done":
-            // The whole argument string arrives here in one piece. Earlier
-            // runs confirmed the model reaches this only after its speech, so
-            // the caller must not answer before `response.done`.
+            // The whole argument string arrives here in one piece. The caller
+            // executes it while the model is still speaking and reports the
+            // result once playback has drained.
             await emit(.toolCall(
                 callID: (payload["call_id"] as? String) ?? "",
                 name: (payload["name"] as? String) ?? "",
@@ -442,12 +536,19 @@ final class StepFunRealtimeClient {
         case "error":
             let error = payload["error"] as? [String: Any]
             let message = (error?["message"] as? String) ?? "unknown realtime error"
-            // Only fatal while configuring. Once the session is up an error is
-            // recoverable and the socket stays open.
-            stateLock.withLock {
-                if !isSessionConfigured { handshakeError = StepFunRealtimeError.serverReported(message) }
+            let detailedMessage: String
+            if let code = error?["code"] {
+                detailedMessage = "[\(code)] \(message)"
+            } else {
+                detailedMessage = message
             }
-            await emit(.error(StepFunRealtimeError.serverReported(message)))
+            // Only fatal while configuring. Once the session is up an error is
+            // recoverable and the socket stays open — but it is always emitted,
+            // never swallowed.
+            stateLock.withLock {
+                if !isSessionConfigured { handshakeError = StepFunRealtimeError.serverReported(detailedMessage) }
+            }
+            await emit(.error(StepFunRealtimeError.serverReported(detailedMessage)))
 
         default:
             break

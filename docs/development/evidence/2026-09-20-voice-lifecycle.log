@@ -1,0 +1,54 @@
+Building for debugging...
+[0/7] /private/var/folders/k6/7c96rbxd1r782myg_bnlqshw0000gn/T/tiptour-stepfun-voice-tests.Fnb2x0/.build/arm64-apple-macosx/debug/StepFunVoiceLifecyclePackageTests.derived/runner.swift
+[1/7] Write sources
+[4/7] Write swift-version--58304C5D6DBC2206.txt
+[6/13] Compiling StepFunVoiceLifecycle GeminiLiveClient.swift
+[7/13] Compiling StepFunVoiceLifecycle StepFunRealtimeClient.swift
+[8/13] Compiling StepFunVoiceLifecycle GeminiLiveAudioPlayer.swift
+[9/13] Emitting module StepFunVoiceLifecycle
+[10/13] Compiling StepFunVoiceLifecycle PCM16AudioConverter.swift
+[11/13] Compiling StepFunVoiceLifecycle StepFunRealtimeSession.swift
+[12/15] Emitting module StepFunVoiceLifecycleTests
+[13/15] Compiling StepFunVoiceLifecycleTests StepFunRealtimeSessionLifecycleTests.swift
+[14/17] Emitting module StepFunVoiceLifecyclePackageTests
+[15/17] Compiling StepFunVoiceLifecyclePackageTests runner.swift
+[15/17] Write Objects.LinkFileList
+[16/17] Linking StepFunVoiceLifecyclePackageTests
+Build complete! (8.52s)
+Test Suite 'All tests' started at 2026-09-20 04:39:10.037.
+Test Suite 'All tests' passed at 2026-09-20 04:39:10.038.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 124.4
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "StepFun turn lifecycle" started.
+◇ Test resetReturnsAnAbandonedMachineToIdle() started.
+◇ Test playbackDrainBeforeResponseDoneIsIgnored() started.
+◇ Test newResponseRetiresAnInterruptedTurn() started.
+◇ Test duplicateResponseDoneDoesNotStartASecondDrain() started.
+◇ Test bargeInDuringPlaybackDrainAbandonsWithoutReporting() started.
+◇ Test userSpeakingWhileTheModelIsIdleIsNotAnInterruption() started.
+◇ Test lateAudioFromAnInterruptedResponseIsDroppedAndItsCompletionIgnored() started.
+◇ Test audioArrivingAfterDoneDoesNotCancelTheDrainWait() started.
+◇ Test bargeInWhileToolResultIsPendingDropsTheCall() started.
+◇ Test bargeInDuringSpeechCancelsAndLateCompletionIsIgnored() started.
+◇ Test responseDoneStartsDrainInsteadOfEndingTheTurn() started.
+◇ Test toolCallFromAnInterruptedTurnIsDropped() started.
+◇ Test toolCallArrivingAfterDrainIsReportedWithoutWaitingForAnotherCompletion() started.
+◇ Test pendingToolCallIsReportedOnlyAfterPlaybackDrains() started.
+✔ Test playbackDrainBeforeResponseDoneIsIgnored() passed after 0.001 seconds.
+✔ Test resetReturnsAnAbandonedMachineToIdle() passed after 0.001 seconds.
+✔ Test bargeInWhileToolResultIsPendingDropsTheCall() passed after 0.001 seconds.
+✔ Test bargeInDuringSpeechCancelsAndLateCompletionIsIgnored() passed after 0.001 seconds.
+✔ Test newResponseRetiresAnInterruptedTurn() passed after 0.001 seconds.
+✔ Test audioArrivingAfterDoneDoesNotCancelTheDrainWait() passed after 0.001 seconds.
+✔ Test toolCallFromAnInterruptedTurnIsDropped() passed after 0.001 seconds.
+✔ Test responseDoneStartsDrainInsteadOfEndingTheTurn() passed after 0.001 seconds.
+✔ Test pendingToolCallIsReportedOnlyAfterPlaybackDrains() passed after 0.001 seconds.
+✔ Test duplicateResponseDoneDoesNotStartASecondDrain() passed after 0.001 seconds.
+✔ Test bargeInDuringPlaybackDrainAbandonsWithoutReporting() passed after 0.001 seconds.
+✔ Test userSpeakingWhileTheModelIsIdleIsNotAnInterruption() passed after 0.001 seconds.
+✔ Test toolCallArrivingAfterDrainIsReportedWithoutWaitingForAnotherCompletion() passed after 0.001 seconds.
+✔ Test lateAudioFromAnInterruptedResponseIsDroppedAndItsCompletionIgnored() passed after 0.001 seconds.
+✔ Suite "StepFun turn lifecycle" passed after 0.001 seconds.
+✔ Test run with 14 tests passed after 0.001 seconds.

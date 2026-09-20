@@ -9,9 +9,10 @@ struct ProviderSetupView: View {
             ProviderKeyCard(mode: companionManager.selectedMode,
                 onKeyChanged: companionManager.refreshProviderKeyStatus)
                 .id(companionManager.selectedMode)
-            Text("你的选择已保存，之后可以随时在这里切换。")
+            Text("你的选择已保存，之后可以随时在这里切换；切换时会结束当前的语音会话。")
                 .font(.system(size: 11))
                 .foregroundColor(DS.Colors.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -46,7 +47,7 @@ struct ModeSelectionView: View {
                 .pointerCursor()
                 .disabled(companionManager.isTextCommandRunning)
                 .accessibilityLabel("选择 \(mode.title)")
-                .accessibilityValue(companionManager.selectedMode == mode ? "Selected" : "Not selected")
+                .accessibilityValue(companionManager.selectedMode == mode ? "已选择" : "未选择")
             }
         }
     }

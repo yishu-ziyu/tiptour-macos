@@ -5,16 +5,27 @@
 //  Owns one live voice conversation: microphone capture, playback, and the
 //  tool calls that let the voice model act on the desktop.
 //
+//  Full duplex: the microphone keeps streaming while the model talks. Echo is
+//  removed by the system's voice-processing unit (AUVoiceIO) on the shared
+//  AVAudioEngine; if it cannot be enabled the session refuses to start instead
+//  of silently muting the microphone during playback. A half-duplex loop can
+//  never hear a barge-in, and it dies permanently whenever a response fails to
+//  complete — which is exactly how this session used to behave.
+//
 //  The interesting decision in this file is *when* a tool result is sent back.
 //  Measurement (docs/model-research-findings.md §7) showed the model speaks
 //  first and only then emits its function call, in the same turn. So a tool can
 //  be executed while the model is still talking, and the result reported once
-//  the turn ends. That hides the perceive-and-decide latency — local detection
-//  plus a Jev round trip — behind speech the user is already listening to,
-//  instead of adding it on top.
+//  the turn ends — where "ends" means the speaker has actually drained, not
+//  when `response.done` arrives. Sending the result earlier interrupts the
+//  speech, which is the failure the StepFun documentation warns about without
+//  explaining the ordering.
 //
-//  Sending the result earlier would interrupt the speech, which is the failure
-//  the StepFun documentation warns about without explaining the ordering.
+//  Turn bookkeeping lives in `StepFunTurnLifecycle`, a plain value type with no
+//  AVFoundation or async state in it, so the ordering rules — a finished turn
+//  must not restart itself, an interrupted turn must not report its tool
+//  result — are testable without a microphone. See
+//  TipTourTests/StepFunRealtimeSessionLifecycleTests.swift.
 //
 
 import AVFoundation
@@ -43,6 +54,177 @@ final class StepFunRealtimeSessionState: ObservableObject {
     @Published var isModelSpeaking = false
 }
 
+/// Why the session stopped itself before the user asked it to.
+enum StepFunRealtimeSessionError: LocalizedError {
+    case microphoneFormatInvalid(sampleRate: Double, channelCount: AVAudioChannelCount)
+    case echoCancellationUnavailable(reason: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .microphoneFormatInvalid(let sampleRate, let channelCount):
+            return "麦克风输入格式无效（采样率 \(sampleRate)，声道 \(channelCount)），无法开始语音对话。"
+        case .echoCancellationUnavailable(let reason):
+            return "无法开启系统回声消除（AUVoiceIO）：\(reason)。不开启回声消除时，扬声器的声音会被当成用户说话，语音对话会陷入自我打断，因此本次会话没有开始。"
+        }
+    }
+}
+
+// MARK: - Turn lifecycle
+
+/// The model-response phase of one spoken turn.
+///
+/// Deliberately separate from the audio engine and from async task state: these
+/// are the rules that decide whether a reply has finished, whether a tool
+/// result may still be sent, and what an interruption cancels.
+enum StepFunTurnPhase: Equatable {
+    /// Nothing from the model is in flight. The user may be mid-utterance.
+    case idle
+    /// Audio for a response is arriving or playing; `response.done` not seen yet.
+    case awaitingResponseDone
+    /// `response.done` arrived; the player queue is still draining.
+    case awaitingPlaybackDrain
+    /// Everything played; the pending tool result is being prepared.
+    case awaitingToolResult
+    /// The user interrupted before `response.done`; that completion must be
+    /// ignored so the cancelled turn cannot continue itself.
+    case interrupted
+}
+
+/// What the session owes after a phase transition.
+enum StepFunTurnAction: Equatable {
+    /// `response.done` arrived; wait for the player queue to empty before
+    /// considering the turn over.
+    case beginPlaybackDrain
+    /// `response.done` for a response the user already interrupted; drop it.
+    case ignoreTurnCompletionAfterInterrupt
+    /// Playback drained and there is nothing to report; the turn is over.
+    case finishTurn
+    /// Playback drained, but a tool call is pending; report its result first.
+    case finishTurnWithToolResult
+    /// A tool call arrived for a response the user already interrupted; drop it
+    /// instead of running an action the user countermanded.
+    case ignoreToolCallFromInterruptedTurn
+    /// The user spoke over an active response; cancel it and drop its audio.
+    case interruptModelResponse
+    /// The user spoke while a finishing turn was still pending; drop that
+    /// turn's audio and tool result instead of letting it continue.
+    case abandonCurrentTurn
+    /// Nothing to do.
+    case none
+}
+
+/// Pure state machine for one model turn.
+///
+/// The bug this replaces treated `response.done` as the end of the turn, which
+/// sent the tool result while the speaker was still talking, and let a late
+/// completion from an interrupted response restart a turn the user had already
+/// cancelled.
+struct StepFunTurnLifecycle {
+    private(set) var phase: StepFunTurnPhase = .idle
+    private(set) var hasPendingToolCall = false
+
+    /// Audio is playing. Only moves forward: a chunk that arrives after
+    /// `response.done` must not push the phase back and cancel the drain wait,
+    /// and a chunk from a response the user already interrupted must not revive
+    /// the turn they cancelled. `recordResponseCreated()` is what retires the
+    /// interrupted phase.
+    mutating func recordAudioChunkArrived() {
+        switch phase {
+        case .idle:
+            phase = .awaitingResponseDone
+        case .interrupted, .awaitingResponseDone, .awaitingPlaybackDrain, .awaitingToolResult:
+            break
+        }
+    }
+
+    /// The server started a new response. This is what retires an interrupted
+    /// response: waiting forever for a cancelled response's completion is how
+    /// the session would go permanently deaf.
+    mutating func recordResponseCreated() {
+        if phase == .interrupted {
+            phase = .idle
+        }
+    }
+
+    mutating func recordToolCallArrived() -> StepFunTurnAction {
+        switch phase {
+        case .interrupted:
+            // The user cancelled this response before the call landed. Running
+            // it would act on a request that no longer exists.
+            return .ignoreToolCallFromInterruptedTurn
+        case .idle, .awaitingToolResult:
+            // Playback already drained for this response (or the response had
+            // no audio), so there is no completion left to wait for: report the
+            // result now instead of waiting for a `response.done` that came.
+            hasPendingToolCall = true
+            phase = .awaitingToolResult
+            return .finishTurnWithToolResult
+        case .awaitingResponseDone, .awaitingPlaybackDrain:
+            hasPendingToolCall = true
+            return .none
+        }
+    }
+
+    mutating func recordResponseDoneArrived() -> StepFunTurnAction {
+        switch phase {
+        case .interrupted:
+            phase = .idle
+            return .ignoreTurnCompletionAfterInterrupt
+        case .idle, .awaitingResponseDone:
+            phase = .awaitingPlaybackDrain
+            return .beginPlaybackDrain
+        case .awaitingPlaybackDrain, .awaitingToolResult:
+            // Duplicate completions must not start a second drain.
+            return .none
+        }
+    }
+
+    mutating func recordPlaybackDrained() -> StepFunTurnAction {
+        guard phase == .awaitingPlaybackDrain else { return .none }
+        guard hasPendingToolCall else {
+            phase = .idle
+            return .finishTurn
+        }
+        phase = .awaitingToolResult
+        return .finishTurnWithToolResult
+    }
+
+    mutating func recordToolResultReported() {
+        hasPendingToolCall = false
+        if phase == .awaitingToolResult {
+            phase = .idle
+        }
+    }
+
+    mutating func recordUserStartedSpeaking() -> StepFunTurnAction {
+        switch phase {
+        case .awaitingResponseDone:
+            phase = .interrupted
+            hasPendingToolCall = false
+            return .interruptModelResponse
+        case .awaitingPlaybackDrain, .awaitingToolResult:
+            phase = .idle
+            hasPendingToolCall = false
+            return .abandonCurrentTurn
+        case .idle:
+            // A tool call can be running without speech (the model called the
+            // tool first). The user speaking now cancels it.
+            guard hasPendingToolCall else { return .none }
+            hasPendingToolCall = false
+            return .abandonCurrentTurn
+        case .interrupted:
+            return .none
+        }
+    }
+
+    mutating func reset() {
+        phase = .idle
+        hasPendingToolCall = false
+    }
+}
+
+// MARK: - Session
+
 @MainActor
 final class StepFunRealtimeSession {
     let state = StepFunRealtimeSessionState()
@@ -52,12 +234,33 @@ final class StepFunRealtimeSession {
     private let instructions: String
 
     private var audioEngine = AVAudioEngine()
-    private var audioPlayer = GeminiLiveAudioPlayer()
+    private let audioPlayer = GeminiLiveAudioPlayer()
     private let pcm16Converter: BuddyPCM16AudioConverter
 
-    /// The tool call that is currently executing, so its result can be reported
-    /// the moment the model finishes speaking.
+    private var turnLifecycle = StepFunTurnLifecycle()
     private var pendingToolWork: Task<String, Never>?
+    private var pendingToolCallID: String?
+    /// Incremented for every tool call. A delivery task checks it before
+    /// sending, so a superseded call can never report the wrong result.
+    private var pendingToolCallSequence = 0
+    private var toolResultDeliveryTask: Task<Void, Never>?
+    private var playbackDrainTask: Task<Void, Never>?
+    private var sessionLifetimeTask: Task<Void, Never>?
+
+    /// Bumped by start() and stop(). Every continuation captures it and refuses
+    /// to act once it changes, which is what stops an in-flight tool call or a
+    /// drain wait from continuing a session the user has already ended.
+    private var sessionRunID = 0
+
+    private var isMicrophoneTapInstalled = false
+
+    /// The player reports a buffer as rendered when it is consumed, but the last
+    /// few milliseconds are still inside the output hardware buffer. This margin
+    /// keeps the follow-up response from clipping the final syllable.
+    private static let playbackTailMargin: Duration = .milliseconds(200)
+    /// If the player's completion handlers never fire, continuing beats hanging
+    /// the conversation forever — but say so rather than pretending it drained.
+    private static let playbackDrainTimeout: Duration = .seconds(15)
 
     init(
         apiKey: String,
@@ -83,8 +286,11 @@ final class StepFunRealtimeSession {
         )
         // Bound only after every stored property exists: the closure captures the
         // session, which is not fully initialized while `client` is being built.
+        //
+        // No Task per event: the client awaits this handler on the main actor, so
+        // events are applied in the order the server sent them.
         self.client.eventHandler = { [weak self] event in
-            Task { await self?.handle(event) }
+            self?.handle(event)
         }
     }
 
@@ -92,6 +298,9 @@ final class StepFunRealtimeSession {
 
     func start() async {
         guard !state.isSessionActive, !state.isConnecting else { return }
+        sessionRunID += 1
+        let runID = sessionRunID
+
         state.isConnecting = true
         state.errorMessage = nil
         state.lastInputTranscript = ""
@@ -100,12 +309,21 @@ final class StepFunRealtimeSession {
 
         do {
             try await client.connect()
+            // stop() may have run while the handshake was in flight. Its
+            // disconnect may not have closed this socket: connect() can finish
+            // after stop() returns, leaving a live WebSocket that no session
+            // owns. Close it here instead of returning without a teardown.
+            guard runID == sessionRunID else {
+                client.disconnect()
+                return
+            }
             try startMicrophoneCapture()
             audioPlayer.startPlaying()
             state.isConnecting = false
             state.isSessionActive = true
-            startSessionLifetimeGuard()
+            startSessionLifetimeGuard(runID: runID)
         } catch {
+            guard runID == sessionRunID else { return }
             state.isConnecting = false
             state.isSessionActive = false
             state.errorMessage = error.localizedDescription
@@ -114,34 +332,30 @@ final class StepFunRealtimeSession {
     }
 
     func stop() async {
-        stopMicrophoneCapture()
-        sessionLifetimeTask?.cancel()
-        sessionLifetimeTask = nil
-        audioPlayer.detach()
-        audioPlayer.clearQueuedAudio()
-        state.isModelSpeaking = false
-        pendingToolWork?.cancel()
-        pendingToolWork = nil
-        pendingCallID = nil
-        client.disconnect()
+        sessionRunID += 1
+        // Mark the session down before teardown so an event already in flight
+        // takes the early-return path in handle() instead of touching a player
+        // that is about to be detached.
         state.isSessionActive = false
         state.isConnecting = false
-    }
 
-    /// Barge-in: the user started talking over the model.
-    ///
-    /// Stopping the audio is only half of it. Tool work that has been started but
-    /// not yet executed must be abandoned too — otherwise the desktop carries out
-    /// an action the user has just verbally countermanded. Whatever was already
-    /// executed cannot be undone, which is why actions are single-step.
-    private func beginBargeIn() {
-        setModelSpeaking(false)
+        playbackDrainTask?.cancel()
+        playbackDrainTask = nil
+        cancelOutstandingToolWork()
+        sessionLifetimeTask?.cancel()
+        sessionLifetimeTask = nil
+
+        stopMicrophoneCapture()
+
+        // Clear the queue before detaching: the player only resets its
+        // pending-buffer counter while it is still attached, and a stale count
+        // would make the next drain wait think audio was still playing.
         audioPlayer.clearQueuedAudio()
-        client.cancelCurrentResponse()
-        if let pendingToolWork {
-            pendingToolWork.cancel()
-            print("[StepFunRealtimeSession] barge-in abandoned an in-flight tool call")
-        }
+        audioPlayer.detach()
+
+        turnLifecycle.reset()
+        state.isModelSpeaking = false
+        client.disconnect()
     }
 
     /// Closes the user's turn and asks for a reply. Required in `.manual` mode.
@@ -158,53 +372,84 @@ final class StepFunRealtimeSession {
         // time always asks for the format that is current right now.
         audioEngine = AVAudioEngine()
         let inputNode = audioEngine.inputNode
-        let inputFormat = inputNode.inputFormat(forBus: 0)
 
-        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
-            throw NSError(
-                domain: "StepFunRealtimeSession",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Microphone format is invalid — sample rate \(inputFormat.sampleRate), channels \(inputFormat.channelCount)"]
+        // The player has to be on the same engine before voice processing is
+        // enabled: AUVoiceIO works on the whole engine and uses the downlink as
+        // the reference signal it subtracts from the microphone.
+        audioPlayer.attach(to: audioEngine)
+
+        // Check the raw hardware format first, so a missing or dead input device
+        // is reported as a microphone problem instead of being blamed on the
+        // echo canceller below.
+        let hardwareInputFormat = inputNode.inputFormat(forBus: 0)
+        guard hardwareInputFormat.sampleRate > 0, hardwareInputFormat.channelCount > 0 else {
+            throw StepFunRealtimeSessionError.microphoneFormatInvalid(
+                sampleRate: hardwareInputFormat.sampleRate,
+                channelCount: hardwareInputFormat.channelCount
             )
         }
-        print("[StepFunRealtimeSession] Mic input format: \(inputFormat)")
+
+        // This is the full-duplex requirement. Without it the model's own voice
+        // re-enters the microphone, the server's VAD hears it as the user, and
+        // every reply cancels itself. Muting the mic during playback instead
+        // would make barge-in impossible, so an unenableable AEC is a hard,
+        // visible failure rather than a silent fallback.
+        do {
+            try inputNode.setVoiceProcessingEnabled(true)
+        } catch {
+            throw StepFunRealtimeSessionError.echoCancellationUnavailable(reason: error.localizedDescription)
+        }
+        guard inputNode.isVoiceProcessingEnabled else {
+            throw StepFunRealtimeSessionError.echoCancellationUnavailable(reason: "系统报告未启用")
+        }
+
+        // Query the format AFTER enabling voice processing: the tap must match
+        // the node's post-processing output bus, which is the echo-cancelled one.
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
+            throw StepFunRealtimeSessionError.microphoneFormatInvalid(
+                sampleRate: inputFormat.sampleRate,
+                channelCount: inputFormat.channelCount
+            )
+        }
+        print("[StepFunRealtimeSession] Mic input format: \(inputFormat), voice processing enabled")
 
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
             guard let self else { return }
 
-            // CRITICAL: drop mic audio while the model is speaking. macOS does no
-            // echo cancellation on AVAudioEngine, so the speaker output re-enters
-            // the microphone and the server's VAD hears it as the user talking.
-            // That fires input_audio_buffer.speech_started, which triggers
-            // barge-in and cancels the model's own reply — forever. The result is
-            // an assistant that can never finish a sentence, with every other
-            // part of the loop working perfectly. The session this replaces
-            // carries the same guard for exactly this reason.
-            //
-            // Read on the real-time audio thread, so it must be a lock and not
-            // an actor hop: hopping to the main actor from here starves Core
-            // Audio and stutters playback.
-            guard !self.isModelCurrentlySpeaking() else { return }
-
-            // Converted on the audio thread and handed straight to the socket.
+            // Full duplex: buffers keep flowing while the model speaks. Echo
+            // removal is the voice-processing unit's job; dropping audio here
+            // instead would make a barge-in undetectable and would leave the
+            // microphone dead for the rest of the session if a turn ever failed
+            // to complete.
             guard let pcm16Data = self.pcm16Converter.convertToPCM16Data(from: buffer) else { return }
             self.client.sendAudioChunk(pcm16Data)
         }
-
-        // The player shares the engine that captures the microphone. Without this
-        // the engine has no player node, so startPlaying() succeeds and nothing is
-        // ever audible — the whole voice loop appears to work while silent.
-        audioPlayer.attach(to: audioEngine)
+        isMicrophoneTapInstalled = true
 
         audioEngine.prepare()
         try audioEngine.start()
+        print("[StepFunRealtimeSession] Mic capture started")
     }
 
-    private func startSessionLifetimeGuard() {
+    private func stopMicrophoneCapture() {
+        // Only remove a tap that was actually installed: removeTap without one
+        // raises an Objective-C exception, which would turn a failed start into
+        // a crash on the way out.
+        if isMicrophoneTapInstalled {
+            audioEngine.inputNode.removeTap(onBus: 0)
+            isMicrophoneTapInstalled = false
+        }
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
+    }
+
+    private func startSessionLifetimeGuard(runID: Int) {
         sessionLifetimeTask?.cancel()
         sessionLifetimeTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(Self.sessionLifetimeStopAfter * 1_000_000_000))
-            guard !Task.isCancelled, let self else { return }
+            guard !Task.isCancelled, let self, runID == self.sessionRunID else { return }
             // Surface it as a notice rather than an error: nothing went wrong, the
             // server simply would have dropped us a minute later.
             self.state.errorMessage = "语音会话即将达到服务端上限，已安全停止。再次按下快捷键即可继续。"
@@ -212,21 +457,24 @@ final class StepFunRealtimeSession {
         }
     }
 
-    private func stopMicrophoneCapture() {
-        audioEngine.inputNode.removeTap(onBus: 0)
-        audioEngine.stop()
-    }
+    // MARK: - Server events
 
-    // MARK: - Events
+    private func handle(_ event: StepFunRealtimeEvent) {
+        // Events can already be in flight when stop() runs. Acting on one after
+        // teardown would touch a detached player or a cancelled tool call.
+        guard state.isSessionActive || state.isConnecting else { return }
 
-    private func handle(_ event: StepFunRealtimeEvent) async {
         switch event {
         case .sessionReady:
             print("[StepFunRealtimeSession] Session ready")
 
         case .audioChunk(let pcm16Data):
+            // Audio already in flight from a response the user interrupted must
+            // neither play nor restart that turn. Drop it until a new
+            // `response.created` retires the interrupted phase.
+            guard turnLifecycle.phase != .interrupted else { return }
+            turnLifecycle.recordAudioChunkArrived()
             audioPlayer.enqueueAudioChunk(pcm16Data)
-            setModelSpeaking(true)
             state.isModelSpeaking = true
 
         case .inputTranscript(let text):
@@ -235,66 +483,188 @@ final class StepFunRealtimeSession {
         case .outputTranscript(let text):
             state.lastOutputTranscript += text
 
-        case .userStartedSpeaking:
-            beginBargeIn()
+        case .responseCreated:
+            turnLifecycle.recordResponseCreated()
 
         case .toolCall(let callID, let name, let argumentsJSON):
-            // Start the work now so it overlaps the speech already in progress.
-            state.lastToolActivity = "\(name)"
-            let toolHandler = self.toolHandler
-            pendingToolWork = Task.detached(priority: .userInitiated) {
-                do {
-                    return try await toolHandler.handleToolCall(name: name, argumentsJSON: argumentsJSON)
-                } catch {
-                    return "Action failed: \(error.localizedDescription)"
-                }
-            }
-            self.pendingCallID = callID
+            startToolWork(callID: callID, name: name, argumentsJSON: argumentsJSON)
 
         case .turnComplete:
-            setModelSpeaking(false)
-            state.isModelSpeaking = false
-            // The speech is over. Now it is safe to report the result.
-            guard let pendingToolWork else { return }
-            self.pendingToolWork = nil
+            handleResponseDone()
 
-            if pendingToolWork.isCancelled {
-                // The user interrupted while the action was in flight. Say so
-                // plainly rather than reporting an outcome that will not happen;
-                // the model needs *some* output to close the call.
-                client.sendToolResult(callID: pendingCallID ?? "", output: "已停止：用户中断了操作。")
-            } else {
-                let output = await pendingToolWork.value
-                client.sendToolResult(callID: pendingCallID ?? "", output: output)
-            }
-            pendingCallID = nil
-            state.lastInputTranscript = ""
-            state.lastOutputTranscript = ""
+        case .userStartedSpeaking:
+            handleUserStartedSpeaking()
 
         case .unexpectedDisconnect(let error):
             state.errorMessage = "Voice connection dropped: \(error.localizedDescription)"
-            await stop()
+            Task { await self.stop() }
 
         case .error(let error):
             state.errorMessage = error.localizedDescription
         }
     }
 
-    private var pendingCallID: String?
+    // MARK: - Turn handling
 
-    /// Set while the model's voice is being played, read from the audio tap.
-    ///
-    /// A plain lock rather than actor-isolated state because the tap runs on a
-    /// real-time thread: reaching the main actor from there would stall it.
-    private let modelSpeakingLock = NSLock()
-    private var modelSpeakingFlag = false
+    private func startToolWork(callID: String, name: String, argumentsJSON: String) {
+        let lifecycleAction = turnLifecycle.recordToolCallArrived()
+        guard lifecycleAction != .ignoreToolCallFromInterruptedTurn else {
+            print("[StepFunRealtimeSession] dropping a tool call from an interrupted turn")
+            return
+        }
+        state.lastToolActivity = name
 
-    func isModelCurrentlySpeaking() -> Bool {
-        modelSpeakingLock.withLock { modelSpeakingFlag }
+        // The model is allowed one tool per turn. A second call replaces the
+        // first rather than running two actions off one spoken request.
+        pendingToolWork?.cancel()
+
+        pendingToolCallSequence += 1
+        let toolHandler = self.toolHandler
+        let work = Task {
+            do {
+                return try await toolHandler.handleToolCall(name: name, argumentsJSON: argumentsJSON)
+            } catch {
+                return "Action failed: \(error.localizedDescription)"
+            }
+        }
+        pendingToolWork = work
+        pendingToolCallID = callID
+        print("[StepFunRealtimeSession] tool call \(name) started")
+
+        // Playback has already drained, so the result can go back now rather
+        // than waiting for a completion that has already arrived.
+        if lifecycleAction == .finishTurnWithToolResult {
+            deliverPendingToolResult(runID: sessionRunID)
+        }
     }
 
-    private func setModelSpeaking(_ isSpeaking: Bool) {
-        modelSpeakingLock.withLock { modelSpeakingFlag = isSpeaking }
+    private func handleResponseDone() {
+        switch turnLifecycle.recordResponseDoneArrived() {
+        case .beginPlaybackDrain:
+            startPlaybackDrainWait(runID: sessionRunID)
+        case .ignoreTurnCompletionAfterInterrupt:
+            // The user already cancelled this response; its late completion must
+            // not start a drain wait or report a tool result.
+            break
+        default:
+            break
+        }
+    }
+
+    /// Wait for the player to actually finish before letting the turn end.
+    ///
+    /// `response.done` only says the server stopped generating. The player can
+    /// still hold most of a sentence, and reporting a tool result or asking for
+    /// a follow-up response at that moment clips it off.
+    private func startPlaybackDrainWait(runID: Int) {
+        playbackDrainTask?.cancel()
+        playbackDrainTask = Task { [weak self] in
+            guard let self else { return }
+
+            let drainDeadline = ContinuousClock.now + Self.playbackDrainTimeout
+            while self.audioPlayer.isPlaying && ContinuousClock.now < drainDeadline {
+                try? await Task.sleep(for: .milliseconds(40))
+            }
+            if self.audioPlayer.isPlaying {
+                print("[StepFunRealtimeSession] ⚠ playback drain timed out with \(self.audioPlayer.pendingBufferCount) buffers still queued")
+            }
+
+            // The queue is empty, but the last buffer may still be in the output
+            // hardware buffer.
+            try? await Task.sleep(for: Self.playbackTailMargin)
+
+            guard !Task.isCancelled, runID == self.sessionRunID else { return }
+            self.handlePlaybackDrained(runID: runID)
+        }
+    }
+
+    private func handlePlaybackDrained(runID: Int) {
+        state.isModelSpeaking = false
+
+        switch turnLifecycle.recordPlaybackDrained() {
+        case .finishTurn:
+            resetTurnTranscripts()
+        case .finishTurnWithToolResult:
+            deliverPendingToolResult(runID: runID)
+        default:
+            break
+        }
+    }
+
+    private func deliverPendingToolResult(runID: Int) {
+        guard let toolWork = pendingToolWork, let callID = pendingToolCallID else {
+            // The call disappeared between the drain and here — an interruption
+            // cancelled it. There is nothing to report and the turn is over.
+            turnLifecycle.recordToolResultReported()
+            resetTurnTranscripts()
+            return
+        }
+        let callSequence = pendingToolCallSequence
+
+        toolResultDeliveryTask?.cancel()
+        toolResultDeliveryTask = Task { [weak self] in
+            let output = await toolWork.value
+            // Checked with no await in between, so nothing can start an
+            // interruption or a new session between here and the send.
+            guard let self, !Task.isCancelled, runID == self.sessionRunID,
+                  callSequence == self.pendingToolCallSequence,
+                  self.turnLifecycle.phase == .awaitingToolResult else { return }
+
+            self.client.sendToolResult(callID: callID, output: output)
+            self.turnLifecycle.recordToolResultReported()
+            self.pendingToolWork = nil
+            self.pendingToolCallID = nil
+            self.toolResultDeliveryTask = nil
+            self.resetTurnTranscripts()
+        }
+    }
+
+    private func handleUserStartedSpeaking() {
+        switch turnLifecycle.recordUserStartedSpeaking() {
+        case .interruptModelResponse:
+            // The user talked over the model. Stop the local playback first so
+            // the interruption feels immediate, then tell the server to stop
+            // generating. Tool work from the interrupted turn is abandoned:
+            // acting after the user has countermanded the request is worse than
+            // not acting.
+            state.isModelSpeaking = false
+            audioPlayer.clearQueuedAudio()
+            playbackDrainTask?.cancel()
+            playbackDrainTask = nil
+            cancelOutstandingToolWork()
+            client.cancelCurrentResponse()
+            print("[StepFunRealtimeSession] barge-in: cancelled the model response")
+
+        case .abandonCurrentTurn:
+            // The response had already finished generating, so there is nothing
+            // to cancel server-side — but its audio and tool result must not
+            // continue.
+            state.isModelSpeaking = false
+            audioPlayer.clearQueuedAudio()
+            playbackDrainTask?.cancel()
+            playbackDrainTask = nil
+            cancelOutstandingToolWork()
+            print("[StepFunRealtimeSession] barge-in: abandoned the finishing turn")
+
+        default:
+            break
+        }
+    }
+
+    private func cancelOutstandingToolWork() {
+        pendingToolWork?.cancel()
+        pendingToolWork = nil
+        pendingToolCallID = nil
+        // Retire the sequence so a delivery task already awaiting the old work
+        // cannot send its result after the interruption.
+        pendingToolCallSequence += 1
+        toolResultDeliveryTask?.cancel()
+        toolResultDeliveryTask = nil
+    }
+
+    private func resetTurnTranscripts() {
+        state.lastInputTranscript = ""
+        state.lastOutputTranscript = ""
     }
 
     /// Stops the session before the server's own 30-minute cap fires.
@@ -304,7 +674,6 @@ final class StepFunRealtimeSession {
     /// resume a task whose context is gone — and could repeat an action the user
     /// has already seen. Stopping and saying so keeps the user in control of what
     /// happens next.
-    private var sessionLifetimeTask: Task<Void, Never>?
     private static let sessionLifetimeStopAfter: TimeInterval = 29 * 60
 }
 
