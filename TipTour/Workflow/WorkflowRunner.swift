@@ -73,6 +73,8 @@ final class WorkflowRunner: ObservableObject {
         case postClickStateUnchanged(label: String)
         /// Teaching mode reached a step that requires synthetic input.
         case actionRequiresAutopilot(label: String)
+        /// A typed request no longer points at the focused field it named.
+        case inputTargetChanged
 
         var humanReadable: String {
             switch self {
@@ -87,6 +89,8 @@ final class WorkflowRunner: ObservableObject {
                 return "click on \"\(label)\" didn't seem to register"
             case .actionRequiresAutopilot(let label):
                 return "\"\(label)\" needs Autopilot"
+            case .inputTargetChanged:
+                return "input target changed; no text was sent"
             }
         }
     }
@@ -1165,6 +1169,27 @@ final class WorkflowRunner: ObservableObject {
             return AccessibilityTreeResolver().runningAppMatching(hint: hint)
         }()
         do {
+            if let targetID = step.targetID {
+                guard let targetApp,
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == targetApp.processIdentifier,
+                      let currentTarget = LocalPerceptionTargetCache.shared.currentTargets().first(where: { $0.id == targetID }) else {
+                    pause(.inputTargetChanged)
+                    return
+                }
+                let processIdentifier = targetApp.processIdentifier
+                let displayTop = Double(NSScreen.screens.first?.frame.maxY ?? 0)
+                let controls = await Task.detached {
+                    DesktopAccessibilityReader.read(processIdentifier: processIdentifier, primaryDisplayTop: displayTop)
+                }.value
+                guard operationToken == currentOperationToken, !Task.isCancelled else { return }
+                let target = DesktopTaskTarget(id: currentTarget.id, label: currentTarget.label, source: currentTarget.source,
+                    box: currentTarget.globalBox, display: currentTarget.displayFrame)
+                guard NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier,
+                      DesktopActionVerifier.matchingControls(target, in: controls).filter({ $0.isTextField && $0.focused == true }).count == 1 else {
+                    pause(.inputTargetChanged)
+                    return
+                }
+            }
             try await ActionExecutor.shared.typeText(
                 textToType,
                 activatingTargetApp: targetApp
@@ -1264,11 +1289,11 @@ final class WorkflowRunner: ObservableObject {
                 // Ignore activations of our own menu bar app — pressing
                 // the hotkey momentarily makes us frontmost.
                 if bundleID == Bundle.main.bundleIdentifier { return }
-                // Tolerate activations of the plan's target app — that's
-                // a legitimate part of nearly every workflow.
-                if self.activationMatchesCurrentPlanTarget(activatedApp) {
-                    return
-                }
+                let matchesPlanTarget = self.activationMatchesCurrentPlanTarget(activatedApp)
+                guard WorkflowApplicationSwitchPolicy.shouldPause(
+                    isOpenApplicationStep: self.activeStep?.type == .openApp,
+                    matchesPlanTarget: matchesPlanTarget
+                ) else { return }
                 self.pause(.userSwitchedToUnrelatedApp(bundleID: bundleID))
             }
         }
@@ -1334,14 +1359,25 @@ final class WorkflowRunner: ObservableObject {
             return nil
         }
 
+        var focusedWindowReference: AnyObject?
+        AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &focusedWindowReference)
+        if focusedWindowReference == nil {
+            AXUIElementCopyAttributeValue(axApp, kAXMainWindowAttribute as CFString, &focusedWindowReference)
+        }
+
         for window in windows {
+            let isFocusedWindow = focusedWindowReference.map { CFEqual(window, $0) } ?? false
+            var modalReference: AnyObject?
+            AXUIElementCopyAttributeValue(window, kAXModalAttribute as CFString, &modalReference)
+            let isModal = modalReference as? Bool
             // Sheets attached to the window. AX exposes sheets as
             // children of the window (role == "AXSheet"). Using string
             // literals for the role names instead of CoreFoundation
             // constants keeps this resilient across SDK versions where
             // the constant naming has changed.
             var sheetRef: AnyObject?
-            if AXUIElementCopyAttributeValue(window, kAXChildrenAttribute as CFString, &sheetRef) == .success,
+            if (isFocusedWindow || isModal == true),
+               AXUIElementCopyAttributeValue(window, kAXChildrenAttribute as CFString, &sheetRef) == .success,
                let children = sheetRef as? [AXUIElement] {
                 for child in children {
                     var roleRef: AnyObject?
@@ -1358,9 +1394,10 @@ final class WorkflowRunner: ObservableObject {
             // Standalone dialog windows — AX subrole "AXDialog" or
             // "AXSystemDialog". Both block parent-window interaction.
             var subroleRef: AnyObject?
-            if AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subroleRef) == .success,
-               let subrole = subroleRef as? String,
-               subrole == "AXDialog" || subrole == "AXSystemDialog" {
+            AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subroleRef)
+            if WorkflowModalPolicy.blocksCurrentWindow(
+                subrole: subroleRef as? String, isModal: isModal, isFocused: isFocusedWindow
+            ) {
                 var titleRef: AnyObject?
                 AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
                 return (titleRef as? String) ?? ""
@@ -1409,7 +1446,9 @@ final class WorkflowRunner: ObservableObject {
         let deadline = Date().addingTimeInterval(0.15)
 
         func walk(_ node: AXUIElement, depth: Int) {
-            guard triples.count < maxNodesToHash, depth < 8, Date() < deadline else { return }
+            // Browser content sits below several wrapper nodes. Keep the time
+            // and node budgets, but don't stop before reaching the web content.
+            guard triples.count < maxNodesToHash, depth < 16, Date() < deadline else { return }
 
             var roleRef: AnyObject?
             var titleRef: AnyObject?

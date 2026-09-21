@@ -1554,7 +1554,11 @@ final class TipTourEngine {
         switch step.type {
         case .observe:
             return false
-        case .click, .rightClick, .doubleClick, .openApp, .openURL, .setValue, .scroll:
+        case .openApp:
+            // App launch verification uses the foreground bundle identity; a
+            // fresh OCR/YOLO pass cannot add evidence and only delays voice.
+            return false
+        case .click, .rightClick, .doubleClick, .openURL, .setValue, .scroll:
             return true
         case .keyboardShortcut, .pressKey, .type, .waitForState:
             return true

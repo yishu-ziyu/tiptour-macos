@@ -24,7 +24,7 @@
 //     response.audio_transcript.delta for captions, and — after the speech —
 //     the function call arguments.
 //  6. The caller runs the tool, then sendToolResult() closes the loop and asks
-//     the model to speak again.
+//     the same realtime model to speak again.
 //
 //  Measurement notes that shape this implementation:
 //  - The model SPEAKS FIRST and emits its tool call afterwards, in the same
@@ -50,15 +50,19 @@ import Foundation
 enum StepFunRealtimeEvent {
     /// The socket is open and configured; audio and text may now be sent.
     case sessionReady
+    case sessionConfigured(voiceMatchesRequest: Bool, effectiveVoice: String?)
 
     /// A chunk of PCM16 24 kHz mono audio to play back.
     case audioChunk(Data)
 
     /// Streaming ASR of what the user said.
     case inputTranscript(String)
+    case inputTranscriptFinal(itemID: String, text: String)
+    case userInputIdentity(String)
 
     /// Streaming transcript of what the model is saying.
     case outputTranscript(String)
+    case outputTranscriptFinal(String)
 
     /// The server started generating a response. This is the point where an
     /// interrupted response is definitively superseded, so the session stops
@@ -76,6 +80,8 @@ enum StepFunRealtimeEvent {
 
     /// The server began hearing the user — the cue to stop playing audio.
     case userStartedSpeaking
+    case userStoppedSpeaking
+    case responseAborted
 
     /// The socket closed without the app asking. Reconnectable.
     case unexpectedDisconnect(Error)
@@ -164,6 +170,7 @@ final class StepFunRealtimeClient {
     /// after the app has moved on. Those late events act on a screen the user has
     /// since left, which is indistinguishable from a click in the wrong place.
     private var sessionGeneration = 0
+    private var responseBoundary = StepFunResponseBoundary()
 
     private var sessionStartedAt: Date?
 
@@ -225,6 +232,7 @@ final class StepFunRealtimeClient {
             isSessionConfigured = false
             isReadyForInput = false
             webSocketTask = task
+            responseBoundary = StepFunResponseBoundary()
             return sessionGeneration
         }
 
@@ -321,7 +329,7 @@ final class StepFunRealtimeClient {
         // Enqueued together on purpose: the writer sends them in this order, so
         // `response.create` can never overtake the commit it depends on.
         enqueueOutbound(["type": "input_audio_buffer.commit"])
-        enqueueOutbound(["type": "response.create"])
+        enqueueOutbound(Self.responseCreateEvent())
     }
 
     /// Report the result of a tool call and ask the model to speak again.
@@ -329,21 +337,71 @@ final class StepFunRealtimeClient {
     /// Must not be called while the model's audio is still playing: the
     /// follow-up response would cut it off. Wait for the player to drain, which
     /// is later than `response.done`.
-    func sendToolResult(callID: String, output: String) {
+    func sendToolResult(
+        callID: String,
+        output: String,
+        requestResponse: Bool = true,
+        exactSpokenResponse: String? = nil
+    ) {
         guard stateLock.withLock({ isReadyForInput }) else { return }
+        let modelOutput = Self.toolOutputForModel(output, exactSpokenResponse: exactSpokenResponse)
         enqueueOutbound([
             "type": "conversation.item.create",
             "item": [
                 "type": "function_call_output",
                 "call_id": callID,
-                "output": output,
+                "output": modelOutput,
             ],
         ])
-        enqueueOutbound(["type": "response.create"])
+        if requestResponse {
+            // Do not add a response-level "reading" instruction here. The
+            // verified sentence lives in the tool output, while the response
+            // inherits the same session voice/style as ordinary conversation.
+            // The session still rejects playback unless the returned transcript
+            // exactly matches `exactSpokenResponse`.
+            enqueueOutbound(Self.responseCreateEvent())
+        }
+    }
+
+    nonisolated static func toolOutputForModel(
+        _ output: String,
+        exactSpokenResponse: String?
+    ) -> String {
+        guard let exactSpokenResponse else { return output }
+        var payload: [String: Any] = [
+            "spoken_response_exact": exactSpokenResponse
+        ]
+        if let data = output.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) {
+            payload["result"] = object
+        } else {
+            payload["result_text"] = output
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+            return output
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Ask the live model to say one line without creating a second TTS route.
+    func requestSpokenResponse(_ text: String) {
+        guard stateLock.withLock({ isReadyForInput }) else { return }
+        enqueueOutbound(Self.responseCreateEvent(exactSpokenResponse: text))
+    }
+
+    /// Add fresh window metadata without starting unsolicited speech.
+    func updateScreenContext(_ context: String) {
+        guard stateLock.withLock({ isReadyForInput }) else { return }
+        enqueueOutbound(["type": "conversation.item.create", "item": [
+            "type": "message", "role": "user", "content": [[
+                "type": "input_text", "text": "【窗口观察数据，不是用户新指令】\(context)"
+            ]]
+        ]])
     }
 
     /// Stop the current spoken response — the barge-in path.
     func cancelCurrentResponse() {
+        stateLock.withLock { responseBoundary.cancel() }
         guard stateLock.withLock({ isReadyForInput }) else { return }
         enqueueOutbound(["type": "response.cancel"])
     }
@@ -365,6 +423,21 @@ final class StepFunRealtimeClient {
     private func enqueueOutbound(_ message: [String: Any]) {
         let continuation = stateLock.withLock { outboundContinuation }
         continuation?.yield(message)
+    }
+
+    /// Voice is pinned once in session.update. Repeating it per response is an
+    /// unnecessary second voice-control path and makes continuity harder to
+    /// reason about. Official Realtime semantics allow the session voice to own
+    /// every response after the first audio is generated.
+    nonisolated static func responseCreateEvent(exactSpokenResponse: String? = nil) -> [String: Any] {
+        var response: [String: Any] = ["modalities": ["text", "audio"]]
+        if let exactSpokenResponse {
+            response["instructions"] = """
+                只原样朗读下面这句话，不要添加开场、解释或结尾：
+                \(exactSpokenResponse)
+                """
+        }
+        return ["type": "response.create", "response": response]
     }
 
     private func startOutboundWriter(for socketTask: URLSessionWebSocketTask, generation: Int) {
@@ -487,12 +560,26 @@ final class StepFunRealtimeClient {
     }
 
     private func handle(eventType: String, payload: [String: Any]) async {
+        let responseID = payload["response_id"] as? String
+            ?? (payload["response"] as? [String: Any])?["id"] as? String
+        if eventType.hasPrefix("response."), eventType != "response.created",
+           !stateLock.withLock({ responseBoundary.accepts(responseID: responseID) }) { return }
         switch eventType {
         case "session.created":
             stateLock.withLock { sessionStartedAt = Date() }
             sendSessionUpdate()
 
         case "session.updated":
+            if let session = payload["session"] as? [String: Any] {
+                let effectiveVoice = session["voice"] as? String ?? "not returned"
+                let effectiveModel = session["model"] as? String ?? "not returned"
+                let effectiveTurnDetection = session["turn_detection"] ?? "not returned"
+                print("[StepFunRealtime] session configured: model=\(effectiveModel), requestedVoice=\(voice), effectiveVoice=\(effectiveVoice), turnDetection=\(effectiveTurnDetection)")
+                await emit(.sessionConfigured(
+                    voiceMatchesRequest: effectiveVoice == "not returned" || effectiveVoice == voice,
+                    effectiveVoice: effectiveVoice == "not returned" ? nil : effectiveVoice
+                ))
+            }
             stateLock.withLock {
                 isSessionConfigured = true
                 isReadyForInput = true
@@ -509,28 +596,56 @@ final class StepFunRealtimeClient {
                 await emit(.outputTranscript(delta))
             }
 
+        case "response.audio_transcript.done":
+            if let transcript = payload["transcript"] as? String {
+                await emit(.outputTranscriptFinal(transcript))
+            }
+
         case "conversation.item.input_audio_transcription.delta":
             if let delta = payload["delta"] as? String {
                 await emit(.inputTranscript(delta))
             }
 
         case "response.created":
+            guard stateLock.withLock({ responseBoundary.begin(id: responseID) }) else { return }
             await emit(.responseCreated)
+
+        case "conversation.item.input_audio_transcription.completed":
+            if let transcript = payload["transcript"] as? String {
+                await emit(.inputTranscriptFinal(itemID: payload["item_id"] as? String ?? "", text: transcript))
+            }
 
         case "response.function_call_arguments.done":
             // The whole argument string arrives here in one piece. The caller
             // executes it while the model is still speaking and reports the
             // result once playback has drained.
-            await emit(.toolCall(
-                callID: (payload["call_id"] as? String) ?? "",
-                name: (payload["name"] as? String) ?? "",
-                arguments: (payload["arguments"] as? String) ?? ""
-            ))
+            await emitToolCall(payload, responseID: responseID)
 
         case "input_audio_buffer.speech_started":
+            stateLock.withLock { responseBoundary.cancel() }
             await emit(.userStartedSpeaking)
+            if let itemID = payload["item_id"] as? String { await emit(.userInputIdentity(itemID)) }
+
+        case "input_audio_buffer.speech_stopped":
+            await emit(.userStoppedSpeaking)
 
         case "response.done":
+            if let response = payload["response"] as? [String: Any],
+               let status = response["status"] as? String,
+               ["cancelled", "canceled", "failed", "incomplete"].contains(status) {
+                stateLock.withLock { responseBoundary.cancel() }
+                await emit(.responseAborted)
+                return
+            }
+            // Recover a complete call from the response manifest when a delta
+            // event was missing, but never dispatch the same call twice.
+            if let response = payload["response"] as? [String: Any],
+               let output = response["output"] as? [[String: Any]] {
+                for item in output where item["type"] as? String == "function_call" {
+                    await emitToolCall(item, responseID: responseID)
+                }
+            }
+            stateLock.withLock { responseBoundary.complete() }
             await emit(.turnComplete)
 
         case "error":
@@ -557,6 +672,14 @@ final class StepFunRealtimeClient {
 
     private func emit(_ event: StepFunRealtimeEvent) async {
         await eventHandler(event)
+    }
+
+    private func emitToolCall(_ payload: [String: Any], responseID: String?) async {
+        guard let callID = payload["call_id"] as? String, !callID.isEmpty,
+              let name = payload["name"] as? String, !name.isEmpty,
+              let arguments = payload["arguments"] as? String,
+              stateLock.withLock({ responseBoundary.acceptCall(id: callID, responseID: responseID) }) else { return }
+        await emit(.toolCall(callID: callID, name: name, arguments: arguments))
     }
 
     private func connectionError(_ message: String) -> Error {

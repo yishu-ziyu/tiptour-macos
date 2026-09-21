@@ -30,6 +30,7 @@ struct TipTourSettingsView: View {
         }
         .frame(minWidth: 700, minHeight: 500)
         .background(DS.Colors.background)
+        .preferredColorScheme(.dark)
     }
 
     private var sidebar: some View {
@@ -51,9 +52,9 @@ struct TipTourSettingsView: View {
 
             Spacer()
 
-            Text("\(companionManager.selectedMode.title) selected\n\(companionManager.selectedMode.shortcut) to start")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(DS.Colors.textTertiary)
+            Text("当前：\(companionManager.selectedMode.title) · \(companionManager.selectedMode.kindLabel)\n\(companionManager.selectedMode.shortcut) 启动")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(DS.Colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 8)
         }
@@ -104,7 +105,7 @@ struct TipTourSettingsView: View {
 
             Text(selectedSection.subtitle)
                 .font(.system(size: 12))
-                .foregroundColor(DS.Colors.textTertiary)
+                .foregroundColor(DS.Colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -411,7 +412,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .models:
-            return "Choose your mode and add its API key. JEV is the default."
+            return "选择使用方式；阶跃语音和可选的 JEV 决策密钥可分别配置。"
         case .connections:
             return "Local harnesses and desktop action integrations."
         case .privacy:

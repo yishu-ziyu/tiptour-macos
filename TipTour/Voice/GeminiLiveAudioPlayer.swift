@@ -19,6 +19,26 @@ import AVFoundation
 import Combine
 import Foundation
 
+struct AudioPlaybackQueueState {
+    private(set) var pendingCount = 0
+    private(set) var generation = 0
+
+    mutating func schedule() -> Int {
+        pendingCount += 1
+        return generation
+    }
+
+    mutating func complete(generation completedGeneration: Int) {
+        guard completedGeneration == generation, pendingCount > 0 else { return }
+        pendingCount -= 1
+    }
+
+    mutating func reset() {
+        generation += 1
+        pendingCount = 0
+    }
+}
+
 @MainActor
 final class GeminiLiveAudioPlayer {
 
@@ -26,9 +46,9 @@ final class GeminiLiveAudioPlayer {
 
     private let playerNode = AVAudioPlayerNode()
 
-    /// PCM16 mono at 24kHz — both Gemini Live and OpenAI Realtime emit
-    /// audio in this format, so the same player works for both.
-    private let streamAudioFormat: AVAudioFormat
+    /// The player node requires Float32 PCM. Incoming PCM16 is converted
+    /// before scheduling, keeping the provider's 24kHz mono sample rate.
+    private let playbackAudioFormat: AVAudioFormat
 
     /// The engine the player is currently attached to. Owned by the
     /// session, not by us — this is a weak reference so a dropped
@@ -41,7 +61,7 @@ final class GeminiLiveAudioPlayer {
     private var isAttachedAndConnected: Bool = false
 
     /// Number of audio buffers we've scheduled on `playerNode` but
-    /// that haven't been rendered (consumed) yet. The session uses
+    /// that haven't finished playing yet. The session uses
     /// this — NOT `playerNode.isPlaying` — to decide when the model
     /// is actually done speaking. `AVAudioPlayerNode.isPlaying` stays
     /// true forever once `play()` is called, regardless of whether the
@@ -50,29 +70,25 @@ final class GeminiLiveAudioPlayer {
     ///
     /// scheduleBuffer's completion handler runs on an audio thread, so
     /// access is lock-protected.
-    private var pendingBufferCountStorage: Int = 0
+    private var playbackQueueState = AudioPlaybackQueueState()
     private let pendingBufferLock = NSLock()
 
     init() {
         guard let format = AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
+            commonFormat: .pcmFormatFloat32,
             sampleRate: GeminiLiveClient.outputSampleRate,
             channels: 1,
-            interleaved: true
+            interleaved: false
         ) else {
-            fatalError("[GeminiLiveAudio] Could not create 24kHz PCM16 format — this should never happen")
+            fatalError("[GeminiLiveAudio] Could not create 24kHz Float32 format — this should never happen")
         }
-        self.streamAudioFormat = format
+        self.playbackAudioFormat = format
     }
 
     // MARK: - Engine Attach / Detach
 
-    /// Attach the player node to a shared engine. The session calls this
-    /// during `startMicCapture` BEFORE installing the mic tap and BEFORE
-    /// enabling voice processing on the input node — the engine has to
-    /// know about both directions before AUVoiceIO is wired up, otherwise
-    /// the downlink DSP has no clock and the AEC fails with
-    /// "audio time stamp does not have valid sample time" log spam.
+    /// Attach the player to the session's stopped engine before capture starts,
+    /// so playback and microphone processing share the same audio graph.
     ///
     /// Connects the player to the engine's mainMixerNode so the engine
     /// handles sample-rate conversion from our 24kHz source to whatever
@@ -89,7 +105,7 @@ final class GeminiLiveAudioPlayer {
         }
 
         engine.attach(playerNode)
-        engine.connect(playerNode, to: engine.mainMixerNode, format: streamAudioFormat)
+        engine.connect(playerNode, to: engine.mainMixerNode, format: playbackAudioFormat)
         sharedEngine = engine
         isAttachedAndConnected = true
         print("[GeminiLiveAudio] player node attached to shared engine")
@@ -102,6 +118,7 @@ final class GeminiLiveAudioPlayer {
         guard isAttachedAndConnected, let engine = sharedEngine else {
             return
         }
+        pendingBufferLock.withLock { playbackQueueState.reset() }
         playerNode.stop()
         engine.detach(playerNode)
         sharedEngine = nil
@@ -122,13 +139,12 @@ final class GeminiLiveAudioPlayer {
 
     /// Clear any queued audio and re-arm the player so subsequent
     /// scheduleBuffer calls play back immediately. Used on barge-in /
-    /// echo-suppressed interrupt. Resets the pending buffer counter
-    /// since playerNode.stop() flushes the queue without firing any
-    /// completion handlers.
+    /// interruption. Retire the old queue before stopping: callbacks from
+    /// flushed buffers must not decrement the next response's count.
     func clearQueuedAudio() {
         guard isAttachedAndConnected else { return }
+        pendingBufferLock.withLock { playbackQueueState.reset() }
         playerNode.stop()
-        pendingBufferLock.withLock { pendingBufferCountStorage = 0 }
         if let engine = sharedEngine, engine.isRunning {
             playerNode.play()
         }
@@ -163,21 +179,20 @@ final class GeminiLiveAudioPlayer {
         // Track this buffer through render so the session can detect
         // when audio actually finishes playing. The completion handler
         // runs on a real-time audio thread — keep it cheap and lock-safe.
-        pendingBufferLock.withLock { pendingBufferCountStorage += 1 }
-        playerNode.scheduleBuffer(audioBuffer) { [weak self] in
+        let generation = pendingBufferLock.withLock { playbackQueueState.schedule() }
+        // The default callback reports data consumption, before audible playback
+        // finishes. Tool follow-ups must wait until the user has heard the reply.
+        playerNode.scheduleBuffer(audioBuffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             self?.pendingBufferLock.withLock {
-                if let self = self, self.pendingBufferCountStorage > 0 {
-                    self.pendingBufferCountStorage -= 1
-                }
+                self?.playbackQueueState.complete(generation: generation)
             }
         }
     }
 
     /// Convert a raw PCM16 Data chunk into an AVAudioPCMBuffer that
     /// AVAudioPlayerNode can schedule.
-    private func makeAudioBuffer(from pcm16Data: Data) -> AVAudioPCMBuffer? {
-        let bytesPerFrame = Int(streamAudioFormat.streamDescription.pointee.mBytesPerFrame)
-        guard bytesPerFrame > 0 else { return nil }
+    func makeAudioBuffer(from pcm16Data: Data) -> AVAudioPCMBuffer? {
+        let bytesPerFrame = MemoryLayout<Int16>.size
         // PCM16 mono => byte count must be divisible by 2. If the server
         // ever sends a different format (stereo, PCM24, etc.), the raw
         // bytes would produce scrambled audio or a silently-dropped
@@ -190,7 +205,7 @@ final class GeminiLiveAudioPlayer {
         guard frameCount > 0 else { return nil }
 
         guard let audioBuffer = AVAudioPCMBuffer(
-            pcmFormat: streamAudioFormat,
+            pcmFormat: playbackAudioFormat,
             frameCapacity: AVAudioFrameCount(frameCount)
         ) else {
             return nil
@@ -198,13 +213,17 @@ final class GeminiLiveAudioPlayer {
 
         audioBuffer.frameLength = AVAudioFrameCount(frameCount)
 
-        // Copy the raw PCM16 bytes straight into the buffer's int16ChannelData.
-        guard let destinationBuffer = audioBuffer.int16ChannelData?[0] else { return nil }
+        // Data need not be aligned to Int16. Decode little-endian samples
+        // explicitly and normalize the full signed range to [-1, 1).
+        guard let destinationBuffer = audioBuffer.floatChannelData?[0] else { return nil }
         pcm16Data.withUnsafeBytes { rawSourcePointer in
-            guard let sourceInt16Pointer = rawSourcePointer.baseAddress?.assumingMemoryBound(to: Int16.self) else {
-                return
+            for frameIndex in 0..<frameCount {
+                let sample = rawSourcePointer.loadUnaligned(
+                    fromByteOffset: frameIndex * bytesPerFrame,
+                    as: Int16.self
+                )
+                destinationBuffer[frameIndex] = Float(Int16(littleEndian: sample)) / 32768.0
             }
-            destinationBuffer.update(from: sourceInt16Pointer, count: frameCount)
         }
 
         return audioBuffer
@@ -217,12 +236,12 @@ final class GeminiLiveAudioPlayer {
     /// not whether there's still audio to render, so it stays true
     /// forever after the first scheduled buffer.
     var isPlaying: Bool {
-        return pendingBufferLock.withLock { pendingBufferCountStorage > 0 }
+        return pendingBufferLock.withLock { playbackQueueState.pendingCount > 0 }
     }
 
     /// Exposed for sessions that want to inspect the count directly
     /// (e.g. for logging). Same value `isPlaying` checks.
     var pendingBufferCount: Int {
-        return pendingBufferLock.withLock { pendingBufferCountStorage }
+        return pendingBufferLock.withLock { playbackQueueState.pendingCount }
     }
 }

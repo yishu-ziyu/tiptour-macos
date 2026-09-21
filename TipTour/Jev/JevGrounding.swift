@@ -40,6 +40,15 @@ nonisolated struct JevDecision {
     let ranked: [(candidate: JevCandidate, probability: Double)]
     /// How to act on the winner: "click" | "double_click" | "right_click".
     let actionKind: String
+    /// Raw winner probability for the action head. Keep this separate from
+    /// TypeSafe's chance-corrected `confidence`, which moves as options change.
+    let actionProbability: Double
+    /// Winner-vs-runner-up separation for the selected action.
+    let actionMargin: Double
+    /// Probability from the target head that corresponds to `actionKind`.
+    let targetProbability: Double
+    /// Winner-vs-runner-up separation for that matching target head.
+    let targetMargin: Double
     /// True when Jev's own top pick was the "none of these" option.
     let choseNone: Bool
     let metrics: JevCallMetrics
@@ -82,14 +91,15 @@ nonisolated enum JevGrounding {
         return kept
     }
 
-    /// The whole ask for one loop step: one `choice` over the candidates plus
-    /// three cheap companions. Bundled into one call because the state is
-    /// billed once and latency scales with question count, not option count.
+    /// The whole ask for one loop step. Action and action-conditioned target
+    /// heads are asked speculatively in one call. Code consumes only the target
+    /// head matching the selected action; unused heads can never cause effects.
     static func request(
         task: String,
         candidates: [JevCandidate],
         history: [String],
-        excluding: Set<String>
+        excluding: Set<String>,
+        forcedActionKind: String? = nil
     ) -> (state: [String: Any], questions: [String: JevQuestion], pool: [JevCandidate])? {
         let pool = Array(
             deduplicated(candidates).filter { !excluding.contains($0.id) }.prefix(maxCandidates)
@@ -109,26 +119,43 @@ nonisolated enum JevGrounding {
             "screen_elements": pool.map { ["id": $0.id, "describes": $0.describedForJev] }
         ]
 
-        let questions: [String: JevQuestion] = [
+        let targetQuestion: (String) -> JevQuestion = { description in
+            .choice(
+                instructions: "If the next operation were \(description), which single element should receive it to make progress on the task: \"\(task)\"? Consider what has already been done. Choose none when that operation has no valid target on this screen.",
+                criteria: criteria
+            )
+        }
+
+        let baseQuestions: [String: JevQuestion] = [
             "done": .noul(
                 instructions: "Judging only by what is on screen now and the actions already taken, has this task been completed: \"\(task)\"?"
             ),
             "absent": .noul(
                 instructions: "Is the control needed to make the next bit of progress on the task missing from the elements on screen?"
-            ),
-            "pick": .choice(
-                instructions: "Which single element should be acted on next to make progress on the task: \"\(task)\"? Consider what has already been done; do not repeat a step that already succeeded.",
-                criteria: criteria
-            ),
-            "kind": .choice(
-                instructions: "How should that element be acted on?",
+            )
+        ]
+        var questions = baseQuestions
+        if let forcedActionKind {
+            guard ["click", "double_click", "right_click"].contains(forcedActionKind) else { return nil }
+            let descriptions = [
+                "click": "a normal single left click",
+                "double_click": "a double click",
+                "right_click": "a right click"
+            ]
+            questions["target_\(forcedActionKind)"] = targetQuestion(descriptions[forcedActionKind]!)
+        } else {
+            questions["action"] = .choice(
+                instructions: "Which pointer operation should be used for the next step of the task: \"\(task)\"?",
                 criteria: [
                     "click": "A normal single left click — the default for buttons, menus, links, list rows",
                     "double_click": "Double click — opening a file or folder from a list",
                     "right_click": "Right click to open a context menu"
                 ]
             )
-        ]
+            questions["target_click"] = targetQuestion("a normal single left click")
+            questions["target_double_click"] = targetQuestion("a double click")
+            questions["target_right_click"] = targetQuestion("a right click")
+        }
         return (state, questions, pool)
     }
 
@@ -136,14 +163,39 @@ nonisolated enum JevGrounding {
     static func decision(
         from answers: [String: JevAnswer],
         pool: [JevCandidate],
-        metrics: JevCallMetrics
+        metrics: JevCallMetrics,
+        forcedActionKind: String? = nil
     ) throws -> JevDecision {
-        guard let pick = answers["pick"], let choice = pick.choice,
+        let supportedActions = ["click", "double_click", "right_click"]
+        let actionKind: String
+        let actionProbability: Double
+        let actionMargin: Double
+        if let forcedActionKind {
+            guard supportedActions.contains(forcedActionKind) else {
+                throw JevError.malformed("unsupported forced action")
+            }
+            actionKind = forcedActionKind
+            actionProbability = 1
+            actionMargin = 1
+        } else {
+            guard let action = answers["action"], let selectedAction = action.choice,
+                  supportedActions.contains(selectedAction),
+                  let actionProbabilities = action.probabilities, !actionProbabilities.isEmpty,
+                  actionProbabilities.values.allSatisfy({ $0.isFinite && (0...1).contains($0) }),
+                  let selectedProbability = actionProbabilities[selectedAction],
+                  selectedProbability == actionProbabilities.values.max(),
+                  actionProbabilities.keys.allSatisfy({ supportedActions.contains($0) }) else {
+                throw JevError.malformed("invalid action decision")
+            }
+            actionKind = selectedAction
+            actionProbability = selectedProbability
+            actionMargin = action.margin
+        }
+
+        guard let pick = answers["target_\(actionKind)"], let choice = pick.choice,
               choice == noneKey || pool.contains(where: { $0.id == choice }),
               let done = answers["done"]?.noul, (0...1).contains(done),
               let absent = answers["absent"]?.noul, (0...1).contains(absent),
-              let actionKind = answers["kind"]?.choice,
-              ["click", "double_click", "right_click"].contains(actionKind),
               let probabilities = pick.probabilities, !probabilities.isEmpty,
               probabilities.values.allSatisfy({ $0.isFinite && (0...1).contains($0) }),
               let chosenProbability = probabilities[choice],
@@ -168,6 +220,10 @@ nonisolated enum JevGrounding {
             absent: absent,
             ranked: ranked,
             actionKind: actionKind,
+            actionProbability: actionProbability,
+            actionMargin: actionMargin,
+            targetProbability: chosenProbability,
+            targetMargin: pick.margin,
             choseNone: choice == noneKey,
             metrics: metrics
         )

@@ -2,224 +2,370 @@
 //  StepFunRealtimeToolRouter.swift
 //  TipTour
 //
-//  Turns the voice model's two tool calls into desktop actions.
-//
-//  The routing is intentionally thin. `describe_screen` only reads what local
-//  perception already found and numbers it; `act_on_screen` only translates a
-//  number back into the label it stood for and hands that label to
-//  `JevPointerLoop`. Everything that actually decides and executes — grounding,
-//  target continuity, action kind, post-action validation — stays inside the
-//  existing loop, so the voice path has no separate notion of how to click.
-//
-//  Why a label rather than a coordinate: the model is never given one, so it
-//  cannot invent one, and the loop re-perceives before acting so a control that
-//  moved in the meantime is still found.
+//  Screen questions use visual context; action requests enter the shared task
+//  coordinator directly. Concrete target identities survive model handoffs.
 //
 
+import AppKit
 import Foundation
 
 @MainActor
 final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
     private let engine: TipTourEngine
+    private let visionClient: StepFunVisionClient
     private var currentDescription: StepFunScreenDescription?
+    private var describedTargets: [Int: DesktopTaskTarget] = [:]
+    private var screenHistory: [String] = []
+    private var windowMonitor: Task<Void, Never>?
+    private var inputMonitor: Any?
+    private var contentVersion = 0
+    private var lastWindowContext = ""
+    private var currentTurnID = UUID().uuidString
+    var onWindowContextChanged: ((String) -> Void)?
+    private lazy var executor = DesktopTaskExecutor(engine: engine, currentContext: { [weak self] in
+        self?.executionContext()
+    })
 
-    /// How many controls to put in front of the model.
-    ///
-    /// A full desktop can carry hundreds of detections. Jev's own guidance says
-    /// accuracy degrades as the state grows, and a spoken list nobody can follow
-    /// is worse than a short one. The engine's own ceiling is higher; this is the
-    /// number that is actually useful to a person listening.
-    static let maximumControlsPresented = 30
+    private lazy var coordinator = DesktopTaskCoordinator(
+        observe: { [weak self] in
+            guard let self else { throw CancellationError() }
+            return try await self.observeForAction()
+        },
+        observeContext: { [weak self] in
+            guard let self else { throw CancellationError() }
+            return try self.observeContextForAction()
+        },
+        decideWithStep: { [weak self] goal, step, observation, history, useGeneralReasoning in
+            guard let self else { throw CancellationError() }
+            return try await self.chooseStep(goal: goal, step: step, observation: observation,
+                                             history: history, useGeneralReasoning: useGeneralReasoning)
+        },
+        executeStep: { [weak self] goal, observation, target, step in
+            guard let self else { throw CancellationError() }
+            return try await self.executor.execute(goal: goal, observation: observation, target: target, step: step)
+        }
+    )
 
-    init(engine: TipTourEngine) {
+    init(engine: TipTourEngine, visionClient: StepFunVisionClient) {
         self.engine = engine
+        self.visionClient = visionClient
     }
 
-    /// True while one `act_on_screen` is running. A voice model that repeats a
-    /// call — or issues a second one before the first has landed — would
-    /// otherwise produce two clicks from one spoken request.
-    private var isActionInFlight = false
+    func startMonitoring() {
+        windowMonitor?.cancel()
+        if let inputMonitor { NSEvent.removeMonitor(inputMonitor) }
+        inputMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.scrollWheel, .leftMouseDown, .keyDown]) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.contentVersion += 1
+                self?.currentDescription = nil
+                self?.describedTargets = [:]
+            }
+        }
+        windowMonitor = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                guard let app = NSWorkspace.shared.frontmostApplication,
+                      app.bundleIdentifier != Bundle.main.bundleIdentifier else { continue }
+                let context = "app=\(app.localizedName ?? "unknown"), window=\(self.currentWindowID() ?? -1)"
+                if context != self.lastWindowContext {
+                    self.lastWindowContext = context
+                    self.currentDescription = nil
+                    self.describedTargets = [:]
+                    self.onWindowContextChanged?(context)
+                }
+            }
+        }
+    }
+
+    func stopMonitoring() {
+        windowMonitor?.cancel()
+        windowMonitor = nil
+        if let inputMonitor { NSEvent.removeMonitor(inputMonitor) }
+        inputMonitor = nil
+    }
+
+    func interrupt() {
+        coordinator.interrupt()
+        WorkflowRunner.shared.stop()
+    }
+
+    func beginUserTurn(_ turnID: String) { currentTurnID = turnID }
 
     func handleToolCall(name: String, argumentsJSON: String) async throws -> String {
+        let arguments = try JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8)) as? [String: Any] ?? [:]
         switch name {
         case "describe_screen":
-            return await describeScreen(argumentsJSON: argumentsJSON)
+            return await describeScreen(intent: arguments["intent"] as? String ?? "描述当前屏幕")
         case "act_on_screen":
-            return await actOnScreen(argumentsJSON: argumentsJSON)
-        default:
-            // An unknown tool is a configuration error, not something to guess at.
-            return "Unknown tool \(name). Available: describe_screen, act_on_screen."
-        }
-    }
-
-    // MARK: - describe_screen
-
-    private func describeScreen(argumentsJSON: String) async -> String {
-        let intent = stringArgument("intent", in: argumentsJSON) ?? ""
-
-        // A fresh refresh is what makes the numbering trustworthy: the whole
-        // point of the number is that it refers to what is on screen now.
-        let targetList = await engine.localPerceptionTargets(
-            refresh: true,
-            reason: "voice describe_screen"
-        )
-
-        guard targetList.ok, !targetList.targets.isEmpty else {
-            currentDescription = nil
-            return """
-                No interactive controls were detected. Screen recording or accessibility \
-                permission may be missing — ask the user to grant it in System Settings.
-                """
-        }
-
-        let ranked = rankByRelevanceToIntent(targetList.targets, intent: intent)
-        let presented = Array(ranked.prefix(Self.maximumControlsPresented))
-
-        let entries = presented.enumerated().map { position, target in
-            StepFunScreenControlEntry(
-                index: position + 1,
-                label: target.label,
-                kind: controlKind(for: target)
-            )
-        }
-        currentDescription = StepFunScreenDescription(
-            entries: entries,
-            activeAppName: targetList.activeAppName
-        )
-
-        let rendered = currentDescription?.renderedForVoiceModel() ?? ""
-        print("[StepFunRealtimeTools] describe_screen: \(entries.count) of \(targetList.targetCount) controls, intent=\"\(intent)\"")
-        return rendered
-    }
-
-    /// Orders detections so the ones the user probably means come first.
-    ///
-    /// Deliberately simple — a substring test against the label, plus the
-    /// detector's own confidence. A semantic ranker here would mean a network
-    /// call on every description, which is latency this loop cannot afford, and
-    /// the confidence floor already keeps junk out of the list.
-    private func rankByRelevanceToIntent(
-        _ targets: [LocalPerceptionTargetCache.SnapshotTarget],
-        intent: String
-    ) -> [LocalPerceptionTargetCache.SnapshotTarget] {
-        let normalisedIntent = intent.trimmingCharacters(in: .whitespacesAndNewlines)
-        return targets.sorted { left, right in
-            let leftScore = relevanceScore(of: left, to: normalisedIntent)
-            let rightScore = relevanceScore(of: right, to: normalisedIntent)
-            if leftScore != rightScore { return leftScore > rightScore }
-            return left.confidence > right.confidence
-        }
-    }
-
-    private func relevanceScore(
-        of target: LocalPerceptionTargetCache.SnapshotTarget,
-        to intent: String
-    ) -> Double {
-        guard !intent.isEmpty, !target.label.isEmpty else { return 0 }
-        // The label appearing verbatim in what the user said is the strongest
-        // signal available without a language model.
-        if intent.localizedCaseInsensitiveContains(target.label) { return 3 }
-        // A two-character overlap catches Chinese compounds split differently in
-        // speech ("新建标签" vs "新标签页") without needing a tokenizer.
-        if intent.count >= 2, target.label.count >= 2 {
-            let labelPrefix = String(target.label.prefix(2))
-            if intent.contains(labelPrefix) { return 1 }
-        }
-        return 0
-    }
-
-    /// What to call a control when reading it back. Local perception sources are
-    /// already coarse ("ocr", "yolo", "ax"); this keeps the spoken list honest
-    /// about what kind of thing each row is.
-    private func controlKind(for target: LocalPerceptionTargetCache.SnapshotTarget) -> String {
-        switch target.source {
-        case "ax": return "control"
-        case "ocr": return "text"
-        case "yolo": return "element"
-        default: return target.source.isEmpty ? "control" : target.source
-        }
-    }
-
-    // MARK: - act_on_screen
-
-    private func actOnScreen(argumentsJSON: String) async -> String {
-        guard let description = currentDescription, !description.isExpired else {
-            return """
-                The screen description has expired. Call describe_screen again before \
-                choosing a control.
-                """
-        }
-
-        guard let index = integerArgument("index", in: argumentsJSON) else {
-            return "Missing or unreadable index. Pass the number from describe_screen."
-        }
-        guard !isActionInFlight else {
-            return "另一个操作正在进行中，请等它完成。"
-        }
-
-        switch resolveStepFunAction(description: description, requestedIndex: index) {
-        case .staleDescription:
-            return "屏幕描述已过期，请重新调用 describe_screen。"
-
-        case .unknownIndex(let available):
-            let list = available.map(String.init).joined(separator: ", ")
-            return """
-                编号 \(index) 不在当前列表中（可用：\(list)）。请重新调用 describe_screen。
-                """
-
-        case .ambiguousLabel(let label, let occurrences):
-            return """
-                屏幕上有 \(occurrences) 个名为「\(label)」的控件，无法确定要点哪一个。
-                请让用户说明具体位置或更完整的名称。
-                """
-
-        case .proceed(let entry):
-            // Consumed the moment it is used: whatever happens next, the numbering
-            // on screen is about to change, and acting twice on one description is
-            // a bug.
-            currentDescription = nil
-            isActionInFlight = true
-            defer { isActionInFlight = false }
-
-            let labelForTask = entry.label.isEmpty ? "unlabelled control" : entry.label
-
-            // One step per spoken request. The text-command path is allowed a long
-            // bounded loop because the user is watching a panel; over voice, each
-            // extra step is another turn of the user waiting without knowing why.
-            let loop = JevPointerLoop(engine: engine) { snapshot in
-                // Progress is reported through the session's own channel; the loop
-                // itself must not know a voice conversation exists.
-                print("[StepFunRealtimeTools] jev step \(snapshot.step): \(snapshot.note)")
+            let actionArguments: StepFunActionArguments
+            var requestedSteps: [DesktopActionStep]
+            do {
+                actionArguments = try StepFunActionArguments.decode(Data(argumentsJSON.utf8))
+                requestedSteps = try actionArguments.validatedSteps()
+            } catch {
+                return rejectedAction("任务参数不完整或有冲突，没有执行。")
             }
-            let outcome = await loop.run(task: labelForTask, app: description.activeAppName, maxSteps: 1)
-
-            let prefix = outcome.ok ? "Done." : "Could not do it."
-            return "\(prefix) \(outcome.message)"
+            var exactTarget: DesktopTaskTarget?
+            if let index = actionArguments.index {
+                guard let description = currentDescription,
+                      description.entry(index: index, observationID: actionArguments.observationID) != nil,
+                      let target = describedTargets[index] else {
+                    return rejectedAction("此前的观察编号已失效，没有执行；请保留目标重新定位。")
+                }
+                if let name = requestedSteps[0].targetLabel,
+                   DesktopActionStep.normalized(name) != DesktopActionStep.normalized(target.label) {
+                    return rejectedAction("观察编号与目标名称不一致，没有执行。")
+                }
+                requestedSteps[0].targetLabel = target.label
+                exactTarget = target
+            }
+            let goal = actionArguments.goal?.trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? exactTarget.map { "点击控件「\($0.label)」" } ?? ""
+            guard !goal.isEmpty else { return rejectedAction("缺少完整操作目标，没有执行。") }
+            currentDescription = nil
+            describedTargets = [:]
+            let continuationOnly = actionArguments.intent == .resume && actionArguments.steps == nil
+                && actionArguments.action == nil && actionArguments.targetLabel == nil && actionArguments.index == nil
+            let receipt = await coordinator.run(goal: goal, exactTarget: exactTarget,
+                resumePrevious: actionArguments.resumePrevious ?? false, steps: continuationOnly ? nil : requestedSteps,
+                intent: actionArguments.intent, turnID: currentTurnID)
+            DesktopVoiceTrace.event("task_result", turnID: receipt.turnID,
+                fields: ["task_id": receipt.taskID, "target_version": String(receipt.targetVersion), "status": receipt.status,
+                         "current_action_count": String(receipt.currentActions.count), "prior_action_count": String(receipt.priorActions.count)],
+                privateFields: ["receipt": receipt.toolOutput])
+            return receipt.toolOutput
+        default:
+            return "不支持工具 \(name)。"
         }
     }
 
-    // MARK: - Argument parsing
-
-    private func stringArgument(_ key: String, in json: String) -> String? {
-        guard let object = jsonObject(from: json),
-              let value = object[key] as? String else { return nil }
-        return value
-    }
-
-    private func integerArgument(_ key: String, in json: String) -> Int? {
-        guard let object = jsonObject(from: json) else { return nil }
-        if let value = object[key] as? Int { return value }
-        // Models routinely emit a JSON number for an integer parameter.
-        if let value = object[key] as? Double { return Int(value) }
-        if let value = object[key] as? String { return Int(value) }
-        return nil
-    }
-
-    private func jsonObject(from json: String) -> [String: Any]? {
-        guard let data = json.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
+    private func observeForAction(requireActionPermissions: Bool = true) async throws -> DesktopTaskObservation {
+        let state = engine.observe()
+        guard !requireActionPermissions || (state.isCuaActionDriverEnabled && state.isAutopilotEnabled) else {
+            throw NSError(domain: "DesktopTask", code: 1, userInfo: [NSLocalizedDescriptionKey: "需要开启桌面操作和自动点击。"])
         }
-        return object
+        let context = executionContext()
+        let previousFrameID = LocalPerceptionTargetCache.shared.frameEvidence()?.id
+        let list = await engine.localPerceptionTargets(refresh: true, reason: "voice action observation")
+        try Task.checkCancellation()
+        guard let app = list.activeBundleIdentifier, !app.isEmpty,
+              let context, context.app == app, executionContext() == context,
+              let frame = LocalPerceptionTargetCache.shared.frameEvidence(), frame.id != previousFrameID,
+              Date().timeIntervalSince(frame.capturedAt) < StepFunScreenDescription.validitySeconds else {
+            throw NSError(domain: "DesktopTask", code: 2, userInfo: [NSLocalizedDescriptionKey: "观察期间窗口已变化，请重新发起任务。"])
+        }
+        // This is the same image used by OCR, not a later screenshot of a
+        // different screen. The screenshot toggle still gates remote images.
+        let imageData = state.isScreenshotStreamingEnabled
+            ? NSBitmapImageRep(cgImage: frame.image).representation(using: .jpeg, properties: [.compressionFactor: 0.7]) : nil
+        let observation = DesktopTaskObservation(app: app, targets: list.targets.map(Self.taskTarget),
+            windowID: context.windowID, id: frame.id, capturedAt: frame.capturedAt, contentVersion: context.contentVersion,
+            imageDataURL: imageData.map { "data:image/jpeg;base64,\($0.base64EncodedString())" })
+        DesktopVoiceTrace.event("scene_observed", turnID: currentTurnID,
+            fields: ["observation_id": observation.id, "target_count": String(observation.targets.count)],
+            privateFields: ["candidates": observation.targets.map { "\($0.id) | \($0.label)" }.joined(separator: "\n")])
+        return observation
+    }
+
+    private func observeContextForAction() throws -> DesktopTaskObservation {
+        let state = engine.observe()
+        guard state.isCuaActionDriverEnabled, state.isAutopilotEnabled else {
+            throw NSError(domain: "DesktopTask", code: 1, userInfo: [NSLocalizedDescriptionKey: "需要开启桌面操作和自动操作。"])
+        }
+        guard let context = executionContext() else {
+            throw NSError(domain: "DesktopTask", code: 3, userInfo: [NSLocalizedDescriptionKey: "没有可用的前台应用上下文。"])
+        }
+        let observation = DesktopTaskObservation(
+            app: context.app,
+            targets: [],
+            windowID: context.windowID,
+            id: "ctx_\(UUID().uuidString.prefix(8))",
+            capturedAt: Date(),
+            contentVersion: context.contentVersion
+        )
+        DesktopVoiceTrace.event("action_context_observed", turnID: currentTurnID,
+            fields: ["observation_id": observation.id, "target_count": "0", "mode": "context_only"])
+        return observation
+    }
+
+    private func chooseStep(goal: String, step: DesktopActionStep, observation: DesktopTaskObservation, history: [String],
+                            useGeneralReasoning: Bool) async throws -> DesktopTaskDecision {
+        // Reuse the user's JEV key only when configured; otherwise the configured
+        // general StepFun model owns semantic selection. Exact targets need neither.
+        if !useGeneralReasoning, !(KeychainStore.get(forKey: "jevAPIKey", allowInteraction: false) ?? "").isEmpty,
+           let request = JevGrounding.request(task: goal, candidates: observation.targets.map { target in
+               JevCandidate(id: target.id, label: target.label, source: target.source, confidence: 1,
+                            centre: CGPoint(x: (target.box[0] + target.box[2]) / 2,
+                                            y: (target.box[1] + target.box[3]) / 2))
+           }, history: history, excluding: [],
+              forcedActionKind: step.allowsActionDecision ? nil : step.action.rawValue) {
+            let (answers, metrics) = try await JevClient.shared.ask(state: request.state, questions: request.questions)
+            let forcedAction = step.allowsActionDecision ? nil : step.action.rawValue
+            let decision = try JevGrounding.decision(from: answers, pool: request.pool, metrics: metrics,
+                                                      forcedActionKind: forcedAction)
+            let completed = decision.done >= JevGrounding.doneThreshold && (!decision.choseNone || !history.isEmpty)
+            print("[DesktopTask] decision provider=JEV, done=\(decision.done), choseNone=\(decision.choseNone), ms=\(metrics.milliseconds)")
+            return DesktopTaskDecision(targetID: decision.stopReason == nil ? decision.best?.candidate.id : nil,
+                                       action: decision.actionKind,
+                                       completed: completed,
+                                       reason: completed ? "JEV 判断目标已完成。" : (decision.stopReason ?? "JEV 已判断当前任务状态。"),
+                                       declined: decision.choseNone,
+                                       source: .jevFanout,
+                                       actionProbability: decision.actionProbability,
+                                       actionMargin: decision.actionMargin,
+                                       targetProbability: decision.targetProbability,
+                                       targetMargin: decision.targetMargin)
+        }
+        var imageDataURL: String?
+        if useGeneralReasoning {
+            guard executionContext()?.app == observation.app, currentWindowID() == observation.windowID,
+                  contentVersion == observation.contentVersion else { throw CancellationError() }
+            imageDataURL = engine.observe().isScreenshotStreamingEnabled ? observation.imageDataURL : nil
+        }
+        print("[DesktopTask] decision provider=StepFun general, visual=\(imageDataURL != nil)")
+        return try await visionClient.planDesktopStep(goal: goal, observation: observation, history: history, imageDataURL: imageDataURL)
+    }
+
+    private func describeScreen(intent: String, retriesRemaining: Int = 1) async -> String {
+        guard let frontmostApplication = NSWorkspace.shared.frontmostApplication,
+              let frontmostBundleIdentifier = frontmostApplication.bundleIdentifier,
+              frontmostBundleIdentifier != Bundle.main.bundleIdentifier,
+              let frontmostBundleURL = frontmostApplication.bundleURL else {
+            return "当前没有可确认的前台应用窗口。"
+        }
+
+        let visibleApplication = DesktopApplicationCandidate(
+            bundleIdentifier: frontmostBundleIdentifier,
+            url: frontmostBundleURL,
+            names: [frontmostApplication.localizedName ?? frontmostBundleIdentifier]
+        )
+        let presence = DesktopApplicationResolver.presence(of: visibleApplication)
+        guard presence.hasVisibleWindow else {
+            return "「\(frontmostApplication.localizedName ?? frontmostBundleIdentifier)」进程正在运行，但当前没有可见窗口，所以我不能说我看到了它。"
+        }
+
+        if Self.isWindowVisibilityConfirmation(intent) {
+            return presence.isForeground
+                ? "能确认当前前台是「\(frontmostApplication.localizedName ?? frontmostBundleIdentifier)」，而且它有可见窗口。"
+                : "应用有可见窗口，但当前没有位于前台，所以我不能说正在看它。"
+        }
+
+        let observation: DesktopTaskObservation
+        do { observation = try await observeForAction(requireActionPermissions: false) }
+        catch { return "当前画面尚未稳定，未取得有效观察。" }
+        let observedContentVersion = observation.contentVersion
+        guard !Task.isCancelled else { return "屏幕读取已取消。" }
+        let presented = observation.targets
+        let entries = presented.enumerated().map { index, target in
+            StepFunScreenControlEntry(index: index + 1, label: target.label, kind: target.source)
+        }
+        let description = StepFunScreenDescription(entries: entries, activeAppName: observation.app,
+            capturedAt: observation.capturedAt, observationID: observation.id)
+        let rendered = description.renderedForVoiceModel()
+
+        // Most conversational screen questions only need reliable app/window
+        // identity plus visible labels. Keep that path local and sub-second;
+        // reserve the remote vision model for genuinely visual semantics.
+        if !Self.requiresRemoteVisualSemantics(intent), !presented.isEmpty {
+            currentDescription = description
+            describedTargets = Dictionary(uniqueKeysWithValues: presented.enumerated().map { ($0.offset + 1, $0.element) })
+            let labels = presented.prefix(18).map(\.label).filter { !$0.isEmpty }
+            let summary = labels.isEmpty ? "没有读到可靠的界面文字。" : "本地能确认的界面文字或控件包括：\(labels.joined(separator: "、"))。"
+            DesktopVoiceTrace.event("screen_answer_local", turnID: currentTurnID,
+                fields: ["target_count": String(presented.count), "remote_vision": "false"])
+            return "当前可见窗口属于「\(frontmostApplication.localizedName ?? frontmostBundleIdentifier)」。\(summary)"
+        }
+
+        guard engine.observe().isScreenshotStreamingEnabled else {
+            return "当前截图发送已关闭。我能确认「\(frontmostApplication.localizedName ?? frontmostBundleIdentifier)」有可见窗口，但不能解释窗口里的视觉内容。\n\(rendered)"
+        }
+
+        let relatedProcessIdentifiers = DesktopApplicationResolver.processIdentifiers(
+            belongingTo: frontmostBundleURL
+        )
+        let windowCapture: CompanionWindowCGImageCapture
+        do {
+            guard let capturedWindow = try await CompanionScreenCaptureUtility.captureVisibleApplicationWindow(
+                processIdentifiers: relatedProcessIdentifiers
+            ) else {
+                return "读取时没有找到「\(frontmostApplication.localizedName ?? frontmostBundleIdentifier)」的可见窗口，所以我不能声称看到了内容。"
+            }
+            windowCapture = capturedWindow
+        } catch {
+            return "目标应用窗口截图失败：\(error.localizedDescription)。"
+        }
+        guard let jpegData = NSBitmapImageRep(cgImage: windowCapture.image)
+            .representation(using: .jpeg, properties: [.compressionFactor: 0.82]) else {
+            return "目标应用窗口无法编码为视觉输入。\n\(rendered)"
+        }
+        let imageDataURL = "data:image/jpeg;base64,\(jpegData.base64EncodedString())"
+        do {
+            let previous = screenHistory.joined(separator: "\n")
+            let result = try await visionClient.describeScreen(imageDataURL: imageDataURL, intent: intent,
+                                                               previousObservations: previous, controlsContext: rendered)
+            try Task.checkCancellation()
+            let currentFrontmostApplication = NSWorkspace.shared.frontmostApplication
+            let relatedProcessesStillCurrent = DesktopApplicationResolver.processIdentifiers(
+                belongingTo: frontmostBundleURL
+            ).contains(windowCapture.processIdentifier)
+            guard contentVersion == observedContentVersion,
+                  currentFrontmostApplication?.bundleIdentifier == frontmostBundleIdentifier,
+                  relatedProcessesStillCurrent else {
+                if retriesRemaining > 0 { return await describeScreen(intent: intent, retriesRemaining: retriesRemaining - 1) }
+                return "读取期间页面仍在变化，这份旧观察不能回答当前画面。请待页面稳定再读。"
+            }
+            // Create numbering only after the slow vision call and reject changed
+            // windows; final actions still revalidate the stored exact target.
+            currentDescription = description
+            describedTargets = Dictionary(uniqueKeysWithValues: presented.enumerated().map { ($0.offset + 1, $0.element) })
+            screenHistory.append("\(Date().formatted())，\(observation.app)，问题：\(intent)，观察：\(result.description)")
+            screenHistory = Array(screenHistory.suffix(4))
+            print("[StepFunRealtimeTools] screen vision completed in \(result.elapsedMilliseconds) ms")
+            let taskContext = coordinator.lastReceipt.map { "\n最近操作记录：\($0.toolOutput)" } ?? ""
+            return "当前屏幕观察（数据）：\n\(result.description)\n可操作控件：\n\(rendered)\(taskContext)"
+        } catch is CancellationError {
+            return "屏幕读取已取消。"
+        } catch {
+            return "屏幕读取失败：\(error.localizedDescription)。本地控件：\n\(rendered)"
+        }
+    }
+
+    private static func taskTarget(_ target: LocalPerceptionTargetCache.SnapshotTarget) -> DesktopTaskTarget {
+        DesktopTaskTarget(id: target.id, label: target.label, source: target.source, box: target.globalBox, display: target.displayFrame)
+    }
+
+    private static func isWindowVisibilityConfirmation(_ intent: String) -> Bool {
+        let normalized = DesktopActionStep.normalized(intent)
+        let asksWhetherVisible = normalized.contains("看到") || normalized.contains("看见") || normalized.contains("能看")
+        let asksForContent = normalized.contains("什么") || normalized.contains("内容") || normalized.contains("画面")
+        let isQuestion = normalized.contains("吗") || normalized.contains("没") || normalized.contains("是否")
+        return asksWhetherVisible && isQuestion && !asksForContent
+    }
+
+    private static func requiresRemoteVisualSemantics(_ intent: String) -> Bool {
+        let normalized = DesktopActionStep.normalized(intent)
+        let visualKeywords = [
+            "图片", "照片", "图像", "图表", "图里", "颜色", "视觉", "壁纸",
+            "视频", "外观", "长什么样", "形状", "画面细节", "这张图", "这个图"
+        ]
+        return visualKeywords.contains { normalized.contains($0) }
+    }
+
+    private func rejectedAction(_ detail: String) -> String {
+        DesktopTaskReceipt(goal: "未执行的请求", status: "failed", actions: [], detail: detail, turnID: currentTurnID).toolOutput
+    }
+
+    private func executionContext() -> DesktopExecutionContext? {
+        guard let app = NSWorkspace.shared.frontmostApplication, let identifier = app.bundleIdentifier else { return nil }
+        return DesktopExecutionContext(app: identifier, processIdentifier: app.processIdentifier,
+            windowID: currentWindowID(), contentVersion: contentVersion)
+    }
+
+    private func currentWindowID() -> Int? {
+        guard let processIdentifier = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
+        return windows.first { ($0[kCGWindowOwnerPID as String] as? Int) == Int(processIdentifier)
+            && ($0[kCGWindowLayer as String] as? Int) == 0 }?[kCGWindowNumber as String] as? Int
     }
 }

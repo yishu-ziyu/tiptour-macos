@@ -234,7 +234,8 @@ class NativeElementDetector {
             // Trade-off: ~200ms extra latency, negligible for our use case.
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = false
-            request.recognitionLanguages = ["en-US"]
+            // Chinese labels must survive OCR so voice-selected controls can reach JEV.
+            request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
             request.minimumTextHeight = 0.008
 
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])

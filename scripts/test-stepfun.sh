@@ -32,9 +32,15 @@ let package = Package(
 )
 SWIFT
 
-cp "$project_dir/TipTour/Voice/StepFunRealtimeTools.swift" "$test_dir/Sources/StepFunVoiceCore/"
+cp "$project_dir/TipTour/Voice/StepFunRealtimeTools.swift" \
+   "$project_dir/TipTour/Voice/DesktopTaskContract.swift" \
+   "$project_dir/TipTour/Voice/DesktopDecisionPacket.swift" \
+   "$project_dir/TipTour/Voice/DesktopTaskCoordinator.swift" \
+   "$project_dir/TipTour/Voice/DesktopVoiceTrace.swift" \
+   "$project_dir/TipTour/Perception/LocalTargetContinuity.swift" \
+   "$test_dir/Sources/StepFunVoiceCore/"
 
 sed 's/@testable import TipTour/@testable import StepFunVoiceCore/' \
     "$project_dir/TipTourTests/StepFunTests.swift" > "$test_dir/Tests/StepFunVoiceCoreTests/StepFunTests.swift"
 
-swift test --package-path "$test_dir"
+swift test --package-path "$test_dir" "$@"

@@ -64,7 +64,7 @@ replaces the signed bundle and macOS will re-request every permission. Use
 | `ENABLE_DEBUG_DYLIB` | `NO` |
 | `ENABLE_PREVIEWS` | `NO` |
 
-**This configuration makes macOS permissions survive a rebuild.** That is the whole
+**This configuration keeps the TCC designated requirement stable across rebuilds.** That is the whole
 point of it: without it, every build resets Accessibility, Screen Recording and
 Microphone, and re-granting by hand after each build is the single biggest tax on
 iterating.
@@ -118,3 +118,17 @@ never touch an installed bundle.
 | --- | --- |
 | `origin` | `https://github.com/yishu-ziyu/tiptour-macos.git` |
 | `upstream` | `https://github.com/milind-soni/tiptour-macos.git` |
+
+
+### Keychain prompts during local rebuilds
+
+The stable designated requirement above does **not** guarantee stable login-Keychain authorization.
+On 2026-09-20, the exact StepFun item (`com.yishuziyu.tiptour` / `stepfunAPIKey`) had trusted app
+paths but its partition ACL contained per-build `cdhash:` entries. The only available signing identity
+was the local self-signed certificate, with no Team ID. Thus a changed binary can ask for access again,
+even when Accessibility and microphone grants survive. Do not tell users they entered the key incorrectly.
+
+Successful key reads are now reused in process memory; settings display checks presence without decrypting.
+Successful writes replace that cached value and successful deletes remove it. This prevents repeated reads
+within one app process. It does not remove the OS authorization requirement for a newly rebuilt binary.
+Do not fix this by allowing every application to read the item, weakening its ACL, or writing the key to disk.

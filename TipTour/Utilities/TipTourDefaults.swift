@@ -38,8 +38,8 @@ enum TipTourDefaults {
         /// credits apply.
         static let visionModel = "step-3.7-flash"
 
-        /// Must be one of StepFun's published voices; the session rejects an empty one.
-        static let realtimeVoice = "qingchunshaonv"
+        /// User's custom StepFun voice, also used by By-Your-Side.
+        static let realtimeVoice = "voice-tone-T3kZb9MwL2"
     }
 
     static func registerDefaults() {

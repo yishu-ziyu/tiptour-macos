@@ -30,19 +30,6 @@ private func makeDescription(capturedAt: Date = Date()) -> StepFunScreenDescript
     StepFunScreenDescription(entries: makeEntries(), activeAppName: "Safari", capturedAt: capturedAt)
 }
 
-// MARK: - A valid request becomes an action
-
-@Test func validIndexResolvesToTheNamedControl() {
-    let resolution = resolveStepFunAction(description: makeDescription(), requestedIndex: 2)
-
-    guard case .proceed(let entry) = resolution else {
-        Issue.record("expected proceed, got \(resolution)")
-        return
-    }
-    #expect(entry.label == "新建标签页")
-    #expect(entry.kind == "control")
-}
-
 @Test func descriptionRendersEveryControlWithItsNumber() {
     let rendered = makeDescription().renderedForVoiceModel()
 
@@ -58,105 +45,18 @@ private func makeDescription(capturedAt: Date = Date()) -> StepFunScreenDescript
     #expect(empty.renderedForVoiceModel() == "No interactive controls were found on screen.")
 }
 
-// MARK: - A stale description never acts
-
-@Test func missingDescriptionIsRefused() {
-    #expect(resolveStepFunAction(description: nil, requestedIndex: 1) == .staleDescription)
-}
-
-@Test func expiredDescriptionIsRefused() {
-    // Far enough in the past to be outside the validity window, using the
-    // injectable capture instant rather than sleeping.
+@Test func expiredDescriptionCannotBeUsed() {
     let stale = makeDescription(capturedAt: Date().addingTimeInterval(-StepFunScreenDescription.validitySeconds - 1))
-
-    #expect(resolveStepFunAction(description: stale, requestedIndex: 2) == .staleDescription)
+    #expect(stale.isExpired)
+    #expect(!makeDescription().isExpired)
 }
 
-@Test func freshDescriptionIsStillUsable() {
-    let fresh = makeDescription(capturedAt: Date().addingTimeInterval(-1))
-
-    guard case .proceed = resolveStepFunAction(description: fresh, requestedIndex: 2) else {
-        Issue.record("expected a fresh description to be usable")
-        return
-    }
-}
-
-// MARK: - A number that names nothing is refused
-
-@Test func indexBeyondTheListIsRefusedAndListsWhatIsAvailable() {
-    let resolution = resolveStepFunAction(description: makeDescription(), requestedIndex: 9)
-
-    guard case .unknownIndex(let available) = resolution else {
-        Issue.record("expected unknownIndex, got \(resolution)")
-        return
-    }
-    #expect(available == [1, 2, 3])
-}
-
-@Test func zeroAndNegativeIndicesAreRefused() {
-    // A model asked for a numbered list has no reason to emit these; if it does,
-    // the request is malformed and must not become a click.
-    for index in [0, -1, -99] {
-        if case .proceed = resolveStepFunAction(description: makeDescription(), requestedIndex: index) {
-            Issue.record("index \(index) must not resolve to a control")
+@Test func invalidIndexTypesAreRejectedBeforeTargetResolution() {
+    for json in [#"{"goal":"点击","index":true}"#, #"{"goal":"点击","index":1.5}"#] {
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(StepFunActionArguments.self, from: Data(json.utf8))
         }
     }
-}
-
-// MARK: - An ambiguous name never becomes a click
-
-@Test func duplicatedLabelIsRefused() {
-    let ambiguous = StepFunScreenDescription(
-        entries: [
-            StepFunScreenControlEntry(index: 1, label: "更多", kind: "control"),
-            StepFunScreenControlEntry(index: 2, label: "更多", kind: "control"),
-            StepFunScreenControlEntry(index: 3, label: "保存", kind: "control"),
-        ],
-        activeAppName: "Safari"
-    )
-
-    guard case .ambiguousLabel(let label, let occurrences) = resolveStepFunAction(description: ambiguous, requestedIndex: 2) else {
-        Issue.record("expected ambiguousLabel, got the wrong case")
-        return
-    }
-    #expect(label == "更多")
-    #expect(occurrences == 2)
-}
-
-@Test func unambiguouslyNamedControlAmongDuplicatesStillResolves() {
-    // Refusing to describe repeated labels would lose coverage; only acting on
-    // one is dangerous, so the unique entry must still work.
-    let mixed = StepFunScreenDescription(
-        entries: [
-            StepFunScreenControlEntry(index: 1, label: "更多", kind: "control"),
-            StepFunScreenControlEntry(index: 2, label: "更多", kind: "control"),
-            StepFunScreenControlEntry(index: 3, label: "保存", kind: "control"),
-        ],
-        activeAppName: "Safari"
-    )
-
-    guard case .proceed(let entry) = resolveStepFunAction(description: mixed, requestedIndex: 3) else {
-        Issue.record("the unique label should still resolve")
-        return
-    }
-    #expect(entry.label == "保存")
-}
-
-@Test func threeCopiesOfTheSameLabelAreAlsoRefused() {
-    let tripled = StepFunScreenDescription(
-        entries: [
-            StepFunScreenControlEntry(index: 1, label: "关闭", kind: "control"),
-            StepFunScreenControlEntry(index: 2, label: "关闭", kind: "control"),
-            StepFunScreenControlEntry(index: 3, label: "关闭", kind: "control"),
-        ],
-        activeAppName: nil
-    )
-
-    guard case .ambiguousLabel(_, let occurrences) = resolveStepFunAction(description: tripled, requestedIndex: 1) else {
-        Issue.record("expected ambiguousLabel")
-        return
-    }
-    #expect(occurrences == 3)
 }
 
 // MARK: - The tool declarations the model sees
@@ -170,22 +70,21 @@ private func makeDescription(capturedAt: Date = Date()) -> StepFunScreenDescript
     #expect(names.sorted() == ["act_on_screen", "describe_screen"])
 }
 
-@Test func actOnScreenRequiresNothingButAnIndex() {
+@Test func actOnScreenRequiresACompleteGoal() {
     let actOnScreen = StepFunRealtimeToolDeclarations.all.first { declaration in
         (declaration["function"] as? [String: Any])?["name"] as? String == "act_on_screen"
     }
     let parameters = (actOnScreen?["function"] as? [String: Any])?["parameters"] as? [String: Any]
     let required = parameters?["required"] as? [String]
 
-    // `action` must stay optional: the click kind is JEV's decision, and a
-    // misheard "double click" must not be able to force one.
-    #expect(required == ["index"])
+    // Legacy single-click requests remain valid; explicit workflows declare
+    // their action kinds inside steps instead of requiring a top-level action.
+    #expect(required == ["goal"])
 }
 
 @Test func modelIsNeverOfferedACoordinateParameter() {
-    // The load-bearing constraint. Vision models do not report usable pixel
-    // coordinates, so no tool may accept one — otherwise a hallucinated pair
-    // becomes a confident click in the wrong place.
+    // This tool contract uses observed identities, not free-form locations.
+    // It makes no general claim about a visual model's capabilities.
     let serialised = StepFunRealtimeToolDeclarations.all
         .compactMap { try? JSONSerialization.data(withJSONObject: $0) }
         .compactMap { String(data: $0, encoding: .utf8) }
@@ -195,4 +94,65 @@ private func makeDescription(capturedAt: Date = Date()) -> StepFunScreenDescript
         #expect(!serialised.lowercased().contains(forbidden.lowercased()),
                 "tool declarations must not mention \(forbidden)")
     }
+}
+
+@Test func observationNumberRequiresTheExactObservationIdentity() {
+    let description = makeDescription()
+    #expect(description.entry(index: 2, observationID: description.observationID)?.label == "新建标签页")
+    #expect(description.entry(index: 2, observationID: "another-frame") == nil)
+    #expect(description.entry(index: 2, observationID: nil) == nil)
+    #expect(description.entry(index: 500, observationID: description.observationID) == nil)
+}
+
+@Test func namesBeyondTheOldThirtyControlCutoffAreStillPresented() {
+    let entries = (1...80).map { StepFunScreenControlEntry(index: $0, label: "控件\($0)", kind: "ax") }
+    let description = StepFunScreenDescription(entries: entries, activeAppName: "fixture")
+    #expect(description.renderedForVoiceModel().contains("80. 控件80"))
+}
+
+@Test func malformedOrConflictingActionParametersNeverReachTheRunner() throws {
+    for json in [
+        #"{"goal":"点击 os","target_labe":"os"}"#,
+        #"{"goal":"点击 os","steps":[{"action":"click","target_labe":"os"}]}"#,
+        #"{"goal":"点击 os","action":"invented"}"#,
+        #"{"goal":"点击 os","index":2}"#,
+        #"{"goal":"点击 os","action":"click","text":"不应被忽略"}"#,
+        #"{"goal":"两步","action":"click","steps":[{"action":"click"}]}"#,
+        #"{"goal":"打开应用","action":"open_app"}"#,
+        #"{"goal":"输入","action":"type","text":"hello"}"#
+    ] {
+        #expect(throws: (any Error).self) {
+            let arguments = try StepFunActionArguments.decode(Data(json.utf8))
+            _ = try arguments.validatedSteps()
+        }
+    }
+}
+
+@Test func openApplicationAndExplicitWorkflowDecodeWithoutInventedScreenTargets() throws {
+    let application = try StepFunActionArguments.decode(Data(#"{"goal":"打开计算器","intent":"new","action":"open_app","application":"Calculator"}"#.utf8))
+    let applicationSteps = try application.validatedSteps()
+    #expect(applicationSteps.count == 1)
+    #expect(applicationSteps[0].action == .openApp)
+    #expect(applicationSteps[0].targetLabel == nil)
+    let workflow = try StepFunActionArguments.decode(Data(#"{"goal":"填写搜索框","steps":[{"action":"click","target_label":"搜索框"},{"action":"type","target_label":"搜索框","text":"Jarvis"}]}"#.utf8))
+    let workflowSteps = try workflow.validatedSteps()
+    #expect(workflowSteps.count == 2)
+    #expect(workflowSteps[1].text == "Jarvis")
+}
+
+@Test func omittedTopLevelPointerActionCanBeSelectedByDecisionLayer() throws {
+    let arguments = try StepFunActionArguments.decode(Data(#"{"goal":"打开那个项目"}"#.utf8))
+    let steps = try arguments.validatedSteps()
+    #expect(steps.count == 1)
+    #expect(steps[0].action == .click)
+    #expect(steps[0].allowsActionDecision)
+}
+
+@Test func explicitPointerActionStaysLocked() throws {
+    let arguments = try StepFunActionArguments.decode(Data(
+        #"{"goal":"右键那个项目","action":"right_click"}"#.utf8
+    ))
+    let steps = try arguments.validatedSteps()
+    #expect(steps[0].action == .rightClick)
+    #expect(!steps[0].allowsActionDecision)
 }

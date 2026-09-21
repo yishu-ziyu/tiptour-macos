@@ -46,6 +46,21 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
         let imageSize: CGSize
         let displayFrame: CGRect
         let timestamp: Date
+        let id: String
+        let image: CGImage?
+    }
+
+    struct FrameEvidence {
+        let id: String
+        let capturedAt: Date
+        let image: CGImage
+    }
+
+    func frameEvidence() -> FrameEvidence? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let snapshot, let image = snapshot.image else { return nil }
+        return FrameEvidence(id: snapshot.id, capturedAt: snapshot.timestamp, image: image)
     }
 
     private let lock = NSLock()
@@ -63,9 +78,20 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
     func update(
         elements: [[String: Any]],
         imageSize: CGSize,
-        displayFrame: CGRect
+        displayFrame: CGRect,
+        capturedImage: CGImage? = nil,
+        capturedAt: Date = Date(),
+        visualTargetWindowFrame: CGRect? = nil
     ) {
-        let parsedCandidates = parseCandidates(from: elements)
+        let parsedCandidates = parseCandidates(from: elements).filter { candidate in
+            // AX already belongs to the selected app/window (including its
+            // menu bar). Whole-display OCR/YOLO can also see other apps.
+            guard candidate.source != "ax", let visualTargetWindowFrame else { return true }
+            let frame = screenshotPixelRectToGlobalScreen(candidate.screenshotRect,
+                imageSize: imageSize, displayFrame: displayFrame)
+            return visualTargetWindowFrame.contains(CGPoint(x: frame.midX, y: frame.midY))
+                && visualTargetWindowFrame.intersection(frame).area >= frame.area * 0.8
+        }
         let labelEnrichedCandidates = candidatesWithResolvedLabels(parsedCandidates)
 
         lock.lock()
@@ -73,7 +99,9 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
             candidates: labelEnrichedCandidates,
             imageSize: imageSize,
             displayFrame: displayFrame,
-            timestamp: Date()
+            timestamp: capturedAt,
+            id: UUID().uuidString,
+            image: capturedImage
         )
         lock.unlock()
     }
@@ -144,7 +172,7 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
         let cacheAgeMs = Int(Date().timeIntervalSince(currentSnapshot.timestamp) * 1000)
         guard cacheAgeMs < 60_000 else { return [] }
 
-        return currentSnapshot.candidates
+        let sortedCandidates = currentSnapshot.candidates
             .filter { !$0.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .sorted { first, second in
                 let firstPriority = sourcePriority(first.source)
@@ -154,7 +182,33 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
                 }
                 return firstPriority > secondPriority
             }
-            .prefix(limit)
+        // OCR and YOLO can describe the same control. Keep the preferred source,
+        // but retain matching labels in separate rows and larger parent regions.
+        var uniqueCandidates: [Candidate] = []
+        for candidate in sortedCandidates {
+            let isDuplicate = uniqueCandidates.contains { existing in
+                guard existing.source != candidate.source else { return false }
+                let existingRect = existing.screenshotRect
+                let candidateRect = candidate.screenshotRect
+                let intersection = existingRect.intersection(candidateRect)
+                guard !intersection.isNull else { return false }
+                // A detector box cannot rename an almost-identical AX control.
+                // Keep the app's own label, not a nearby OCR label borrowed by
+                // YOLO. Different locations still remain distinct candidates.
+                if existing.source == "ax", candidate.source == "yolo",
+                   intersection.area >= max(existingRect.area, candidateRect.area) * 0.8 {
+                    return true
+                }
+                guard existing.label == candidate.label else { return false }
+                let smallerArea = min(existingRect.area, candidateRect.area)
+                let heightRatio = max(existingRect.height, candidateRect.height)
+                    / min(existingRect.height, candidateRect.height)
+                return intersection.area / smallerArea >= 0.8 && heightRatio <= 4
+            }
+            if !isDuplicate { uniqueCandidates.append(candidate) }
+        }
+
+        return uniqueCandidates.prefix(limit)
             .enumerated()
             .map { index, candidate in
                 let globalRect = screenshotPixelRectToGlobalScreen(
@@ -244,7 +298,7 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
                 candidate.screenshotCenter.y - ocrCandidate.screenshotCenter.y
             )
 
-            guard overlapRatio > 0.25 || centerDistance < max(candidate.screenshotRect.width, candidate.screenshotRect.height) * 0.9 else {
+            guard overlapRatio > 0.25, expandedCandidateRect.contains(ocrCandidate.screenshotCenter) else {
                 return nil
             }
 
@@ -486,6 +540,7 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
     }
 
     private func sourcePriority(_ source: String) -> Int {
+        if source == "ax" { return 6 }
         if source == "ocr" { return 4 }
         return 1
     }

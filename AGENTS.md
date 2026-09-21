@@ -7,13 +7,14 @@ This file is the source of truth for coding agents; CLAUDE.md is a symlink.
 macOS 14.2+ menu bar-only SwiftUI/AppKit app (`LSUIElement=true`). Three provider modes ship together on `main` — `jev`, `gemini` (being retired) and `stepfun`:
 
 - **Gemini realtime**: Ctrl+Option toggles a voice session. Audio and optional screenshots go directly to Gemini using the user's Keychain key. One tool per user turn: a single desktop workflow action or the existing Apple Notes convenience action.
-- **StepFun realtime voice**: Ctrl+Option runs a full-duplex voice session. The model
-  receives **no image input** — it cannot see the screen. It calls `describe_screen` to get a
-  numbered list of locally detected controls and `act_on_screen` to click one by number, so it
-  never handles a coordinate. Voice actions are bounded to a single step per spoken request.
+- **StepFun realtime voice**: Ctrl+Option runs a full-duplex voice session. `response.audio.delta` from that same Realtime session is the only playback source; interruptions clear queued audio and pending actions. The realtime model receives **no direct image input**. `describe_screen` passes the locally captured image and its bounded AX/OCR candidate list to the vision client, with one observation ID. Screenshots obey the existing permission/toggle. An index requires that same observation ID; visual prose alone is not a clickable target.
+  `act_on_screen` defaults to **one action**. Workflows require an explicit list of at most six steps; each result must be independently verified before continuing. Exact names and location constraints restrict the candidate set before model selection; a missing named target gets one re-observation, not an unrelated substitute. Supported primitives are click/double-click/right-click, open_app, type, press_key, shortcut and scroll, all through the existing engine. Typing requires a named, already-focused field and complete text.
+  A top-level pointer request may omit `action`; in that narrow case JEV chooses click/double-click/right-click. Explicit actions and every workflow-step action are locked and cannot be overridden by JEV.
+  `new`, `resume` and `correct` distinguish task intent. Current and historical actions are separate; verified progress is recorded even if interruption arrives before the receipt. Explicit resume cannot execute an unrelated or rejected plan. Unknown action outcomes are not automatically repeated.
+  Normal conversation plays Realtime audio as it arrives. Session voice is configured once in `session.update`; response.create never overrides it again. Once a response emits a real tool call, any queued/spilling tool-preamble audio from that response is suppressed; the result response is not created until the original response has actually ended. Action speech is generated from the current receipt: the same Realtime session receives a one-response exact-reading instruction, and its audio is buffered until the returned transcript matches that receipt. A mismatch is displayed but not played. Screen questions retain four historical observations; window/input changes invalidate old reads. Voice telemetry records speech-stop→first-audio latency and whether the server-reported voice matches the requested session voice, without raw audio/text by default.
 - **JEV text**: Ctrl+K opens the command panel. TypeSafe's `jev-latest` classifies locally detected screen labels and locations. JEV selects click/double-click/right-click targets, not prose or pixels. It acts on the top-ranked target without minimum probability or absent-score cutoffs. Its bounded loop stops on an explicit none choice, task completion, malformed responses, cancellation, action rejection/pause/failure, or 12 actions, with a final observation after the last action.
 
-JEV is the default selected mode. `stepfun` occupies the voice slot alongside the outgoing `gemini`. Onboarding is Choose mode → Save that mode’s API key → Grant its permissions; Gemini additionally requires microphone access. The previous onboarding flag is migrated to a new mode-setup completion flag so existing users also choose a mode. Settings → Models shows the selector and only the selected mode’s key input. Keys are stored only in macOS Keychain; no environment, sibling project, or hosted-key fallback. The UI must report Keychain errors accurately.
+JEV is the default selected mode. `stepfun` occupies the voice slot alongside the outgoing `gemini`. Onboarding is Choose mode → Save that mode’s API key → Grant its permissions; Both voice modes require microphone access. The previous onboarding flag is migrated to a new mode-setup completion flag so existing users also choose a mode. Settings → Models shows the selector and only the selected mode’s key input. Successful key reads are reused in process memory; settings check presence without decrypting. Keys are stored only in macOS Keychain; no environment, sibling project, or hosted-key fallback. The UI must report Keychain errors accurately.
 
 No Claude/Hermes integration, separate Flash Lite matcher, image-generation service, recording/video pipeline, or Worker proxy is bundled. Do not reintroduce them without an explicit user request.
 
@@ -24,8 +25,15 @@ No Claude/Hermes integration, separate Flash Lite matcher, image-generation serv
 - Ground exact local IDs/marks first, then AX, browser DOM/CDP, local CoreML/OCR, and finally Gemini screenshot coordinates. JEV never invents coordinates and never walks stale alternative rankings after a failed action.
 - JEV runs local detection while active without changing the user's persisted Accurate Grounding setting. Its command panel freezes position during execution; Escape/Stop cancels the task and active workflow.
 - Ctrl+Shift paints focus context for Gemini. Ctrl+Option+Command is a Speak/Type/Highlight input chooser, not an extra model mode.
-- Auto-click controls action delivery; Gemini supports point-only guidance, while JEV requires auto-click. CUA's toggle gates all desktop actions. Screenshots controls remote images, not local perception. Microphone is needed only for Gemini.
+- Auto-click controls action delivery; Gemini supports point-only guidance, while JEV requires auto-click. CUA's toggle gates all desktop actions. Screenshots controls remote images, not local perception. Both voice modes need the microphone.
 - AX is enabled for Electron on app activation. Preserve batched AX reads, messaging timeouts, target app pinning, clipboard/selected-range protections, and event-driven detection refreshes.
+- The perception cache retains one local image with its capture time and observation identity. Visual candidates are restricted to the target application's foreground window; whole-display OCR from other apps cannot become its controls. Window identity and bounds participate in capture invalidation; the JEV panel uses the application captured by its shortcut rather than the panel itself. AX controls are merged with OCR before ranking; secure AX fields are excluded by the AX reader. This does not redact screenshots, so the remote screenshot toggle remains important. Failed/superseded captures cannot replace newer observations. YOLO may only borrow overlapping OCR text; a highly overlapping YOLO box cannot rename the same AX control. Distinct same-name controls remain distinct.
+- `DesktopTaskExecutor` adapts voice steps to the shared engine. `DesktopActionVerifier` checks selected/focused state, typed values, or a newly visible explicit result label. A driver return, changing target set, or model `done` is insufficient. Generic keyboard/scroll outcomes without a checkable result remain unconfirmed; do not market that as full workflow completion.
+- `DesktopDecisionPacket` is the per-action SSOT for `intent / action / target / where / scope / confidence / perception / planning / evidence`. Exact and targetless actions create deterministic packets. Ambiguous pointer actions use JEV speculative fan-out: one request asks `action` plus `target_click`, `target_double_click`, and `target_right_click`; code consumes only the target head matching the chosen or explicitly locked action. Probability and margin are recorded but are not threshold-gated until labeled traffic exists.
+- `open_app` is a targetless fast path: it uses context-only observation, never requires screenshot/OCR/JEV, resolves localized installed-app names once to a bundle ID, then reuses WorkflowRunner/ActionExecutor and verifies that the target bundle has a live process. Intermediate app activations must not cancel the atomic launch; any later step still re-pins the foreground app/window before sending input, and unrelated switches still pause other action types.
+- `open_app` success means user-visible state, not merely a live process: the resolved app (including nested helper bundles) must own an on-screen top-level window and be foreground. If a background wrapper process exists with no window, LaunchServices gets one bounded reopen attempt; otherwise the receipt stays unverified and must not say the app opened.
+- `describe_screen` must describe the target application's visible window, never the cursor display as a substitute. It first checks for an on-screen top-level window, captures that `SCWindow` directly, and refuses visual claims when the app has no visible window. A yes/no “can you see it?” question is answered from local window state without the remote vision round-trip. Whole-display OCR/YOLO is suppressed when the selected app has no visible window so desktop/other-app text cannot be attributed to it.
+- `DesktopVoiceTrace` uses the `VoiceTask` unified-log category with status/identity metadata. Opt-in DEBUG `voiceDiagnosticTraceEnabled` writes bounded local raw diagnostics, not credentials or images. Do not enable it silently for private user sessions.
 - The localhost harness (`127.0.0.1:19474`) exposes the engine to developer clients. `/v1/agent-contract` is canonical. Preserve trace IDs, single-action workflow limits, and explicit deterministic `/v1/tasks` sequences.
 - Portable app instructions live in `TipTour/Skills/**/SKILL.md`; precedence is user overrides, project skills, then bundled skills. General documentation belongs outside the app target.
 
@@ -38,16 +46,33 @@ No Claude/Hermes integration, separate Flash Lite matcher, image-generation serv
 | `TipTour/Core/TipTourMode.swift` | JEV-first mode defaults, key/shortcut metadata and permission requirements (~30 lines) |
 | `TipTour/Core/TipTourEngine.swift` | Grounding, execution, validation and local harness facade |
 | `TipTour/Jev/JevClient.swift` | Keychain-authenticated TypeSafe API client |
-| `TipTour/Jev/JevGrounding.swift` | Bounded candidate requests and validated decisions |
+| `TipTour/Jev/JevGrounding.swift` | Bounded speculative action/target fan-out and validated decisions |
 | `TipTour/Jev/JevPointerLoop.swift` | Cancellable JEV action loop and immutable UI snapshots |
 | `TipTour/Jev/JevStepPanelView.swift` | Decision progress in the text panel |
 | `TipTour/Voice/GeminiLiveSession.swift` | Realtime session, microphone, screenshots and tool callbacks |
 | `TipTour/Voice/GeminiLiveClient.swift` | Gemini WebSocket protocol and tool declarations |
-| `TipTour/Voice/StepFunRealtimeClient.swift` | StepFun Realtime WebSocket protocol; serial sending and ordered connection-scoped events (~580 lines) |
-| `TipTour/Voice/StepFunRealtimeSession.swift` | StepFun voice session: echo cancellation, playback drain, interruption and tool lifecycle (~690 lines) |
-| `TipTour/Voice/StepFunRealtimeTools.swift` | The two tool declarations and the pure action-resolution rules (~210 lines) |
-| `TipTour/Voice/StepFunRealtimeToolRouter.swift` | Numbered candidates in, JEV loop out; the only path from voice to a click (~200 lines) |
-| `TipTour/Voice/StepFunVisionClient.swift` | Semantic disambiguation among numbered candidates; never returns coordinates (~250 lines) |
+| `TipTour/Voice/StepFunRealtimeClient.swift` | Ordered WebSocket events, response identity filtering and deduplicated calls (~640 lines) |
+| `TipTour/Voice/StepFunRealtimeSession.swift` | Full-duplex session, receipt speech, cancellation and production-path synthetic probe (~900 lines) |
+| `TipTour/Voice/StepFunRealtimeTools.swift` | Strict task/step parameters and observation-bound indices (~225 lines) |
+| `TipTour/Voice/StepFunRealtimeToolRouter.swift` | Shared scene identity, constrained routing and historical screen context (~260 lines) |
+| `TipTour/Voice/StepFunVisionClient.swift` | Screen understanding, history-aware comparison and bounded general-model decisions (~295 lines) |
+| `TipTourTests/StepFunVisionClientTests.swift` | Vision request format and malformed screen-description regressions (~65 lines) |
+| `TipTour/Voice/DesktopTaskCoordinator.swift` | Goal revisions, explicit step budget, verified progress and uncertain-effect protection (~270 lines) |
+| `TipTour/Voice/DesktopTaskContract.swift` | Typed actions, literal/spatial constraints and per-turn receipts/speech (~200 lines) |
+| `TipTour/Voice/DesktopDecisionPacket.swift` | Shared structured action/target/where/confidence decision packet (~125 lines) |
+| `TipTour/Voice/DesktopTaskExecutor.swift` | Existing-engine adapter and independent before/after readback (~125 lines) |
+| `TipTour/Voice/DesktopApplicationResolver.swift` | Installed-app catalog, Spotlight-localized names and stable bundle-ID resolution (~180 lines) |
+| `TipTour/Voice/DesktopActionVerifier.swift` | Pure target-specific result predicates (~55 lines) |
+| `TipTour/Perception/DesktopAccessibilityReader.swift` | Bounded read-only AX evidence and local candidate geometry (~110 lines) |
+| `TipTour/Voice/StepFunResponseBoundary.swift` | Stale/duplicate response rejection and verified-receipt transcript matching (~55 lines) |
+| `TipTour/Voice/DesktopVoiceTrace.swift` | Metadata telemetry and explicitly enabled bounded local diagnostics (~55 lines) |
+| `TipTour/Voice/VoiceRouteProbe.swift` | DEBUG probes; voice-task uses the production session and JEV fan-out probe never executes actions (~260 lines) |
+| `TipTour/Workflow/WorkflowModalPolicy.swift` | Distinguishes blocking modals from unrelated modeless windows (~11 lines) |
+| `TipTourTests/DesktopTaskCoordinatorTests.swift` | Execution, cancellation, budget, escalation and continuation regressions (~320 lines) |
+| `TipTourTests/DesktopControlContractTests.swift` | Receipt, targeting, verification, response boundary and resume regressions (~350 lines) |
+| `TipTourTests/WorkflowModalPolicyTests.swift` | Blocking-dialog and modeless-window rules (~15 lines) |
+| `TipTourTests/NativeElementDetectorTests.swift` | Real OCR regression for Chinese and English control labels (~30 lines) |
+| `TipTourTests/LocalPerceptionTargetCacheTests.swift` | Duplicate preservation, frame identity, window isolation and contradictory-label regressions (~130 lines) |
 | `TipTour/UI/ProviderSetupView.swift` | The two Keychain key cards |
 | `TipTour/UI/CompanionPanelView.swift` | Compact mode hints, permissions and action controls |
 | `TipTour/UI/TipTourSettingsView.swift` | Models, desktop actions, privacy, permissions and advanced options |
@@ -59,11 +84,26 @@ See `docs/source-layout.md` for the remaining directory responsibilities.
 
 ## Build and verification
 
+`tools/voice-acceptance/fixture.py` serves disposable controls on `127.0.0.1:19475` with
+independent `/state` readback. DEBUG-only probe launch arguments are documented in
+`tools/voice-acceptance/README.md`; they never export keys or open the microphone.
+Real desktop probes still require exclusive access to the target window.
+
+Run `bash scripts/test-local-perception.sh` for the real OCR regression on Simplified Chinese,
+Traditional Chinese and English controls, plus cross-source duplicate detection and blocking-modal tests. It uses a generated image and an isolated package,
+without launching or replacing the app.
+
 Open `tiptour-macos.xcodeproj`, select the `tiptour-macos` scheme, build/run in Xcode.
 Run `scripts/test-stepfun.sh` and `scripts/test-jev.sh` for the decision suites, which compile
 into temporary packages and never touch the installed app. This fork is set up for local machine signing; see `docs/local-development.md` for the signing identity, bundle identifier, Sparkle feed and remote conventions used here.
 
-Run `scripts/test-stepfun-voice-lifecycle.sh` for isolated voice turn-lifecycle tests; it compiles the realtime client, session and audio dependencies without launching the app or opening the microphone.
+Run `scripts/test-stepfun-voice-lifecycle.sh` for isolated voice turn-lifecycle, task coordination, audio playback and vision-client tests; it compiles real sources without launching the app or opening the microphone. Vision requests use a local URLProtocol fixture.
+
+The StepFun scripts accept Swift test filters, e.g. `bash scripts/test-stepfun-voice-lifecycle.sh --filter DesktopControlContractTests`.
+`python3 scripts/typecheck-local-app.py --derived-data <existing-checkout-DerivedData>` type-checks against an existing Xcode dependency build without linking, signing, installing or launching. It does not replace Xcode build or runtime acceptance.
+
+The current control contract and evidence are in `docs/development/2026-09-21-trustworthy-desktop-control.md`.
+Read the evidence status before enabling automated real-app trials or changing the default entrypoint.
 
 **Do NOT run `xcodebuild` from the terminal** — it invalidates TCC permissions and the app will need to re-request screen recording/accessibility access. Pure Swift parsing/typechecking and isolated tests are permitted without replacing or launching the installed app. Run `scripts/test-jev.sh` and `scripts/test-stepfun.sh` for the two decision suites.
 

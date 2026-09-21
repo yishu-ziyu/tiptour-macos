@@ -42,10 +42,30 @@ cp "$project_dir/TipTour/Voice/StepFunRealtimeClient.swift" \
    "$project_dir/TipTour/Voice/GeminiLiveAudioPlayer.swift" \
    "$project_dir/TipTour/Voice/GeminiLiveClient.swift" \
    "$project_dir/TipTour/Voice/PCM16AudioConverter.swift" \
+   "$project_dir/TipTour/Voice/StepFunVisionClient.swift" \
+   "$project_dir/TipTour/Voice/DesktopTaskCoordinator.swift" \
+   "$project_dir/TipTour/Voice/DesktopTaskContract.swift" \
+   "$project_dir/TipTour/Voice/DesktopDecisionPacket.swift" \
+   "$project_dir/TipTour/Voice/DesktopApplicationResolver.swift" \
+   "$project_dir/TipTour/Voice/StepFunResponseBoundary.swift" \
+   "$project_dir/TipTour/Voice/DesktopVoiceTrace.swift" \
+   "$project_dir/TipTour/Voice/DesktopActionVerifier.swift" \
+   "$project_dir/TipTour/Perception/DesktopAccessibilityReader.swift" \
+   "$project_dir/TipTour/Perception/LocalTargetContinuity.swift" \
    "$test_dir/Sources/StepFunVoiceLifecycle/"
 
 sed 's/@testable import TipTour/@testable import StepFunVoiceLifecycle/' \
     "$project_dir/TipTourTests/StepFunRealtimeSessionLifecycleTests.swift" \
     > "$test_dir/Tests/StepFunVoiceLifecycleTests/StepFunRealtimeSessionLifecycleTests.swift"
 
-swift test --package-path "$test_dir"
+sed 's/@testable import TipTour/@testable import StepFunVoiceLifecycle/' \
+    "$project_dir/TipTourTests/StepFunVisionClientTests.swift" \
+    > "$test_dir/Tests/StepFunVoiceLifecycleTests/StepFunVisionClientTests.swift"
+
+sed 's/@testable import TipTour/@testable import StepFunVoiceLifecycle/' \
+    "$project_dir/TipTourTests/DesktopTaskCoordinatorTests.swift" \
+    > "$test_dir/Tests/StepFunVoiceLifecycleTests/DesktopTaskCoordinatorTests.swift"
+sed 's/@testable import TipTour/@testable import StepFunVoiceLifecycle/' \
+    "$project_dir/TipTourTests/DesktopControlContractTests.swift" \
+    > "$test_dir/Tests/StepFunVoiceLifecycleTests/DesktopControlContractTests.swift"
+swift test --package-path "$test_dir" "$@"

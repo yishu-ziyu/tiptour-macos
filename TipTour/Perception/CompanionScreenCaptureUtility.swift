@@ -30,6 +30,12 @@ struct CompanionScreenCGImageCapture {
     let displayFrame: CGRect
 }
 
+struct CompanionWindowCGImageCapture {
+    let image: CGImage
+    let windowID: CGWindowID
+    let processIdentifier: pid_t
+}
+
 @MainActor
 enum CompanionScreenCaptureUtility {
 
@@ -197,5 +203,56 @@ enum CompanionScreenCaptureUtility {
             image: image,
             displayFrame: cursorDisplayFrame
         )
+    }
+
+    /// Capture one real on-screen top-level window belonging to the target app.
+    /// This is intentionally independent of cursor location: screen questions
+    /// should describe the app the user is talking about, not whichever display
+    /// happens to contain the mouse pointer.
+    static func captureVisibleApplicationWindow(
+        processIdentifiers: Set<pid_t>
+    ) async throws -> CompanionWindowCGImageCapture? {
+        guard !processIdentifiers.isEmpty else { return nil }
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let candidates = content.windows.filter { window in
+            guard let owningApplication = window.owningApplication else { return false }
+            return processIdentifiers.contains(owningApplication.processID)
+                && window.isOnScreen
+                && window.windowLayer == 0
+                && window.frame.width >= 80
+                && window.frame.height >= 60
+        }
+        guard let targetWindow = candidates.max(by: { first, second in
+            first.frame.width * first.frame.height < second.frame.width * second.frame.height
+        }), let owningApplication = targetWindow.owningApplication else { return nil }
+
+        let filter = SCContentFilter(desktopIndependentWindow: targetWindow)
+        let configuration = SCStreamConfiguration()
+        let scale = windowBackingScaleFactor(for: targetWindow.frame)
+        configuration.width = max(1, Int(targetWindow.frame.width * scale))
+        configuration.height = max(1, Int(targetWindow.frame.height * scale))
+
+        let image = try await SCScreenshotManager.captureImage(
+            contentFilter: filter,
+            configuration: configuration
+        )
+        return CompanionWindowCGImageCapture(
+            image: image,
+            windowID: targetWindow.windowID,
+            processIdentifier: owningApplication.processID
+        )
+    }
+
+    private static func windowBackingScaleFactor(for coreGraphicsFrame: CGRect) -> CGFloat {
+        let primaryScreenHeight = NSScreen.screens.first(where: { $0.frame.origin == .zero })?.frame.height
+            ?? NSScreen.main?.frame.height
+            ?? 0
+        let appKitCenter = CGPoint(
+            x: coreGraphicsFrame.midX,
+            y: primaryScreenHeight - coreGraphicsFrame.midY
+        )
+        return NSScreen.screens.first(where: { $0.frame.contains(appKitCenter) })?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? 2
     }
 }

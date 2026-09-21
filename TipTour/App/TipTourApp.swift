@@ -35,6 +35,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var sparkleUpdaterController: SPUStandardUpdaterController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if DEBUG
+        if VoiceRouteProbe.handleLaunch(companionManager: companionManager) { return }
+        #endif
         print("🎯 TipTour: Starting...")
         print("🎯 TipTour: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
 

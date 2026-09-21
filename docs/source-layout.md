@@ -14,6 +14,14 @@
 | `TipTour/UI` | Menu bar, Settings, command panel, pointer and detection overlays |
 | `TipTour/Utilities` | Permissions, Keychain, preferences, shortcuts, logging and analytics |
 
-Gemini and JEV use the same action engine. Keep provider networking in their respective directories, execution in the action/workflow layer, and app-specific quirks in markdown skills. Neither UI nor providers should bypass the engine's action permissions or pauses.
+Gemini, JEV and StepFun use the same action engine. Keep provider networking in their respective directories, execution in the action/workflow layer, and app-specific quirks in markdown skills. Neither UI nor providers should bypass the engine's action permissions or pauses.
+
+The StepFun task contract and coordinator in `Voice` own explicit task steps and per-turn receipts.
+`DesktopTaskExecutor` adapts that contract to the existing engine; it is not another input driver.
+`DesktopActionVerifier` contains pure result checks. `Perception/DesktopAccessibilityReader` supplies
+bounded AX evidence, merged into the existing local target cache alongside the captured image.
+`StepFunResponseBoundary` and the session keep cancelled responses, extra tool calls and pre-tool
+success prose from reaching execution or playback. `VoiceRouteProbe` exercises that production
+session with synthetic input; general test orchestration remains in `tools/voice-acceptance`.
 
 The app has no recording, image-generation, hosted-key proxy, Claude planner, or Hermes integration. General documentation stays outside the bundled `TipTour` directory.

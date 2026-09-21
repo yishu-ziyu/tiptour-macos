@@ -2,54 +2,152 @@ import SwiftUI
 
 struct ProviderSetupView: View {
     @ObservedObject var companionManager: CompanionManager
+    @State private var editingKeyMode: TipTourMode = .stepfun
+    @State private var hoveredKeyMode: TipTourMode?
+
+    private var visibleKeyMode: TipTourMode {
+        guard companionManager.selectedMode == .stepfun else { return companionManager.selectedMode }
+        return editingKeyMode == .jev ? .jev : .stepfun
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            ModeSelectionView(companionManager: companionManager)
-            ProviderKeyCard(mode: companionManager.selectedMode,
+        VStack(alignment: .leading, spacing: 18) {
+            ModeSelectionView(companionManager: companionManager, compact: true)
+
+            if companionManager.selectedMode == .stepfun {
+                VStack(alignment: .leading, spacing: 9) {
+                    Text("配置 API 密钥")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(DS.Colors.textPrimary)
+
+                    HStack(spacing: 8) {
+                        keyEditorButton(for: .stepfun, title: "阶跃语音密钥")
+                        keyEditorButton(for: .jev, title: "JEV 决策密钥（可选）")
+                    }
+
+                    Text("这里只切换正在编辑的密钥，不会切换语音模式。")
+                        .font(.system(size: 11))
+                        .foregroundColor(DS.Colors.textSecondary)
+                }
+            }
+
+            ProviderKeyCard(mode: visibleKeyMode,
                 onKeyChanged: companionManager.refreshProviderKeyStatus)
-                .id(companionManager.selectedMode)
-            Text("你的选择已保存，之后可以随时在这里切换；切换时会结束当前的语音会话。")
+                .id(visibleKeyMode)
+            Text("密钥分别保存在 macOS 钥匙串。切换上方的使用方式会结束当前语音会话。")
                 .font(.system(size: 11))
-                .foregroundColor(DS.Colors.textTertiary)
+                .foregroundColor(DS.Colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .onAppear { editingKeyMode = companionManager.selectedMode }
+        .onChange(of: companionManager.selectedMode) { _, selectedMode in
+            editingKeyMode = selectedMode
+        }
+    }
+
+    private func keyEditorButton(for mode: TipTourMode, title: String) -> some View {
+        let isEditing = visibleKeyMode == mode
+        return Button {
+            editingKeyMode = mode
+        } label: {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(isEditing ? DS.Colors.textOnAccent : DS.Colors.textPrimary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 8)
+                    .fill(isEditing
+                        ? (hoveredKeyMode == mode ? DS.Colors.accentHover : DS.Colors.accent)
+                        : (hoveredKeyMode == mode ? DS.Colors.surface3 : DS.Colors.surface2)))
+                .overlay(RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(isEditing ? DS.Colors.accent : DS.Colors.borderStrong))
+        }
+        .buttonStyle(.plain)
+        .onHover { hoveredKeyMode = $0 ? mode : nil }
+        .pointerCursor()
+        .accessibilityValue(isEditing ? "正在编辑" : "未选择")
     }
 }
 
 struct ModeSelectionView: View {
     @ObservedObject var companionManager: CompanionManager
+    var compact = false
 
     var body: some View {
-        VStack(spacing: 8) {
-            ForEach(TipTourMode.allCases) { mode in
-                Button { companionManager.setSelectedMode(mode) } label: {
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: mode.systemImage).frame(width: 18)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("\(mode.title) · \(mode.kindLabel)")
-                                .font(.system(size: 13, weight: .semibold))
-                            Text(mode.summary).font(.system(size: 11))
-                                .foregroundColor(DS.Colors.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Spacer(minLength: 0)
-                        Image(systemName: companionManager.selectedMode == mode ? "checkmark.circle.fill" : "circle")
+        if compact {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    ForEach(TipTourMode.allCases) { mode in
+                        compactModeButton(mode)
                     }
-                    .foregroundColor(companionManager.selectedMode == mode ? DS.Colors.accent : DS.Colors.textSecondary)
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(RoundedRectangle(cornerRadius: 10)
-                        .fill(companionManager.selectedMode == mode ? DS.Colors.accent.opacity(0.1) : DS.Colors.surface1))
-                    .contentShape(RoundedRectangle(cornerRadius: 10))
                 }
-                .buttonStyle(.plain)
-                .pointerCursor()
-                .disabled(companionManager.isTextCommandRunning)
-                .accessibilityLabel("选择 \(mode.title)")
-                .accessibilityValue(companionManager.selectedMode == mode ? "已选择" : "未选择")
+                Text(companionManager.selectedMode.summary)
+                    .font(.system(size: 12))
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else {
+            VStack(spacing: 8) {
+                ForEach(TipTourMode.allCases) { mode in
+                    Button { companionManager.setSelectedMode(mode) } label: {
+                        HStack(alignment: .center, spacing: 12) {
+                            Image(systemName: mode.systemImage).frame(width: 18)
+                                .foregroundColor(DS.Colors.textSecondary)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("\(mode.title) · \(mode.kindLabel)")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(companionManager.selectedMode == mode ? DS.Colors.accentText : DS.Colors.textPrimary)
+                                Text(mode.summary).font(.system(size: 12))
+                                    .foregroundColor(DS.Colors.textSecondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 0)
+                            Image(systemName: companionManager.selectedMode == mode ? "checkmark.circle.fill" : "circle")
+                                .foregroundColor(companionManager.selectedMode == mode ? DS.Colors.accentText : DS.Colors.textSecondary)
+                        }
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 10)
+                            .fill(companionManager.selectedMode == mode ? DS.Colors.blue950.opacity(0.55) : DS.Colors.surface1))
+                        .overlay(RoundedRectangle(cornerRadius: 10)
+                            .strokeBorder(companionManager.selectedMode == mode ? DS.Colors.accentText.opacity(0.65) : DS.Colors.borderSubtle))
+                        .contentShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+                    .disabled(companionManager.isTextCommandRunning)
+                    .accessibilityLabel("选择 \(mode.title)")
+                    .accessibilityValue(companionManager.selectedMode == mode ? "已选择" : "未选择")
+                }
             }
         }
+    }
+
+    private func compactModeButton(_ mode: TipTourMode) -> some View {
+        let isSelected = companionManager.selectedMode == mode
+        return Button { companionManager.setSelectedMode(mode) } label: {
+            HStack(spacing: 5) {
+                Text("\(mode.title) · \(mode.kindLabel)")
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                Spacer(minLength: 0)
+                if isSelected { Image(systemName: "checkmark.circle.fill") }
+            }
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(isSelected ? DS.Colors.accentText : DS.Colors.textPrimary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+            .background(RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected ? DS.Colors.blue950.opacity(0.55) : DS.Colors.surface1))
+            .overlay(RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(isSelected ? DS.Colors.accentText.opacity(0.65) : DS.Colors.borderSubtle))
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .disabled(companionManager.isTextCommandRunning)
+        .accessibilityLabel("选择 \(mode.title)")
+        .accessibilityValue(isSelected ? "已选择" : "未选择")
     }
 }
 
@@ -64,24 +162,46 @@ struct ProviderKeyCard: View {
     @State private var status = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(title).font(.system(size: 14, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(DS.Colors.textPrimary)
                 Spacer()
                 Text(hasSavedKey ? "密钥已保存" : "需要密钥")
-                    .font(.system(size: 11))
-                    .foregroundColor(hasSavedKey ? DS.Colors.success : DS.Colors.textTertiary)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(hasSavedKey ? DS.Colors.success : DS.Colors.textSecondary)
             }
             Text(detail)
                 .font(.system(size: 12))
                 .foregroundColor(DS.Colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if mode == .jev {
+                Link("没有密钥？前往 TypeSafe 控制台", destination: URL(string: "https://console.typesafe.ai/settings/keys")!)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(DS.Colors.accentText)
+                    .pointerCursor()
+            }
+
+            Text("API 密钥")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(DS.Colors.textSecondary)
             SecureField(hasSavedKey ? "粘贴新的密钥以替换" : "粘贴你的 API 密钥", text: $input)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundColor(DS.Colors.textPrimary)
+                .tint(DS.Colors.accentText)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(DS.Colors.surface2))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(DS.Colors.borderStrong))
                 .accessibilityLabel("\(title) API 密钥")
                 .onSubmit { save() }
-            HStack {
+
+            HStack(spacing: 10) {
                 Button("保存密钥", action: save)
+                    .buttonStyle(.borderedProminent)
+                    .tint(DS.Colors.accent)
                     .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .pointerCursor()
                 Button("删除密钥") {
@@ -94,19 +214,21 @@ struct ProviderKeyCard: View {
                         status = "删除失败，请重试。"
                     }
                 }
+                .buttonStyle(.bordered)
+                .tint(DS.Colors.destructiveText)
                 .disabled(!hasSavedKey)
                 .pointerCursor()
-
             }
             if !status.isEmpty {
-                Text(status).font(.system(size: 11)).foregroundColor(DS.Colors.textSecondary)
+                Text(status).font(.system(size: 12)).foregroundColor(DS.Colors.textSecondary)
             }
             Text("安全存储在 macOS 钥匙串中。")
-                .font(.system(size: 10)).foregroundColor(DS.Colors.textTertiary)
+                .font(.system(size: 11)).foregroundColor(DS.Colors.textSecondary)
         }
-        .padding(12)
+        .padding(16)
         .background(RoundedRectangle(cornerRadius: 12).fill(DS.Colors.surface1))
-        .onAppear { hasSavedKey = !(KeychainStore.get(forKey: keyName) ?? "").isEmpty }
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(DS.Colors.borderSubtle))
+        .onAppear { hasSavedKey = KeychainStore.contains(forKey: keyName) }
     }
 
     private func save() {

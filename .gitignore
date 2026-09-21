@@ -22,3 +22,9 @@ harnesses/jev-loop/*.jsonl
 
 # SwiftPM build artifacts for the investigation harness
 tools/*/.build/
+
+# Machine-local SourceKit connection to Xcode's DerivedData
+buildServer.json
+
+# Serena code-navigation tool state — local agent config, never product source
+.serena/

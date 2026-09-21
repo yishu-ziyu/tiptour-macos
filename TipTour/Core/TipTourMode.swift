@@ -67,7 +67,7 @@ nonisolated enum TipTourMode: String, CaseIterable, Identifiable {
         case .gemini:
             return "你的语音和可选的屏幕截图会发送到 Google。"
         case .stepfun:
-            return "你的语音会发送到阶跃星辰；屏幕内容在本机解析，只以文字描述后发出。"
+            return "语音和按需截图会发送到阶跃；已配置 JEV 时，控件文字和位置也会发给 TypeSafe。"
         }
     }
 
