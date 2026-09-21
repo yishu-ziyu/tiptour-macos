@@ -25,7 +25,7 @@ enum StepFunRealtimeToolDeclarations {
 
     private static let stepProperties: [String: Any] = [
         "action": ["type": "string", "enum": ["click", "double_click", "right_click", "open_app", "type", "press_key", "shortcut", "scroll"],
-                   "description": "Use the user's explicit operation when known. For a single mouse-target request where click vs double/right click is genuinely unspecified, omit this field and let the local JEV decision layer choose. Other actions such as open_app/type/scroll must be explicit."],
+                   "description": "Use the user's explicit operation when known. For a single mouse-target request that also carries an explicit target constraint (target_label, index+observation_id, region, or anchor_label+relation) where click vs double/right click is genuinely unspecified, omit this field and let the local JEV decision layer choose. Other actions such as open_app/type/scroll must be explicit. A goal alone is never enough."],
         "target_label": ["type": "string", "description": "Exact visible name from the user or current observation. Preserve corrections; never replace an absent name with another control."],
         "region": ["type": "string", "enum": ["left", "right", "top", "bottom"]],
         "anchor_label": ["type": "string", "description": "Exact visible anchor name for a relative location."],
@@ -80,7 +80,9 @@ enum StepFunRealtimeToolDeclarations {
                     "index": ["type": "integer", "description": "Optional control number from the most recent describe_screen result."],
                     "observation_id": ["type": "string", "description": "Required when using index. Copy the exact Observation ID from the same description."],
                     "steps": ["type": "array", "minItems": 1, "maxItems": 6, "description": "Explicit ordered actions. Do not combine with top-level action parameters or index.",
-                              "items": ["type": "object", "properties": stepProperties, "required": ["action"], "additionalProperties": false]]
+                              "items": ["type": "object", "properties": stepProperties, "required": ["action"], "additionalProperties": false]],
+                    "uncertain_resolution": ["type": "string", "enum": ["confirmed_succeeded", "confirmed_failed", "retry_same", "replace_target"],
+                       "description": "Only after an uncertain_effect receipt: how the user resolved the previous unconfirmed operation. confirmed_succeeded / confirmed_failed report the outcome the user verified; retry_same retries the same target; replace_target (with intent=correct and an explicit new target) replaces it. Without it the task stays stopped."]
                 ], uniquingKeysWith: { _, value in value }),
                 "additionalProperties": false,
                 "required": ["goal"]
@@ -169,6 +171,7 @@ struct StepFunActionArguments: Decodable {
     let action: String?
     let resumePrevious: Bool?
     let intent: DesktopTaskIntent?
+    let uncertainResolution: DesktopTaskUncertainResolution?
     let observationID: String?
     let steps: [DesktopActionStep]?
     let region: DesktopTargetRegion?
@@ -186,6 +189,7 @@ struct StepFunActionArguments: Decodable {
         case targetLabel = "target_label"
         case resumePrevious = "resume_previous"
         case observationID = "observation_id", anchorLabel = "anchor_label", expectedLabel = "expected_label"
+        case uncertainResolution = "uncertain_resolution"
     }
 
     static func decode(_ data: Data) throws -> StepFunActionArguments {
@@ -216,6 +220,17 @@ struct StepFunActionArguments: Decodable {
         }
         guard let kind = DesktopActionKind(rawValue: action ?? "click") else {
             throw DesktopTaskContractError.invalid("动作类型无效，未执行。")
+        }
+        if action == nil {
+            // A bare goal is not a click. Omitting the action is only
+            // meaningful when an explicit pointer constraint names what the
+            // click is for; anything else (most often a forgotten open_app)
+            // would become a click on whatever happens to rank first.
+            let hasExplicitPointerConstraint = targetLabel != nil || index != nil || region != nil
+                || (anchorLabel != nil && relation != nil)
+            guard hasExplicitPointerConstraint else {
+                throw DesktopTaskContractError.invalid("缺少动作类型或明确的目标约束，未执行。")
+            }
         }
         var step = DesktopActionStep(action: kind, targetLabel: targetLabel, region: region,
             anchorLabel: anchorLabel, relation: relation, text: text, key: key,

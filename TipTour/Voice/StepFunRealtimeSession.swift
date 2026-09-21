@@ -92,6 +92,12 @@ enum StepFunTurnPhase: Equatable {
     case awaitingPlaybackDrain
     /// Everything played; the pending tool result is being prepared.
     case awaitingToolResult
+    /// The tool result was sent and a follow-up `response.create` is in
+    /// flight, but the server has not created that response yet. The turn is
+    /// NOT idle: a barge-in here must discard the still-uncreated follow-up,
+    /// otherwise its late `response.created` revives the old receipt over the
+    /// user's new speech.
+    case awaitingFollowupResponseCreated
     /// The user interrupted before `response.done`; that completion must be
     /// ignored so the cancelled turn cannot continue itself.
     case interrupted
@@ -108,6 +114,10 @@ enum StepFunTurnAction: Equatable {
     case finishTurn
     /// Playback drained, but a tool call is pending; report its result first.
     case finishTurnWithToolResult
+    /// The user spoke after a tool result requested a follow-up response but
+    /// before its `response.created` arrived; that not-yet-created response
+    /// belongs to a turn the user already talked over and must be discarded.
+    case discardPendingFollowupResponse
     /// A tool call arrived for a response the user already interrupted; drop it
     /// instead of running an action the user countermanded.
     case ignoreToolCallFromInterruptedTurn
@@ -139,7 +149,8 @@ struct StepFunTurnLifecycle {
         switch phase {
         case .idle:
             phase = .awaitingResponseDone
-        case .interrupted, .awaitingResponseDone, .awaitingPlaybackDrain, .awaitingToolResult:
+        case .interrupted, .awaitingResponseDone, .awaitingPlaybackDrain, .awaitingToolResult,
+             .awaitingFollowupResponseCreated:
             break
         }
     }
@@ -149,7 +160,7 @@ struct StepFunTurnLifecycle {
     /// the session would go permanently deaf.
     mutating func recordResponseCreated() {
         switch phase {
-        case .idle, .interrupted:
+        case .idle, .interrupted, .awaitingFollowupResponseCreated:
             // A response can emit a function call before its first audio chunk.
             // Mark it in-flight here, otherwise that early tool call looks like
             // a post-drain call and starts a second response on top of this one.
@@ -172,7 +183,7 @@ struct StepFunTurnLifecycle {
             hasPendingToolCall = true
             phase = .awaitingToolResult
             return .finishTurnWithToolResult
-        case .awaitingResponseDone, .awaitingPlaybackDrain:
+        case .awaitingResponseDone, .awaitingPlaybackDrain, .awaitingFollowupResponseCreated:
             hasPendingToolCall = true
             return .none
         }
@@ -186,8 +197,9 @@ struct StepFunTurnLifecycle {
         case .idle, .awaitingResponseDone:
             phase = .awaitingPlaybackDrain
             return .beginPlaybackDrain
-        case .awaitingPlaybackDrain, .awaitingToolResult:
-            // Duplicate completions must not start a second drain.
+        case .awaitingPlaybackDrain, .awaitingToolResult, .awaitingFollowupResponseCreated:
+            // Duplicate completions must not start a second drain, and a
+            // completion for a response that was never created starts nothing.
             return .none
         }
     }
@@ -202,10 +214,13 @@ struct StepFunTurnLifecycle {
         return .finishTurnWithToolResult
     }
 
-    mutating func recordToolResultReported() {
+    /// The tool result left (or, when no follow-up was requested, did not
+    /// generate) this turn. A sent result keeps the turn non-idle until the
+    /// follow-up response is actually created.
+    mutating func recordToolResultReported(followupResponseExpected: Bool) {
         hasPendingToolCall = false
         if phase == .awaitingToolResult {
-            phase = .idle
+            phase = followupResponseExpected ? .awaitingFollowupResponseCreated : .idle
         }
     }
 
@@ -219,6 +234,14 @@ struct StepFunTurnLifecycle {
             phase = .idle
             hasPendingToolCall = false
             return .abandonCurrentTurn
+        case .awaitingFollowupResponseCreated:
+            // The follow-up was requested but not yet created. Its created
+            // cannot be told apart from the user's next response (probed: no
+            // client token is echoed), so the session discards the pending
+            // response and rebuilds its socket; the lifecycle only reports
+            // the interruption.
+            phase = .interrupted
+            return .discardPendingFollowupResponse
         case .idle:
             // A tool call can be running without speech (the model called the
             // tool first). The user speaking now cancels it.
@@ -275,6 +298,8 @@ final class StepFunRealtimeSession {
     private var toolResultDeliveryTask: Task<Void, Never>?
     private var playbackDrainTask: Task<Void, Never>?
     private var sessionLifetimeTask: Task<Void, Never>?
+    /// Set while the session rebuilds itself after a discarded tool follow-up.
+    private var isRebuildingAfterDiscardedFollowup = false
 
     /// Bumped by start() and stop(). Every continuation captures it and refuses
     /// to act once it changes, which is what stops an in-flight tool call or a
@@ -882,7 +907,7 @@ final class StepFunRealtimeSession {
         guard let toolWork = pendingToolWork, let callID = pendingToolCallID else {
             // The call disappeared between the drain and here — an interruption
             // cancelled it. There is nothing to report and the turn is over.
-            turnLifecycle.recordToolResultReported()
+            turnLifecycle.recordToolResultReported(followupResponseExpected: false)
             resetTurnTranscripts()
             return
         }
@@ -913,7 +938,7 @@ final class StepFunRealtimeSession {
             print("[StepFunRealtimeSession] tool result submitted, characters=\(output.count)")
             DesktopVoiceTrace.event("tool_result_submitted", turnID: self.currentTurnID,
                 fields: ["call_id": callID, "action_result": String(isActionResult)], privateFields: ["result": output])
-            self.turnLifecycle.recordToolResultReported()
+            self.turnLifecycle.recordToolResultReported(followupResponseExpected: true)
             self.pendingToolWork = nil
             self.pendingToolCallID = nil
             self.pendingToolName = nil
@@ -955,6 +980,25 @@ final class StepFunRealtimeSession {
             cancelOutstandingToolWork()
             print("[StepFunRealtimeSession] barge-in: abandoned the finishing turn")
 
+        case .discardPendingFollowupResponse:
+            // The follow-up was requested but not yet created, and its
+            // `response.created` cannot be told apart from the user's next
+            // response: the live API echoes neither response.metadata nor a
+            // client event_id (measured with tools/stepprobe followup-race),
+            // and a cancelled follow-up still emits created + done(incomplete).
+            // The discard is therefore made deterministic by retiring the
+            // socket the follow-up lives on — no "next created" assumption.
+            state.isModelSpeaking = false
+            suppressAudioForCurrentResponse = false
+            didTraceSuppressedAudioForCurrentResponse = false
+            audioPlayer.clearQueuedAudio()
+            playbackDrainTask?.cancel()
+            playbackDrainTask = nil
+            cancelOutstandingToolWork()
+            client.cancelCurrentResponse()
+            rebuildSessionAfterDiscardedFollowup()
+            print("[StepFunRealtimeSession] barge-in: discarded the pending tool-result follow-up and rebuilt the session")
+
         default:
             break
         }
@@ -976,6 +1020,30 @@ final class StepFunRealtimeSession {
     private func resetTurnTranscripts() {
         state.lastInputTranscript = ""
         state.lastOutputTranscript = ""
+    }
+
+    /// One explicit session rebuild for the discarded-follow-up race.
+    ///
+    /// A pending follow-up's `response.created` is indistinguishable from the
+    /// user's next response (measured: StepFun echoes neither response.metadata
+    /// nor a client event_id), so the only deterministic way to drop it is to
+    /// retire the socket it belongs to. The conversation history on that socket
+    /// is lost with it — the price of the race, bounded to this one window.
+    private func rebuildSessionAfterDiscardedFollowup() {
+        guard !isRebuildingAfterDiscardedFollowup else { return }
+        isRebuildingAfterDiscardedFollowup = true
+        let runIDBeforeRebuild = sessionRunID
+        Task { [weak self] in
+            guard let self else { return }
+            await self.stop()
+            // stop() bumps the run id by exactly one. A larger jump means the
+            // user (or another path) stopped the session during the rebuild;
+            // resurrecting it would ignore their intent.
+            guard self.isRebuildingAfterDiscardedFollowup,
+                  self.sessionRunID == runIDBeforeRebuild + 1 else { return }
+            self.isRebuildingAfterDiscardedFollowup = false
+            await self.start()
+        }
     }
 
     /// Stops the session before the server's own 30-minute cap fires.

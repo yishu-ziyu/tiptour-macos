@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 import XCTest
 @testable import TipTour
 
@@ -296,7 +297,7 @@ final class DesktopControlContractTests: XCTestCase {
             DesktopActionStep(targetLabel: target.label), DesktopActionStep(targetLabel: target.label)
         ])
         XCTAssertEqual(dispatches, 1)
-        XCTAssertEqual(result.status, "paused")
+        XCTAssertEqual(result.status, "uncertain_effect")
     }
 
     func testResumingSamePlanDoesNotRepeatItsVerifiedFirstStep() async {
@@ -397,6 +398,130 @@ final class DesktopControlContractTests: XCTestCase {
         XCTAssertEqual(clicked, [target.id])
         XCTAssertTrue(resumed.currentActions.isEmpty)
         XCTAssertNotEqual(resumed.status, "completed")
+    }
+}
+
+@MainActor
+final class DesktopObservedWindowIdentityTests: XCTestCase {
+    private let identity = DesktopObservedWindowIdentity(
+        bundleIdentifier: "com.example.app", processIdentifier: 42, windowID: 7,
+        frame: CGRect(x: 100, y: 100, width: 800, height: 600),
+        capturedAt: Date(), contentVersion: 3, contentFingerprint: 0x0123456789ABCDEF)
+
+    private func makeImage(fill: UInt8, marks: [CGPoint] = []) -> CGImage {
+        let width = 32, height = 32
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let context = CGContext(
+            data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        context.setFillColor(red: CGFloat(fill) / 255, green: CGFloat(fill) / 255, blue: CGFloat(fill) / 255, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.setFillColor(red: 0, green: 0, blue: 0, alpha: 1)
+        for mark in marks {
+            context.fill(CGRect(x: mark.x, y: mark.y, width: 8, height: 8))
+        }
+        return context.makeImage()!
+    }
+
+    func testVisionAnswerSurvivesWhenTheSameWindowIsUnchanged() {
+        XCTAssertTrue(identity.isStillCurrent(
+            frontmostBundleIdentifier: "com.example.app", frontmostWindowID: 7,
+            currentWindowFrame: CGRect(x: 100, y: 100, width: 800, height: 600),
+            observedProcessStillExists: true, currentContentVersion: 3, maximumAge: 20))
+    }
+
+    func testVisionAnswerIsDiscardedWhenTheAppShowsADifferentWindow() {
+        // Same app, same process, unchanged content version — but the frontmost
+        // window is no longer the captured one. The description must not answer
+        // for a window it never saw.
+        XCTAssertFalse(identity.isStillCurrent(
+            frontmostBundleIdentifier: "com.example.app", frontmostWindowID: 8,
+            currentWindowFrame: CGRect(x: 100, y: 100, width: 800, height: 600),
+            observedProcessStillExists: true, currentContentVersion: 3, maximumAge: 20))
+    }
+
+    func testVisionAnswerIsDiscardedWhenTheWindowMovedOrClosed() {
+        XCTAssertFalse(identity.isStillCurrent(
+            frontmostBundleIdentifier: "com.example.app", frontmostWindowID: 7,
+            currentWindowFrame: CGRect(x: 260, y: 100, width: 800, height: 600),
+            observedProcessStillExists: true, currentContentVersion: 3, maximumAge: 20))
+        XCTAssertFalse(identity.isStillCurrent(
+            frontmostBundleIdentifier: "com.example.app", frontmostWindowID: 7,
+            currentWindowFrame: nil,
+            observedProcessStillExists: true, currentContentVersion: 3, maximumAge: 20))
+    }
+
+    func testVisionAnswerIsDiscardedWhenAppContentOrProcessChangedOrCaptureAgedOut() {
+        XCTAssertFalse(identity.isStillCurrent(
+            frontmostBundleIdentifier: "com.example.other", frontmostWindowID: 7,
+            currentWindowFrame: identity.frame,
+            observedProcessStillExists: true, currentContentVersion: 3, maximumAge: 20))
+        XCTAssertFalse(identity.isStillCurrent(
+            frontmostBundleIdentifier: "com.example.app", frontmostWindowID: 7,
+            currentWindowFrame: identity.frame,
+            observedProcessStillExists: false, currentContentVersion: 3, maximumAge: 20))
+        XCTAssertFalse(identity.isStillCurrent(
+            frontmostBundleIdentifier: "com.example.app", frontmostWindowID: 7,
+            currentWindowFrame: identity.frame,
+            observedProcessStillExists: true, currentContentVersion: 4, maximumAge: 20))
+        let agedOut = DesktopObservedWindowIdentity(
+            bundleIdentifier: identity.bundleIdentifier, processIdentifier: identity.processIdentifier,
+            windowID: identity.windowID, frame: identity.frame,
+            capturedAt: Date().addingTimeInterval(-60), contentVersion: identity.contentVersion,
+            contentFingerprint: identity.contentFingerprint)
+        XCTAssertFalse(agedOut.isStillCurrent(
+            frontmostBundleIdentifier: "com.example.app", frontmostWindowID: 7,
+            currentWindowFrame: identity.frame,
+            observedProcessStillExists: true, currentContentVersion: 3, maximumAge: 20))
+    }
+
+    // MARK: Content fingerprint
+
+    func testSameWindowContentChangeIsRejected() {
+        // The app navigated inside the same window: no window event, no bundle
+        // or process change, but the answer was computed for different pixels.
+        // The 9×8 reduction cannot see a one-control repaint, but a navigated
+        // page or a new dialog moves far more than the noise tolerance.
+        let before = makeImage(fill: 255, marks: [CGPoint(x: 4, y: 4)])
+        let after = makeImage(fill: 255, marks: [
+            CGPoint(x: 4, y: 4), CGPoint(x: 16, y: 16), CGPoint(x: 24, y: 4), CGPoint(x: 8, y: 24)
+        ])
+        let observed = DesktopObservedWindowIdentity(
+            bundleIdentifier: identity.bundleIdentifier, processIdentifier: identity.processIdentifier,
+            windowID: identity.windowID, frame: identity.frame, capturedAt: Date(),
+            contentVersion: identity.contentVersion,
+            contentFingerprint: DesktopWindowContentFingerprint.hash(of: before))
+        XCTAssertFalse(observed.contentStillMatches(DesktopWindowContentFingerprint.hash(of: after)),
+                       "same-window-content-change: stale answer rejected")
+    }
+
+    func testUnchangedWindowContentSurvives() {
+        let image = makeImage(fill: 200, marks: [CGPoint(x: 8, y: 8), CGPoint(x: 20, y: 4)])
+        let observed = DesktopObservedWindowIdentity(
+            bundleIdentifier: identity.bundleIdentifier, processIdentifier: identity.processIdentifier,
+            windowID: identity.windowID, frame: identity.frame, capturedAt: Date(),
+            contentVersion: identity.contentVersion,
+            contentFingerprint: DesktopWindowContentFingerprint.hash(of: image))
+        XCTAssertTrue(observed.contentStillMatches(DesktopWindowContentFingerprint.hash(of: image)))
+    }
+
+    func testFingerprintIsStableAndToleratesRenderingNoise() {
+        let image = makeImage(fill: 180, marks: [CGPoint(x: 6, y: 6)])
+        let observed = DesktopObservedWindowIdentity(
+            bundleIdentifier: identity.bundleIdentifier, processIdentifier: identity.processIdentifier,
+            windowID: identity.windowID, frame: identity.frame, capturedAt: Date(),
+            contentVersion: identity.contentVersion,
+            contentFingerprint: DesktopWindowContentFingerprint.hash(of: image))
+        // Stable across identical re-renders.
+        XCTAssertEqual(DesktopWindowContentFingerprint.hash(of: image),
+                       DesktopWindowContentFingerprint.hash(of: image))
+        // A global brightness shift (recompression/rendering noise) moves no
+        // comparison bits, so it must not read as a content change.
+        let brighter = makeImage(fill: 190, marks: [CGPoint(x: 6, y: 6)])
+        XCTAssertTrue(observed.contentStillMatches(DesktopWindowContentFingerprint.hash(of: brighter)))
     }
 }
 

@@ -58,8 +58,18 @@ final class DesktopTaskCoordinator {
     private var generation = 0
     private var previousPlan: [DesktopActionStep] = []
     private var nextStepIndex = 0
-    private var uncertainTargets: [(app: String, target: DesktopTaskTarget)] = []
-    private var uncertainTargetlessSteps: [(app: String, step: DesktopActionStep)] = []
+    /// One side effect that was sent but whose result was never verified.
+    /// Scoped to one task chain: a brand-new instruction is explicit user
+    /// authorization and must not inherit an older task's blocks, while a
+    /// resume of the same task must never quietly switch to another candidate.
+    private struct UncertainEffect {
+        let app: String
+        let target: DesktopTaskTarget?
+        let step: DesktopActionStep
+        let label: String
+    }
+    private var uncertainEffects: [UncertainEffect] = []
+    private var uncertainEffectsTaskID: String?
     private(set) var isRunning = false
     private(set) var lastReceipt: DesktopTaskReceipt?
 
@@ -93,6 +103,7 @@ final class DesktopTaskCoordinator {
     func run(goal: String, namedTarget: String? = nil, exactTarget: DesktopTaskTarget? = nil,
              action: String? = nil, resumePrevious: Bool = false, maximumActions: Int = 6,
              steps: [DesktopActionStep]? = nil, intent: DesktopTaskIntent? = nil,
+             uncertainResolution: DesktopTaskUncertainResolution? = nil,
              turnID: String = UUID().uuidString) async -> DesktopTaskReceipt {
         guard !isRunning else {
             return DesktopTaskReceipt(goal: goal, status: "busy", actions: [], detail: "前一个操作正在停止，请稍后重试。", turnID: turnID)
@@ -109,7 +120,15 @@ final class DesktopTaskCoordinator {
         let resumesSameTask = wantsResume && sameGoal && !previousPlan.isEmpty
         let isCorrection = intent == .correct || (wantsResume && !sameGoal)
         let priorActions = (wantsResume || isCorrection) ? Array(((previous?.priorActions ?? []) + (previous?.actions ?? [])).suffix(32)) : []
+        /// Only verified effects count as done. Feeding an unverified attempt
+        /// to the decision model as "already_done" is what made it move on to
+        /// a different candidate after an uncertain click.
+        var priorVerifiedActions = (wantsResume || isCorrection) ? (previous?.verifiedActionHistory ?? []) : []
         let taskID = (resumesSameTask || isCorrection) ? previous?.taskID ?? UUID().uuidString : UUID().uuidString
+        if uncertainEffectsTaskID != taskID {
+            uncertainEffects = []
+            uncertainEffectsTaskID = taskID
+        }
         let targetVersion = isCorrection ? (previous?.targetVersion ?? 0) + 1 : (resumesSameTask ? previous?.targetVersion ?? 1 : 1)
         var pinnedApp = resumesSameTask ? previous?.app : nil
         var records: [DesktopActionRecord] = []
@@ -122,7 +141,8 @@ final class DesktopTaskCoordinator {
             let receipt = DesktopTaskReceipt(goal: goal, status: status,
                 actions: records.filter { $0.delivery != .notSent }.map(\.summary), detail: detail,
                 app: pinnedApp, taskID: taskID, turnID: turnID, targetVersion: targetVersion,
-                priorActions: priorActions, currentActions: records)
+                priorActions: priorActions, currentActions: records,
+                verifiedActionHistory: Array((priorVerifiedActions + records.filter(\.verified).map(\.summary)).suffix(32)))
             lastReceipt = receipt
             DesktopVoiceTrace.event("task_finished", turnID: turnID,
                 fields: ["task_id": taskID, "status": status, "target_version": String(targetVersion),
@@ -164,6 +184,73 @@ final class DesktopTaskCoordinator {
                 return finish("paused", "此前步骤已结束；本轮没有重新执行，也没有重新验证。")
             }
             let plan = previousPlan
+            var pinnedRetryTarget: DesktopTaskTarget?
+            if !uncertainEffects.isEmpty {
+                // An unconfirmed side effect owns this task until the user
+                // resolves it explicitly. A plain resume or correction must not
+                // ask the model for the next-best candidate — that is how one
+                // uncertain click turned into a click on something else.
+                guard let resolution = uncertainResolution else {
+                    return finish("uncertain_effect", "上一轮操作的结果仍未确认，已停在这里，不会改试其他目标。请确认实际结果，或用 uncertain_resolution 明确指示：confirmed_succeeded / confirmed_failed / retry_same / replace_target。")
+                }
+                switch resolution {
+                case .confirmedSucceeded:
+                    // The user verified the attempt landed: promote its
+                    // evidence into verified history and count the step done.
+                    priorVerifiedActions.append(contentsOf: uncertainEffects
+                        .map { Self.attemptSummary(action: $0.step.action, label: $0.label, verified: true) })
+                    uncertainEffects = []
+                    DesktopVoiceTrace.event("uncertain_resolved", turnID: turnID,
+                        fields: ["task_id": taskID, "resolution": resolution.rawValue,
+                                 "promoted_to_verified": "true"])
+                    if resumesSameTask {
+                        nextStepIndex += 1
+                        if nextStepIndex >= plan.count {
+                            return finish("completed", "你已确认上一轮操作的结果生效，任务完成。")
+                        }
+                    }
+                case .confirmedFailed:
+                    // Acknowledged failure: the attempt stays in
+                    // attempted-unverified history, the block lifts.
+                    uncertainEffects = []
+                    DesktopVoiceTrace.event("uncertain_resolved", turnID: turnID,
+                        fields: ["task_id": taskID, "resolution": resolution.rawValue,
+                                 "promoted_to_verified": "false"])
+                case .retrySame:
+                    guard resumesSameTask else {
+                        return finish("uncertain_effect", "retry_same 只能用于同一目标的续接；更换目标请用 correct 加 replace_target。")
+                    }
+                    // Pin the recorded target so the retry cannot let the
+                    // decision layer quietly pick the runner-up candidate.
+                    if let recordedTarget = uncertainEffects.first(where: { $0.target != nil })?.target,
+                       plan[nextStepIndex].action.needsTarget,
+                       plan[nextStepIndex].targetLabel == nil,
+                       plan[nextStepIndex].region == nil,
+                       plan[nextStepIndex].anchorLabel == nil {
+                        pinnedRetryTarget = recordedTarget
+                    }
+                    uncertainEffects = []
+                    DesktopVoiceTrace.event("uncertain_resolved", turnID: turnID,
+                        fields: ["task_id": taskID, "resolution": resolution.rawValue,
+                                 "pinned_target": String(pinnedRetryTarget != nil)])
+                case .replaceTarget:
+                    guard isCorrection else {
+                        return finish("uncertain_effect", "replace_target 需要 corrective 指令（intent=correct）和明确的新目标。")
+                    }
+                    let explicitlyTargeted = requestedPlan.allSatisfy { step in
+                        !step.action.needsTarget || step.targetLabel != nil || step.region != nil
+                            || (step.anchorLabel != nil && step.relation != nil)
+                    }
+                    guard explicitlyTargeted else {
+                        return finish("needs_clarification", "replace_target 需要明确的新目标名称或位置，不能交给模型重新挑选。")
+                    }
+                    uncertainEffects = []
+                    DesktopVoiceTrace.event("uncertain_resolved", turnID: turnID,
+                        fields: ["task_id": taskID, "resolution": resolution.rawValue,
+                                 "replaced_target": "true"])
+                }
+            }
+            let pinnedTarget = pinnedRetryTarget ?? exactTarget
             while nextStepIndex < plan.count {
                 try checkCurrent()
                 var step = plan[nextStepIndex]
@@ -179,16 +266,16 @@ final class DesktopTaskCoordinator {
 
                 if step.action.needsTarget {
                     var candidates = step.candidates(in: observation)
-                    if let exactTarget { candidates = candidates.filter { Self.sameTarget($0, exactTarget) } }
+                    if let pinnedTarget { candidates = candidates.filter { Self.sameTarget($0, pinnedTarget) } }
                     if candidates.isEmpty {
                         observation = try await observe()
                         try checkCurrent()
                         guard pinnedApp == observation.app else { return finish("paused", "重新观察时应用已变化。") }
                         candidates = step.candidates(in: observation)
-                        if let exactTarget { candidates = candidates.filter { Self.sameTarget($0, exactTarget) } }
+                        if let pinnedTarget { candidates = candidates.filter { Self.sameTarget($0, pinnedTarget) } }
                     }
                     guard !candidates.isEmpty else { return finish("needs_clarification", "重新观察后仍未定位到指定目标，没有用其他控件替代。") }
-                    if step.targetLabel != nil || exactTarget != nil {
+                    if step.targetLabel != nil || pinnedTarget != nil {
                         guard candidates.count == 1 else { return finish("needs_clarification", "存在多个符合限定的同名目标，需要进一步区分位置。") }
                         selectedTarget = candidates[0]
                     } else {
@@ -198,7 +285,7 @@ final class DesktopTaskCoordinator {
                             imageDataURL: observation.imageDataURL)
                         let decision: DesktopTaskDecision
                         do {
-                            decision = try await decideWithStep(goal, step, narrowed, resumesSameTask ? priorActions : [], false)
+                            decision = try await decideWithStep(goal, step, narrowed, resumesSameTask ? priorVerifiedActions : [], false)
                         } catch {
                             try checkCurrent()
                             observation = try await observe()
@@ -209,7 +296,7 @@ final class DesktopTaskCoordinator {
                             narrowed = DesktopTaskObservation(app: observation.app, targets: recoveredCandidates, windowID: observation.windowID,
                                 id: observation.id, capturedAt: observation.capturedAt, contentVersion: observation.contentVersion,
                                 imageDataURL: observation.imageDataURL)
-                            decision = try await decideWithStep(goal, step, narrowed, resumesSameTask ? priorActions : [], true)
+                            decision = try await decideWithStep(goal, step, narrowed, resumesSameTask ? priorVerifiedActions : [], true)
                         }
                         try checkCurrent()
                         modelDecision = decision
@@ -240,13 +327,13 @@ final class DesktopTaskCoordinator {
                     }
                 }
 
-                if let selectedTarget, uncertainTargets.contains(where: { $0.app == observation.app && Self.sameTarget($0.target, selectedTarget) }) {
-                    return finish("paused", "此前对此目标的操作结果仍未确认，不能自动重复。")
+                if let selectedTarget, uncertainEffects.contains(where: { $0.app == observation.app && $0.target != nil && Self.sameTarget($0.target!, selectedTarget) }) {
+                    return finish("uncertain_effect", "此前对此目标的操作结果仍未确认，不能自动重复。")
                 }
-                if selectedTarget == nil, uncertainTargetlessSteps.contains(where: { $0.app == observation.app && $0.step == step }) {
-                    return finish("paused", "此前同一操作的结果仍未确认，不能自动重复。")
+                if selectedTarget == nil, uncertainEffects.contains(where: { $0.app == observation.app && $0.target == nil && $0.step == step }) {
+                    return finish("uncertain_effect", "此前同一操作的结果仍未确认，不能自动重复。")
                 }
-                guard uncertainTargets.count + uncertainTargetlessSteps.count < 32 else { return finish("paused", "未确认操作过多，请先检查现有结果。") }
+                guard uncertainEffects.count < 32 else { return finish("paused", "未确认操作过多，请先检查现有结果。") }
                 try checkCurrent()
                 let label = selectedTarget?.label ?? step.application ?? step.key ?? step.direction ?? step.action.rawValue
                 let packet = DesktopDecisionPacket.make(
@@ -259,8 +346,11 @@ final class DesktopTaskCoordinator {
                 records.append(DesktopActionRecord(id: observation.id, observationID: observation.id,
                     app: observation.app, targetID: selectedTarget?.id, label: label, action: step.action,
                     decisionPacket: packet, delivery: .unknown, verified: false, detail: "已尝试下发，结果未确认"))
-                if let selectedTarget { uncertainTargets.append((observation.app, selectedTarget)) }
-                else { uncertainTargetlessSteps.append((observation.app, step)) }
+                if selectedTarget != nil || step.action.needsTarget {
+                    uncertainEffects.append(UncertainEffect(app: observation.app, target: selectedTarget, step: step, label: label))
+                } else {
+                    uncertainEffects.append(UncertainEffect(app: observation.app, target: nil, step: step, label: label))
+                }
                 DesktopVoiceTrace.event("action_attempt_started", turnID: turnID,
                     fields: ["task_id": taskID, "trace_id": observation.id, "action": step.action.rawValue,
                              "decision_source": packet.source.rawValue, "scope": packet.scope.rawValue,
@@ -278,10 +368,10 @@ final class DesktopTaskCoordinator {
                              "failure_stage": result.failureStage ?? "none",
                              "reason_code": result.reasonCode ?? "none"])
                 if result.completed || result.delivery == .notSent, let selectedTarget {
-                    uncertainTargets.removeAll { $0.app == observation.app && Self.sameTarget($0.target, selectedTarget) }
+                    uncertainEffects.removeAll { $0.app == observation.app && $0.target.map { Self.sameTarget($0, selectedTarget) } == true }
                 }
                 if result.completed || result.delivery == .notSent {
-                    uncertainTargetlessSteps.removeAll { $0.app == observation.app && $0.step == step }
+                    uncertainEffects.removeAll { $0.app == observation.app && $0.target == nil && $0.step == step }
                 }
                 // Cancellation stops future work, not factual bookkeeping.
                 // A verified effect remains completed even when interruption
@@ -292,7 +382,7 @@ final class DesktopTaskCoordinator {
                 }
                 try checkCurrent()
                 if result.delivery == .notSent { return finish("paused", result.detail) }
-                guard result.completed else { return finish("paused", "操作结果未确认，已停止；页面变化不等于目标完成。") }
+                guard result.completed else { return finish("uncertain_effect", "操作结果未确认，已停止；页面变化不等于目标完成。") }
             }
             return finish("completed", "本轮步骤均已通过独立结果检查。")
         } catch is CancellationError {
@@ -306,5 +396,12 @@ final class DesktopTaskCoordinator {
         // IDs alone are not proof: a provider may reuse one after a refresh.
         LocalTargetContinuity.matches(label: target.label, source: target.source, box: target.box, display: target.display,
             previousLabel: previous.label, previousSource: previous.source, previousBox: previous.box, previousDisplay: previous.display)
+    }
+
+    /// The history wording for one attempt. A user-confirmed success is
+    /// promoted into verified history with the verified wording; an
+    /// unconfirmed attempt keeps the uncertain wording forever.
+    static func attemptSummary(action: DesktopActionKind, label: String, verified: Bool) -> String {
+        "\(action.rawValue)「\(label)」：\(verified ? "目标状态已验证" : "结果未确认")"
     }
 }

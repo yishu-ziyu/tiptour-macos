@@ -47,6 +47,7 @@ cp "$project_dir/TipTour/Voice/StepFunRealtimeClient.swift" \
    "$project_dir/TipTour/Voice/DesktopTaskContract.swift" \
    "$project_dir/TipTour/Voice/DesktopDecisionPacket.swift" \
    "$project_dir/TipTour/Voice/DesktopApplicationResolver.swift" \
+   "$project_dir/TipTour/Voice/DesktopObservedWindowIdentity.swift" \
    "$project_dir/TipTour/Voice/StepFunResponseBoundary.swift" \
    "$project_dir/TipTour/Voice/DesktopVoiceTrace.swift" \
    "$project_dir/TipTour/Voice/DesktopActionVerifier.swift" \

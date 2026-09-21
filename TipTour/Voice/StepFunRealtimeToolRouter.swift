@@ -129,7 +129,8 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
                 && actionArguments.action == nil && actionArguments.targetLabel == nil && actionArguments.index == nil
             let receipt = await coordinator.run(goal: goal, exactTarget: exactTarget,
                 resumePrevious: actionArguments.resumePrevious ?? false, steps: continuationOnly ? nil : requestedSteps,
-                intent: actionArguments.intent, turnID: currentTurnID)
+                intent: actionArguments.intent, uncertainResolution: actionArguments.uncertainResolution,
+                turnID: currentTurnID)
             DesktopVoiceTrace.event("task_result", turnID: receipt.turnID,
                 fields: ["task_id": receipt.taskID, "target_version": String(receipt.targetVersion), "status": receipt.status,
                          "current_action_count": String(receipt.currentActions.count), "prior_action_count": String(receipt.priorActions.count)],
@@ -287,7 +288,8 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
         let windowCapture: CompanionWindowCGImageCapture
         do {
             guard let capturedWindow = try await CompanionScreenCaptureUtility.captureVisibleApplicationWindow(
-                processIdentifiers: relatedProcessIdentifiers
+                processIdentifiers: relatedProcessIdentifiers,
+                preferredFrontmostProcessIdentifier: frontmostApplication.processIdentifier
             ) else {
                 return "读取时没有找到「\(frontmostApplication.localizedName ?? frontmostBundleIdentifier)」的可见窗口，所以我不能声称看到了内容。"
             }
@@ -295,6 +297,18 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
         } catch {
             return "目标应用窗口截图失败：\(error.localizedDescription)。"
         }
+        // The observation belongs to this exact window, not to the app in
+        // general: while the slow vision call runs, the app can switch windows
+        // without changing its bundle ID or process.
+        let observedWindow = DesktopObservedWindowIdentity(
+            bundleIdentifier: frontmostBundleIdentifier,
+            processIdentifier: windowCapture.processIdentifier,
+            windowID: Int(windowCapture.windowID),
+            frame: windowCapture.frame,
+            capturedAt: windowCapture.capturedAt,
+            contentVersion: observedContentVersion,
+            contentFingerprint: DesktopWindowContentFingerprint.hash(of: windowCapture.image)
+        )
         guard let jpegData = NSBitmapImageRep(cgImage: windowCapture.image)
             .representation(using: .jpeg, properties: [.compressionFactor: 0.82]) else {
             return "目标应用窗口无法编码为视觉输入。\n\(rendered)"
@@ -309,11 +323,35 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
             let relatedProcessesStillCurrent = DesktopApplicationResolver.processIdentifiers(
                 belongingTo: frontmostBundleURL
             ).contains(windowCapture.processIdentifier)
-            guard contentVersion == observedContentVersion,
-                  currentFrontmostApplication?.bundleIdentifier == frontmostBundleIdentifier,
-                  relatedProcessesStillCurrent else {
+            guard observedWindow.isStillCurrent(
+                frontmostBundleIdentifier: currentFrontmostApplication?.bundleIdentifier,
+                frontmostWindowID: currentWindowID(),
+                currentWindowFrame: Self.currentFrameOfWindow(windowCapture.windowID),
+                observedProcessStillExists: relatedProcessesStillCurrent,
+                currentContentVersion: contentVersion,
+                maximumAge: StepFunScreenDescription.validitySeconds
+            ) else {
                 if retriesRemaining > 0 { return await describeScreen(intent: intent, retriesRemaining: retriesRemaining - 1) }
                 return "读取期间页面仍在变化，这份旧观察不能回答当前画面。请待页面稳定再读。"
+            }
+            // The same window can change content without any window event — a
+            // page navigation, a dialog, an auto-refresh. Re-capture the SAME
+            // window and compare a content fingerprint, and re-verify that the
+            // same process still owns the window.
+            let recapture: CompanionWindowCGImageCapture?
+            do {
+                recapture = try await CompanionScreenCaptureUtility.recaptureWindow(
+                    matchingWindowID: windowCapture.windowID,
+                    processIdentifiers: DesktopApplicationResolver.processIdentifiers(belongingTo: frontmostBundleURL)
+                )
+            } catch {
+                recapture = nil
+            }
+            guard let recapture,
+                  recapture.processIdentifier == windowCapture.processIdentifier,
+                  observedWindow.contentStillMatches(DesktopWindowContentFingerprint.hash(of: recapture.image)) else {
+                if retriesRemaining > 0 { return await describeScreen(intent: intent, retriesRemaining: retriesRemaining - 1) }
+                return "读取期间页面内容已变化，这份旧观察不能回答当前画面。请待页面稳定再读。"
             }
             // Create numbering only after the slow vision call and reject changed
             // windows; final actions still revalidate the stored exact target.
@@ -367,5 +405,14 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
               let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
         return windows.first { ($0[kCGWindowOwnerPID as String] as? Int) == Int(processIdentifier)
             && ($0[kCGWindowLayer as String] as? Int) == 0 }?[kCGWindowNumber as String] as? Int
+    }
+
+    /// The live frame of a specific window, used to detect that the captured
+    /// window moved or closed while a slow vision call was in flight.
+    private static func currentFrameOfWindow(_ windowID: CGWindowID) -> CGRect? {
+        guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+              let windowInfo = windowList.first(where: { ($0[kCGWindowNumber as String] as? Int) == Int(windowID) }),
+              let boundsDictionary = windowInfo[kCGWindowBounds as String] as? [String: Any] else { return nil }
+        return CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary)
     }
 }

@@ -142,9 +142,14 @@ struct StepFunTurnLifecycleTests {
         #expect(lifecycle.recordPlaybackDrained() == .finishTurnWithToolResult)
         #expect(lifecycle.phase == .awaitingToolResult)
 
-        lifecycle.recordToolResultReported()
-        #expect(lifecycle.phase == .idle)
+        // Sending the result asks the server for a follow-up response; the turn
+        // is not idle again until that response is actually created.
+        lifecycle.recordToolResultReported(followupResponseExpected: true)
+        #expect(lifecycle.phase == .awaitingFollowupResponseCreated)
         #expect(lifecycle.hasPendingToolCall == false)
+
+        lifecycle.recordResponseCreated()
+        #expect(lifecycle.phase == .awaitingResponseDone)
     }
 
     @Test func toolCallArrivingAfterDrainIsReportedWithoutWaitingForAnotherCompletion() {
@@ -159,8 +164,8 @@ struct StepFunTurnLifecycleTests {
         #expect(lifecycle.hasPendingToolCall)
         #expect(lifecycle.phase == .awaitingToolResult)
 
-        lifecycle.recordToolResultReported()
-        #expect(lifecycle.phase == .idle)
+        lifecycle.recordToolResultReported(followupResponseExpected: true)
+        #expect(lifecycle.phase == .awaitingFollowupResponseCreated)
     }
 
     @Test func toolCallFromAnInterruptedTurnIsDropped() {
@@ -234,6 +239,85 @@ struct StepFunTurnLifecycleTests {
         #expect(lifecycle.recordUserStartedSpeaking() == .abandonCurrentTurn)
         #expect(lifecycle.phase == .idle)
         #expect(lifecycle.hasPendingToolCall == false)
+    }
+
+    @Test func discardedFollowupNeverBlocksTheUsersNextResponse() {
+        // The race: tool result sent (follow-up response requested), and the
+        // user starts speaking BEFORE the server answers `response.created`.
+        // Probed against the live API: no client token is echoed in
+        // response.created, so a pending follow-up cannot be told apart from
+        // the user's next response by id — and a cancelled follow-up still
+        // emits created+done(incomplete) with no audio. The lifecycle must
+        // therefore discard the follow-up WITHOUT eating the next created.
+        var lifecycle = StepFunTurnLifecycle()
+        lifecycle.recordAudioChunkArrived()
+        _ = lifecycle.recordToolCallArrived()
+        _ = lifecycle.recordResponseDoneArrived()
+        #expect(lifecycle.recordPlaybackDrained() == .finishTurnWithToolResult)
+        lifecycle.recordToolResultReported(followupResponseExpected: true)
+        #expect(lifecycle.phase == .awaitingFollowupResponseCreated)
+
+        #expect(lifecycle.recordUserStartedSpeaking() == .discardPendingFollowupResponse)
+        #expect(lifecycle.phase == .interrupted)
+
+        // The server cancelled the follow-up outright: no stale created, no
+        // stale audio. The user's own next response must open a new turn.
+        lifecycle.recordResponseCreated()
+        #expect(lifecycle.phase == .awaitingResponseDone)
+        lifecycle.recordAudioChunkArrived()
+        #expect(lifecycle.phase == .awaitingResponseDone)
+    }
+
+    @Test func lateCreatedOfACancelledFollowupCannotReviveItsTurn() {
+        // When the cancel loses the race the stale follow-up's created still
+        // arrives. The session rebuilds its socket at that point (the only
+        // deterministic discard), so on the lifecycle's side the created opens
+        // a normal turn and the cancelled response's completion is ignored
+        // rather than reported as speech.
+        var lifecycle = StepFunTurnLifecycle()
+        _ = lifecycle.recordToolCallArrived()
+        lifecycle.recordToolResultReported(followupResponseExpected: true)
+        #expect(lifecycle.recordUserStartedSpeaking() == .discardPendingFollowupResponse)
+
+        lifecycle.recordResponseCreated()
+        #expect(lifecycle.phase == .awaitingResponseDone)
+        // A cancelled response generates no audio; if any late chunk arrives it
+        // still plays only as part of this — now user-owned — turn.
+        lifecycle.recordAudioChunkArrived()
+        #expect(lifecycle.recordResponseDoneArrived() == .beginPlaybackDrain)
+    }
+
+    @Test func toolResultFollowupCreatedWithoutBargeInStartsTheReceiptTurn() {
+        var lifecycle = StepFunTurnLifecycle()
+        _ = lifecycle.recordToolCallArrived()
+        lifecycle.recordToolResultReported(followupResponseExpected: true)
+        #expect(lifecycle.phase == .awaitingFollowupResponseCreated)
+
+        lifecycle.recordResponseCreated()
+        #expect(lifecycle.phase == .awaitingResponseDone)
+        lifecycle.recordAudioChunkArrived()
+        #expect(lifecycle.phase == .awaitingResponseDone)
+    }
+
+    @Test func unsentToolResultReturnsToIdleWithoutAwaitingAFollowup() {
+        var lifecycle = StepFunTurnLifecycle()
+        _ = lifecycle.recordToolCallArrived()
+        #expect(lifecycle.phase == .awaitingToolResult)
+        lifecycle.recordToolResultReported(followupResponseExpected: false)
+        #expect(lifecycle.phase == .idle)
+        #expect(lifecycle.hasPendingToolCall == false)
+    }
+
+    @Test func resetAfterDiscardedFollowupAcceptsTheNextCreated() {
+        var lifecycle = StepFunTurnLifecycle()
+        _ = lifecycle.recordToolCallArrived()
+        lifecycle.recordToolResultReported(followupResponseExpected: true)
+        #expect(lifecycle.recordUserStartedSpeaking() == .discardPendingFollowupResponse)
+
+        lifecycle.reset()
+        #expect(lifecycle.phase == .idle)
+        lifecycle.recordResponseCreated()
+        #expect(lifecycle.phase == .awaitingResponseDone)
     }
 
     @Test func newResponseRetiresAnInterruptedTurn() {

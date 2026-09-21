@@ -16,6 +16,17 @@ enum DesktopTaskIntent: String, Codable {
     case new, resume, correct
 }
 
+/// How the user resolved an operation whose effect was never independently
+/// verified. A task with an unconfirmed side effect stays stopped until one of
+/// these is explicit: a plain resume or correction is not authorization to try
+/// something else.
+enum DesktopTaskUncertainResolution: String, Codable {
+    case confirmedSucceeded = "confirmed_succeeded"
+    case confirmedFailed = "confirmed_failed"
+    case retrySame = "retry_same"
+    case replaceTarget = "replace_target"
+}
+
 /// Parameters belong to the task, never to the candidate-selection model.
 struct DesktopActionStep: Codable, Equatable {
     var action: DesktopActionKind = .click
@@ -173,11 +184,15 @@ struct DesktopTaskReceipt: Codable {
     var targetVersion: Int = 1
     var priorActions: [String] = []
     var currentActions: [DesktopActionRecord] = []
+    /// Verified effects only, carried across the whole task chain. Unverified
+    /// or unsent attempts are NOT "already done" and never enter this list.
+    var verifiedActionHistory: [String] = []
 
     enum CodingKeys: String, CodingKey {
         case goal, status, actions, detail, app
         case taskID = "task_id", turnID = "turn_id", targetVersion = "target_version"
         case priorActions = "prior_actions", currentActions = "current_actions"
+        case verifiedActionHistory = "verified_action_history"
     }
 
     var toolOutput: String {

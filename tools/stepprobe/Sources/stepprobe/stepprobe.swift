@@ -53,6 +53,8 @@ struct StepProbe {
                 try await runJevProbe(options: options)
             case "realtime":
                 try await runRealtimeProbe(options: options)
+            case "followup-race":
+                try await runFollowupRaceProbe(options: options)
             default:
                 throw ProbeError.usage("Unknown command `\(command)`. Run `swift run stepprobe` for help.")
             }
@@ -302,6 +304,25 @@ struct StepProbe {
             print("    arguments  \(call.arguments)")
         }
         print("    full event timeline: \(result.events.count) events")
+    }
+
+    // MARK: followup-race
+
+    /// Measures whether a pending tool-result follow-up can be told apart from
+    /// the user's next response when the user barges in before the follow-up's
+    /// `response.created` arrives. The answer decides the app's race fix: a
+    /// request token allows precise correlation; without one the app must not
+    /// rely on "the next created is the old receipt".
+    private static func runFollowupRaceProbe(options: [String: [String]]) async throws {
+        let apiKey = try EnvLoader.require("STEPFUN_API_KEY")
+        let model = OptionParser.singleValue(options, "model") ?? "stepaudio-3-realtime-preview"
+        print("""
+
+          == followup-race probe: \(model) ==
+            wss://api.stepfun.com/v1/realtime?model=\(model)
+
+        """)
+        try await FollowupRaceProbe(apiKey: apiKey, model: model).run()
     }
 
     private static func prettyJSON(_ object: Any) -> String {

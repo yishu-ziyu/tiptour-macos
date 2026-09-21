@@ -34,6 +34,11 @@ struct CompanionWindowCGImageCapture {
     let image: CGImage
     let windowID: CGWindowID
     let processIdentifier: pid_t
+    /// The window's Core Graphics frame at capture time and when it was taken.
+    /// A slow vision call is only allowed to answer while this exact window is
+    /// still frontmost and unmoved; see DesktopObservedWindowIdentity.
+    let frame: CGRect
+    let capturedAt: Date
 }
 
 @MainActor
@@ -209,8 +214,14 @@ enum CompanionScreenCaptureUtility {
     /// This is intentionally independent of cursor location: screen questions
     /// should describe the app the user is talking about, not whichever display
     /// happens to contain the mouse pointer.
+    ///
+    /// Window selection is the focused AX window of the frontmost process
+    /// first, then the frontmost window in z-order — never the largest window,
+    /// which is how a background document got described instead of the dialog
+    /// the user was actually looking at.
     static func captureVisibleApplicationWindow(
-        processIdentifiers: Set<pid_t>
+        processIdentifiers: Set<pid_t>,
+        preferredFrontmostProcessIdentifier: pid_t
     ) async throws -> CompanionWindowCGImageCapture? {
         guard !processIdentifiers.isEmpty else { return nil }
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -222,8 +233,110 @@ enum CompanionScreenCaptureUtility {
                 && window.frame.width >= 80
                 && window.frame.height >= 60
         }
-        guard let targetWindow = candidates.max(by: { first, second in
-            first.frame.width * first.frame.height < second.frame.width * second.frame.height
+        guard !candidates.isEmpty else { return nil }
+
+        let focusedFrame = focusedWindowFrame(ofProcess: preferredFrontmostProcessIdentifier)
+        let targetWindow: SCWindow?
+        if let focusedFrame,
+           let focusedWindow = candidates.first(where: { framesMatchWithinRounding($0.frame, focusedFrame) }) {
+            targetWindow = focusedWindow
+        } else {
+            // CGWindowList is ordered front to back, so the first match is the
+            // window the user is actually looking at.
+            let zOrderByWindowNumber = frontToBackWindowOrder()
+            targetWindow = candidates.min(by: { first, second in
+                (zOrderByWindowNumber[first.windowID] ?? .max) < (zOrderByWindowNumber[second.windowID] ?? .max)
+            })
+        }
+        guard let targetWindow, let owningApplication = targetWindow.owningApplication else { return nil }
+
+        let filter = SCContentFilter(desktopIndependentWindow: targetWindow)
+        let configuration = SCStreamConfiguration()
+        let scale = windowBackingScaleFactor(for: targetWindow.frame)
+        configuration.width = max(1, Int(targetWindow.frame.width * scale))
+        configuration.height = max(1, Int(targetWindow.frame.height * scale))
+
+        let image = try await SCScreenshotManager.captureImage(
+            contentFilter: filter,
+            configuration: configuration
+        )
+        return CompanionWindowCGImageCapture(
+            image: image,
+            windowID: targetWindow.windowID,
+            processIdentifier: owningApplication.processID,
+            frame: targetWindow.frame,
+            capturedAt: Date()
+        )
+    }
+
+    /// The focused window's frame from the Accessibility API. AX and
+    /// ScreenCaptureKit both report global top-left-origin frames, so a match
+    /// maps the AX focus onto a capturable SCWindow. Returns nil whenever AX
+    /// has no answer (no permission, no focused window), which simply falls
+    /// back to z-order selection.
+    private static func focusedWindowFrame(ofProcess processIdentifier: pid_t) -> CGRect? {
+        let applicationElement = AXUIElementCreateApplication(processIdentifier)
+        var focusedWindowValue: CFTypeRef?
+        // `as!` matches the rest of the codebase's AX reads: a successful
+        // kAXFocusedWindowAttribute copy is an AXUIElement by contract, and a
+        // conditional downcast of these CF types only adds a compiler warning.
+        guard AXUIElementCopyAttributeValue(applicationElement, kAXFocusedWindowAttribute as CFString,
+                                            &focusedWindowValue) == .success,
+              let focusedWindowValue else { return nil }
+        let windowElement = focusedWindowValue as! AXUIElement
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(windowElement, kAXPositionAttribute as CFString,
+                                            &positionValue) == .success,
+              AXUIElementCopyAttributeValue(windowElement, kAXSizeAttribute as CFString,
+                                            &sizeValue) == .success,
+              let positionValue, let sizeValue else { return nil }
+        var windowOrigin = CGPoint.zero
+        var windowSize = CGSize.zero
+        guard AXValueGetValue(positionValue as! AXValue, .cgPoint, &windowOrigin),
+              AXValueGetValue(sizeValue as! AXValue, .cgSize, &windowSize) else { return nil }
+        return CGRect(origin: windowOrigin, size: windowSize)
+    }
+
+    private static func framesMatchWithinRounding(_ first: CGRect, _ second: CGRect) -> Bool {
+        abs(first.origin.x - second.origin.x) <= 2
+            && abs(first.origin.y - second.origin.y) <= 2
+            && abs(first.width - second.width) <= 2
+            && abs(first.height - second.height) <= 2
+    }
+
+    /// Window number → front-to-back position, so candidates can be ranked by
+    /// what is actually on top instead of by size.
+    private static func frontToBackWindowOrder() -> [CGWindowID: Int] {
+        guard let windowList = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return [:] }
+        var order: [CGWindowID: Int] = [:]
+        for (position, windowInfo) in windowList.enumerated() {
+            if let windowNumber = windowInfo[kCGWindowNumber as String] as? Int {
+                order[CGWindowID(windowNumber)] = position
+            }
+        }
+        return order
+    }
+
+    /// Re-capture one specific window by ID, to check that the content a
+    /// slow vision call answered for is still what that window shows. The
+    /// window may have navigated, opened a dialog, or auto-refreshed without
+    /// emitting any window event, which window-identity checks cannot see.
+    /// Also reports the window's current owner PID so the caller can re-verify
+    /// that the same process still owns it.
+    static func recaptureWindow(
+        matchingWindowID windowID: CGWindowID,
+        processIdentifiers: Set<pid_t>
+    ) async throws -> CompanionWindowCGImageCapture? {
+        guard !processIdentifiers.isEmpty else { return nil }
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let targetWindow = content.windows.first(where: { window in
+            window.windowID == windowID
+                && window.isOnScreen
+                && window.windowLayer == 0
+                && window.owningApplication.map { processIdentifiers.contains($0.processID) } == true
         }), let owningApplication = targetWindow.owningApplication else { return nil }
 
         let filter = SCContentFilter(desktopIndependentWindow: targetWindow)
@@ -239,7 +352,9 @@ enum CompanionScreenCaptureUtility {
         return CompanionWindowCGImageCapture(
             image: image,
             windowID: targetWindow.windowID,
-            processIdentifier: owningApplication.processID
+            processIdentifier: owningApplication.processID,
+            frame: targetWindow.frame,
+            capturedAt: Date()
         )
     }
 

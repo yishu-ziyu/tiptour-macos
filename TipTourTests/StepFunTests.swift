@@ -140,12 +140,34 @@ private func makeDescription(capturedAt: Date = Date()) -> StepFunScreenDescript
     #expect(workflowSteps[1].text == "Jarvis")
 }
 
-@Test func omittedTopLevelPointerActionCanBeSelectedByDecisionLayer() throws {
-    let arguments = try StepFunActionArguments.decode(Data(#"{"goal":"打开那个项目"}"#.utf8))
-    let steps = try arguments.validatedSteps()
-    #expect(steps.count == 1)
-    #expect(steps[0].action == .click)
-    #expect(steps[0].allowsActionDecision)
+@Test func goalWithoutActionOrPointerConstraintIsRejectedInsteadOfClicking() {
+    // A bare goal is not a click. When the model forgets both the action and
+    // every target constraint (most often a missing open_app), executing
+    // would mean clicking whatever the decision layer happens to rank first.
+    for json in [
+        #"{"goal":"打开豆包"}"#,
+        #"{"goal":"把页面往下滚"}"#,
+    ] {
+        #expect(throws: (any Error).self) {
+            let arguments = try StepFunActionArguments.decode(Data(json.utf8))
+            _ = try arguments.validatedSteps()
+        }
+    }
+}
+
+@Test func omittedTopLevelPointerActionRequiresAnExplicitPointerConstraint() throws {
+    for json in [
+        #"{"goal":"打开那个项目","target_label":"那个项目"}"#,
+        #"{"goal":"点击左侧的按钮","region":"left"}"#,
+        #"{"goal":"点击文件夹下面的项目","anchor_label":"文件夹","relation":"below"}"#,
+        #"{"goal":"点击列表第三项","index":3,"observation_id":"obs-1"}"#,
+    ] {
+        let arguments = try StepFunActionArguments.decode(Data(json.utf8))
+        let steps = try arguments.validatedSteps()
+        #expect(steps.count == 1)
+        #expect(steps[0].action == .click)
+        #expect(steps[0].allowsActionDecision)
+    }
 }
 
 @Test func explicitPointerActionStaysLocked() throws {
