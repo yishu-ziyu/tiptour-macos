@@ -204,6 +204,12 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
                     && actionArguments.direction == nil && actionArguments.amount == nil && actionArguments.expectedLabel == nil
                     && actionArguments.observationID == nil
                 requestedSteps = continuationOnly ? [] : try actionArguments.validatedSteps()
+                // Evidence trail: the raw model arguments and the effective plan are
+                // already captured with the tool call; this line records only WHY the
+                // plan had to be reshaped. Voice probes/runners capture stdout.
+                if !actionArguments.normalizationNotes.isEmpty {
+                    print("[TaskRouter] steps normalization applied: \(actionArguments.normalizationNotes.joined(separator: "; "))")
+                }
             } catch {
                 return rejectedAction("任务参数不完整或有冲突，没有执行。")
             }
