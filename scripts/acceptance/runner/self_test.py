@@ -9,10 +9,13 @@ A failure prints the raw evidence that disproved the expectation.
 from __future__ import annotations
 
 import json
+import os
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -44,7 +47,16 @@ from .synthetic_speech import (
     synthesize_utterance,
     validate_raw_pcm,
 )
-from .orchestration import RunOptions, _preflight_gate, run_acceptance
+from .orchestration import (
+    SIGINT_EXIT_CODE,
+    AbortState,
+    RunOptions,
+    _abort_exit_code,
+    _install_abort_signal_handlers,
+    _preflight_gate,
+    _restore_signal_handlers,
+    run_acceptance,
+)
 
 
 class SelfTestFailure(AssertionError):
@@ -593,6 +605,32 @@ def test_freshness_gate_blocks_stale_binary(work_dir: Path) -> list[str]:
 # ---------------------------------------------------------------- dry-run runs
 
 
+def _machine_app_binary() -> Path:
+    """The Mach-O this machine's DerivedData product actually contains."""
+    identity = inspect_app_identity(paths.DEFAULT_DERIVED_DATA_APP)
+    executable = identity.bundle_executable or paths.EXPECTED_BUNDLE_EXECUTABLE
+    return paths.DEFAULT_DERIVED_DATA_APP / "Contents/MacOS" / executable
+
+
+def _pending_scenario_names(app_binary: Path | None = None) -> list[str]:
+    """Scenarios whose capability flag the given binary does not contain.
+
+    The same rule the runner uses: a scenario is pending-integrator-run exactly
+    when the work order that owns its probe is not merged into the built binary
+    (its flag is absent). The expected dry-run exit code is therefore derived
+    from the binary's real capability, not from an assumption about which work
+    orders have merged here.
+    """
+    binary = app_binary if app_binary is not None else _machine_app_binary()
+    pending: list[str] = []
+    for scenario in load_scenarios():
+        capability_flag = scenario.capability_flag
+        if scenario.probe_mode == "unknown" and capability_flag:
+            if not binary_supports_flag(binary, capability_flag):
+                pending.append(scenario.name)
+    return pending
+
+
 def _run_dry_run(work_dir: Path, failure_injection: bool) -> tuple[int, dict, dict]:
     out_dir = work_dir / ("dry-run-failures" if failure_injection else "dry-run-good")
     options = RunOptions(
@@ -609,14 +647,33 @@ def _run_dry_run(work_dir: Path, failure_injection: bool) -> tuple[int, dict, di
 
 def test_dry_run_full_pipeline_twice_consistent(work_dir: Path) -> list[str]:
     first_code, first_result, _ = _run_dry_run(work_dir / "first", failure_injection=False)
-    # Pre-merge the unknown scenario is pending-integrator-run (work order 04's probe
-    # is not in the binary), so the honest exit code is non-zero with no failures.
-    _check(first_code == 1,
-           f"pre-merge good dry-run must exit non-zero while a scenario is pending: {first_code}")
+    # The exit code depends on what this binary can actually do: a scenario whose
+    # owning work order has not merged is pending-integrator-run, so the honest
+    # exit is non-zero; when every scenario's capability is present, the same
+    # pipeline has nothing left to be honest about except a clean 0.
+    # The rule itself, proven against synthetic binaries so the assertion keeps
+    # its meaning on either machine: a capability the binary lacks is pending
+    # (non-zero exit is honest), a capability it has is not (zero is honest).
+    capable = work_dir / "binary-with-receipt-loss-probe"
+    capable.write_bytes(b"\x00fake-macho" + b"--receipt-loss-probe" + b"\x00rest")
+    incapable = work_dir / "binary-without-receipt-loss-probe"
+    incapable.write_bytes(b"\x00fake-macho--voice-task-probe\x00rest")
+    _check(_pending_scenario_names(capable) == [],
+           f"a binary that contains the probe must leave nothing pending: "
+           f"{_pending_scenario_names(capable)}")
+    _check(_pending_scenario_names(incapable) == ["unknown_delivery_fault_recovery"],
+           f"a binary without the probe must leave the scenario pending: "
+           f"{_pending_scenario_names(incapable)}")
+
+    pending = _pending_scenario_names()
+    expected_code = 1 if pending else 0
+    capability_note = (f"pending scenarios in this binary: {pending or 'none'}")
+    _check(first_code == expected_code,
+           f"good dry-run must exit {expected_code} ({capability_note}), got {first_code}")
     _check(not any(scenario["status"] == "failed" for scenario in first_result["scenarios"]),
            "the good dry-run has a failed scenario")
-    _check(first_result["summary"]["pending_integrator_run"] == ["unknown_delivery_fault_recovery"],
-           f"pending scenario list wrong: {first_result['summary']}")
+    _check(first_result["summary"]["pending_integrator_run"] == pending,
+           f"pending scenario list wrong: {first_result['summary']} vs {pending}")
     _check(first_result["proof"] is False, "dry run claimed proof")
     _check(first_result["mode"] == "dry_run", "dry run mislabeled")
     _check(first_result["environment"]["fixture"]["port_released_after_stop"] is True,
@@ -630,7 +687,7 @@ def test_dry_run_full_pipeline_twice_consistent(work_dir: Path) -> list[str]:
            "second run started while the port was still occupied by the first")
     second_code = run_acceptance(second_options)
     second_result = evidence.read_json(second_dir / "result.json")
-    _check(second_code == 1, "second dry run did not match the first run's exit code")
+    _check(second_code == expected_code, "second dry run did not match the first run's exit code")
     first_statuses = {scenario["name"]: scenario["status"] for scenario in first_result["scenarios"]}
     second_statuses = {scenario["name"]: scenario["status"] for scenario in second_result["scenarios"]}
     _check(first_statuses == second_statuses,
@@ -638,8 +695,8 @@ def test_dry_run_full_pipeline_twice_consistent(work_dir: Path) -> list[str]:
     for scenario in first_result["scenarios"]:
         _check(scenario["status"] in ("passed", "pending_integrator_run"),
                f"unexpected dry-run verdict: {scenario['status']}")
-    return ["two consecutive dry runs agree, exit 0, port free between runs, no owned "
-            "processes left, and proof=False throughout"]
+    return [f"two consecutive dry runs agree, exit {expected_code} ({capability_note}), "
+            "port free between runs, no owned processes left, and proof=False throughout"]
 
 
 def test_dry_run_failure_injection_is_detected(work_dir: Path) -> list[str]:
@@ -653,6 +710,109 @@ def test_dry_run_failure_injection_is_detected(work_dir: Path) -> list[str]:
         scenario = next(item for item in result["scenarios"] if item["name"] == name)
         _check(scenario["failure_reasons"], f"{name} failed without recorded reasons")
     return ["every injected bad chain failed the run with recorded reasons and exit code 1"]
+
+
+def test_interrupted_run_still_writes_report(work_dir: Path) -> list[str]:
+    """An interrupted run must still produce a readable, non-PASS report.
+
+    Part 1 proves the signal handler's contract (a signal only sets the abort
+    flag and never raises, so the run can settle what is in flight), part 2
+    proves the exit codes, part 3 interrupts the real dry-run pipeline with a
+    real SIGINT and reads the package back from disk. No app, provider or
+    desktop is involved, and the user's Her is never signalled.
+    """
+    # 1. The handler contract: set the flag, never raise.
+    state = AbortState()
+    installed = _install_abort_signal_handlers(state)
+    try:
+        signal.raise_signal(signal.SIGINT)
+        _check(state.requested and state.signal_name == "SIGINT",
+               f"SIGINT did not set the abort flag: {state}")
+        _check(_abort_exit_code(state) == SIGINT_EXIT_CODE,
+               f"SIGINT must exit {SIGINT_EXIT_CODE}: {_abort_exit_code(state)}")
+        _check(_abort_exit_code(AbortState.for_signal(signal.SIGTERM)) != 0,
+               "SIGTERM must exit non-zero")
+        _check(_abort_exit_code(AbortState()) != 0, "an abort without a signal must exit non-zero")
+    finally:
+        _restore_signal_handlers(installed)
+
+    # 2. An abort requested before the scenarios still writes the whole package.
+    pre_run_dir = work_dir / "abort-before-scenarios"
+    pre_code = run_acceptance(
+        RunOptions(app_path_argument=None, out_dir=pre_run_dir, mode="dry_run"),
+        abort=AbortState.for_signal(signal.SIGINT),
+    )
+    pre_result = evidence.read_json(pre_run_dir / "result.json")
+    _check(pre_code == SIGINT_EXIT_CODE, f"aborted run exited {pre_code}, expected {SIGINT_EXIT_CODE}")
+    _check(pre_result["passed"] is False, "an aborted run was recorded as passed")
+    _check(pre_result["environment"]["abort"]["signal_name"] == "SIGINT",
+           f"the report does not record the interrupt: "
+           f"{pre_result['environment'].get('abort')}")
+    _check(all(scenario["abort"]["status"] == "not_run" for scenario in pre_result["scenarios"]),
+           f"every scenario must be not_run: "
+           f"{[s['abort']['status'] for s in pre_result['scenarios']]}")
+    _check(pre_result["environment"]["fixture"]["not_started"] is True,
+           "a run aborted before the fixture must say the fixture never started")
+
+    # 3. A real SIGINT in the middle of the pipeline: the in-flight attempt is
+    #    settled, the loop starts no new work, and the report is still written.
+    out_dir = work_dir / "sigint-mid-run"
+    artifacts = out_dir / "scenario-artifacts"
+    delivered = threading.Event()
+
+    def _interrupt() -> None:
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            if any(artifacts.glob("*/run-1")):
+                os.kill(os.getpid(), signal.SIGINT)
+                delivered.set()
+                return
+            time.sleep(0.01)
+
+    interrupter = threading.Thread(target=_interrupt, daemon=True)
+    interrupter.start()
+    exit_code = run_acceptance(RunOptions(app_path_argument=None, out_dir=out_dir,
+                                          mode="dry_run"))
+    interrupter.join(timeout=5.0)
+    _check(delivered.is_set(), "the synthetic SIGINT was never delivered")
+
+    _check((out_dir / "result.json").is_file(), "an interrupted run wrote no result.json")
+    result = evidence.read_json(out_dir / "result.json")
+    _check(exit_code == SIGINT_EXIT_CODE,
+           f"SIGINT must exit {SIGINT_EXIT_CODE}, got {exit_code}")
+    _check(result["exit_code"] == SIGINT_EXIT_CODE,
+           f"result.json recorded exit_code={result['exit_code']}")
+    _check(result["passed"] is False, "an interrupted run was recorded as passed")
+    _check(result["proof"] is False, "an interrupted run claimed proof")
+    _check(result["environment"]["abort"]["signal_name"] == "SIGINT",
+           f"the report does not record the interrupt: {result['environment'].get('abort')}")
+    aborted = [scenario for scenario in result["scenarios"] if scenario.get("aborted")]
+    _check(aborted, "no scenario recorded the interruption")
+    _check(all(scenario["status"] != "passed" for scenario in aborted),
+           f"an aborted scenario was recorded as passed: {[s['status'] for s in aborted]}")
+    _check(all(scenario["status"] == "failed" for scenario in aborted),
+           f"an aborted scenario must be a non-PASS failed status: "
+           f"{[s['status'] for s in aborted]}")
+    _check(all(scenario["abort"]["status"] in ("aborted", "not_run")
+               and scenario["failure_reasons"] for scenario in aborted),
+           f"aborted scenarios must name aborted/not_run with a reason: "
+           f"{[s['abort']['status'] for s in aborted]}")
+    _check(result["environment"]["cleanup"]["owned_processes_remaining"] == 0,
+           "an interrupted run left owned processes running")
+    _check(result["environment"]["fixture"]["port_released_after_stop"] is True,
+           "an interrupted run left the fixture port occupied")
+    _check(evidence.validate_result_schema(result) == [],
+           f"the interrupted package failed the evidence schema: "
+           f"{evidence.validate_result_schema(result)}")
+    for scenario in aborted:
+        for artifact in scenario["abort"]["attempt_artifacts"]:
+            path = Path(artifact)
+            _check(path.is_file(), f"settled attempt is not on disk: {artifact}")
+            evidence.read_json(path)  # complete JSON: the per-attempt write is atomic
+    return [f"SIGINT handler sets a flag and never raises; exit {SIGINT_EXIT_CODE} for SIGINT "
+            "and non-zero for any other abort; an interrupted dry run still wrote result.json "
+            "with passed=false, every scenario recorded as aborted/not_run with a reason, and "
+            "the attempts it had already settled on disk one by one"]
 
 
 def test_dry_run_artifacts_have_no_secrets(work_dir: Path) -> list[str]:
@@ -881,6 +1041,7 @@ TESTS = (
     ("child process discipline", test_child_process_discipline),
     ("freshness gate blocks stale binary", test_freshness_gate_blocks_stale_binary),
     ("dry run full pipeline twice consistent", test_dry_run_full_pipeline_twice_consistent),
+    ("interrupted run still writes a report", test_interrupted_run_still_writes_report),
     ("dry run failure injection detected", test_dry_run_failure_injection_is_detected),
     ("dry run artifacts have no secrets", test_dry_run_artifacts_have_no_secrets),
 )
