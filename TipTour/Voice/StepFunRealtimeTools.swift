@@ -36,7 +36,7 @@ enum StepFunRealtimeToolDeclarations {
         "application": ["type": "string", "description": "Exact installed application name for open_app, such as Safari. Never put a visible control's label here: open_app starts applications and never clicks controls on screen."],
         "direction": ["type": "string", "enum": ["up", "down", "left", "right"]],
         "amount": ["type": "integer", "minimum": 1, "maximum": 5],
-        "expected_label": ["type": "string", "description": "Visible result expected AFTER this step, not a declaration of success."]
+        "expected_label": ["type": "string", "description": "Visible result expected AFTER this step, not a declaration of success. It must be a verifiable on-screen control or label name that can be matched exactly against what is on screen — ideally the control the next step of the same plan depends on, such as the control the following step operates. Never write an outcome sentence such as 页面已打开 or 显示设置页面已打开: no control on screen is ever named that way, so the step could never be verified. When no exact control name is known, omit this field."]
     ]
 
     static let all: [[String: Any]] = [describeScreen, actOnScreen]
@@ -86,7 +86,7 @@ enum StepFunRealtimeToolDeclarations {
         "type": "function",
         "function": [
             "name": "act_on_screen",
-            "description": "Execute an authorized desktop task. By default this attempts ONE action. For a short workflow provide an explicit steps list, at most six, with all known parameters. Steps run in order and each needs its own completion evidence: a step that only delivers input (click, scroll or key with no expected result) counts as done once the input is sent, while a step that must produce a state change — open_app, type, or any step carrying expected_label — needs an independently verified result before the next step runs. Call directly for action requests.",
+            "description": "Execute an authorized desktop task. By default this attempts ONE action. For a short workflow provide an explicit steps list, at most six, with all known parameters. Steps run in order and each needs its own completion evidence: a step that only delivers input (click, scroll or key with no expected result) counts as done once the input is sent, while a step that must produce a state change — open_app, type, or any step carrying expected_label — needs an independently verified result before the next step runs. An expected_label must be an exact observable control or label name, never a description of what happened, otherwise that evidence can never be found; keep your explicit steps list as declared, one entry per control the user asked you to operate. Call directly for action requests.",
             "parameters": [
                 "type": "object",
                 "properties": stepProperties.merging([
