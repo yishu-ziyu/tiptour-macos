@@ -25,7 +25,7 @@ enum StepFunRealtimeToolDeclarations {
 
     private static let stepProperties: [String: Any] = [
         "action": ["type": "string", "enum": ["click", "double_click", "right_click", "open_app", "type", "press_key", "shortcut", "scroll"],
-                   "description": "Use the user's explicit operation when known. Chinese 右边/右侧 describes location: use ordinary click with region=right. Never turn 右边 into right_click. right_click is allowed only when the user explicitly asks for 右键、右击、context menu or equivalent. For a single mouse-target request that also carries an explicit target constraint (target_label, index+observation_id, region, or anchor_label+relation) where click vs double/right click is genuinely unspecified, omit this field and let the local JEV decision layer choose. Other actions such as open_app/type/scroll must be explicit. A goal alone is never enough."],
+                   "description": "Use the user's explicit operation when known. Chinese 右边/右侧 describes location: use ordinary click with region=right. Never turn 右边 into right_click. right_click is allowed only when the user explicitly asks for 右键、右击、context menu or equivalent. open_app is only for starting an installed application the user asked to open or start; when the user's words describe operating on-screen controls in order, never answer with open_app — submit steps of click actions and give each control's exact visible name, even when a control's own name begins with 打开. For a single mouse-target request that also carries an explicit target constraint (target_label, index+observation_id, region, or anchor_label+relation) where click vs double/right click is genuinely unspecified, omit this field and let the local JEV decision layer choose. Other actions such as open_app/type/scroll must be explicit. A goal alone is never enough."],
         "target_label": ["type": "string", "description": "Exact visible name from the user or current observation. Preserve corrections; never replace an absent name with another control."],
         "region": ["type": "string", "enum": ["left", "right", "top", "bottom"],
                    "description": "Spatial restriction. 右边/右侧=right and 左边/左侧=left; these words do not request right_click or any other mouse button."],
@@ -33,7 +33,7 @@ enum StepFunRealtimeToolDeclarations {
         "relation": ["type": "string", "enum": ["above", "below", "left_of", "right_of"]],
         "text": ["type": "string", "description": "Complete text to insert. type requires a named, already-focused field; use a preceding click step when needed."],
         "key": ["type": "string", "description": "Explicit key or key combination requested by the user."],
-        "application": ["type": "string", "description": "Exact application name for open_app; no visible icon is required."],
+        "application": ["type": "string", "description": "Exact installed application name for open_app, such as Safari. Never put a visible control's label here: open_app starts applications and never clicks controls on screen."],
         "direction": ["type": "string", "enum": ["up", "down", "left", "right"]],
         "amount": ["type": "integer", "minimum": 1, "maximum": 5],
         "expected_label": ["type": "string", "description": "Visible result expected AFTER this step, not a declaration of success."]
@@ -86,7 +86,7 @@ enum StepFunRealtimeToolDeclarations {
         "type": "function",
         "function": [
             "name": "act_on_screen",
-            "description": "Execute an authorized desktop task. By default this attempts ONE action. For a short workflow provide an explicit steps list, at most six, with all known parameters. Each step must pass result checks before the next can run. Call directly for action requests.",
+            "description": "Execute an authorized desktop task. By default this attempts ONE action. For a short workflow provide an explicit steps list, at most six, with all known parameters. Steps run in order and each needs its own completion evidence: a step that only delivers input (click, scroll or key with no expected result) counts as done once the input is sent, while a step that must produce a state change — open_app, type, or any step carrying expected_label — needs an independently verified result before the next step runs. Call directly for action requests.",
             "parameters": [
                 "type": "object",
                 "properties": stepProperties.merging([
@@ -95,7 +95,7 @@ enum StepFunRealtimeToolDeclarations {
                     "resume_previous": ["type": "boolean", "description": "Legacy continuation flag. Prefer intent. A changed goal is a correction, never completed progress."],
                     "index": ["type": "integer", "description": "Optional control number from the most recent describe_screen result."],
                     "observation_id": ["type": "string", "description": "Required when using index. Copy the exact Observation ID from the same description."],
-                    "steps": ["type": "array", "minItems": 1, "maxItems": 6, "description": "Explicit ordered actions. Do not combine with top-level action parameters or index.",
+                    "steps": ["type": "array", "minItems": 1, "maxItems": 6, "description": "Explicit ordered actions. Do not combine with top-level action parameters or index. A control whose visible name begins with 打开 is still a control: click it when the user asked you to click it.",
                               "items": ["type": "object", "properties": stepProperties, "required": ["action"], "additionalProperties": false]],
                     "uncertain_resolution": ["type": "string", "enum": ["confirmed_succeeded", "confirmed_failed", "retry_same", "replace_target"],
                        "description": "Only after an uncertain_effect receipt: how the user resolved the previous unconfirmed operation. confirmed_succeeded / confirmed_failed report the outcome the user verified; retry_same retries the same target; replace_target (with intent=correct and an explicit new target) replaces it. Without it the task stays stopped."]
@@ -234,6 +234,14 @@ struct StepFunActionArguments: Decodable {
             for step in steps { try step.validate() }
             return steps
         }
+        // Code-owned intent gate. The user's own wording is the statement of
+        // what was asked for, so a model request that cannot represent those
+        // operations never reaches the executor — most importantly, a control
+        // name must not enter open_app and turn into a launch of an
+        // application the user never named.
+        if let declaredSteps = try Self.declaredControlClickSteps(for: self) {
+            return declaredSteps
+        }
         guard var kind = DesktopActionKind(rawValue: action ?? "click") else {
             throw DesktopTaskContractError.invalid("动作类型无效，未执行。")
         }
@@ -274,13 +282,61 @@ struct StepFunActionArguments: Decodable {
         return [step]
     }
 
+    /// Rebuilds a request the user's own wording already answers, when the
+    /// model's single top-level action cannot represent those operations.
+    ///
+    /// This is the gate the multi-step bug needed. "点击打开显示设置，然后
+    /// 点击缩放选项" is a request to operate two controls in order; submitted as
+    /// `open_app` it launches an application the user never named. The
+    /// declaration below is read from the goal, so a control whose name begins
+    /// with 打开 can never be mistaken for a launch request, while an actual
+    /// "打开 Safari" keeps its open_app.
+    ///
+    /// Returns nil when the goal declares nothing that overrides the model's
+    /// request, so every unchanged path below keeps its existing behaviour.
+    private static func declaredControlClickSteps(for arguments: StepFunActionArguments) throws -> [DesktopActionStep]? {
+        // An explicit steps list and an observation-bound number are already
+        // exact statements from the model; never reinterpret either.
+        guard arguments.steps == nil, arguments.index == nil, arguments.observationID == nil else { return nil }
+        let declaredOperations = VoiceDeclaredOperation.declaredOperations(in: arguments.goal)
+        guard !declaredOperations.isEmpty,
+              declaredOperations.allSatisfy({ $0.isPointerOperation }) else { return nil }
+        let requestedKind = arguments.action.flatMap(DesktopActionKind.init(rawValue:))
+        // One top-level action can only stand in for one declared operation,
+        // and only for the very operation the user described. A launch action
+        // never stands in for operating a control.
+        let requestCannotRepresentTheDeclaredSequence = requestedKind == .openApp
+            || (declaredOperations.count > 1 && requestedKind != nil)
+        guard requestCannotRepresentTheDeclaredSequence else { return nil }
+        guard declaredOperations.count <= Self.maximumDeclaredSteps else {
+            throw DesktopTaskContractError.invalid("用户描述的操作步骤超过六步上限，未执行。")
+        }
+        let steps = declaredOperations.map { operation in
+            DesktopActionStep(action: operation.pointerAction ?? .click, targetLabel: operation.targetLabel,
+                region: operation.region, anchorLabel: nil, relation: nil, text: nil, key: nil,
+                application: nil, direction: nil, amount: nil, expectedLabel: nil)
+        }
+        // Without a usable name the declaration cannot be executed safely, and
+        // it must not fall back to the action it replaced.
+        guard steps.allSatisfy({ step in
+            guard let label = step.targetLabel else { return false }
+            return !DesktopActionStep.normalized(label).isEmpty && label.count <= Self.maximumDeclaredLabelLength
+        }) else {
+            throw DesktopTaskContractError.invalid("这是对界面控件的依次操作，不是启动应用；请改用 steps 提交 click 步骤，并把用户原话里的控件名分别放进各步 target_label。")
+        }
+        for step in steps { try step.validate() }
+        return steps
+    }
+
+    /// Matches the `steps` schema budget so a derived plan can never exceed
+    /// what the tool declaration allows the model to ask for.
+    private static let maximumDeclaredSteps = 6
+
+    /// A control name longer than this is prose, not a name the user pointed at.
+    private static let maximumDeclaredLabelLength = 32
+
     private static func literalHorizontalRegion(in goal: String?) -> DesktopTargetRegion? {
-        guard let goal else { return nil }
-        let normalized = DesktopActionStep.normalized(goal).lowercased()
-        let saysRight = ["右边", "右侧", "右方"].contains { normalized.contains($0) }
-        let saysLeft = ["左边", "左侧", "左方"].contains { normalized.contains($0) }
-        guard saysRight != saysLeft else { return nil }
-        return saysRight ? .right : .left
+        VoiceDeclaredOperation.horizontalRegion(in: goal)
     }
 
     private static func explicitlyRequestsRightClick(_ goal: String?) -> Bool {
@@ -288,6 +344,181 @@ struct StepFunActionArguments: Decodable {
         let normalized = DesktopActionStep.normalized(goal).lowercased()
         return ["右键", "右击", "上下文菜单", "contextmenu", "right-click", "rightclick"]
             .contains { normalized.contains($0) }
+    }
+}
+
+/// One operation the user's own words declare, read before the model has said
+/// anything about how to carry it out.
+///
+/// `act_on_screen` requires the goal to preserve the user's wording, which
+/// makes that string the only reliable statement of WHAT was asked for. A
+/// `pointerAction` of nil means the user asked to start an application rather
+/// than operate a control — that distinction is what keeps "打开 Safari" a
+/// launch while "点击打开显示设置" stays a click on a control named that way.
+struct VoiceDeclaredOperation: Equatable {
+    let pointerAction: DesktopActionKind?
+    let targetLabel: String
+    let region: DesktopTargetRegion?
+
+    var isPointerOperation: Bool { pointerAction != nil }
+
+    /// Reads the ordered operations out of a user goal.
+    ///
+    /// A verb only starts a new operation at a clause boundary, because the
+    /// very name of a control may itself contain a verb: 点击打开显示设置
+    /// declares one click on "打开显示设置", not a click followed by a launch.
+    static func declaredOperations(in goal: String?) -> [VoiceDeclaredOperation] {
+        guard let goal else { return [] }
+        let normalized = DesktopActionStep.normalized(goal)
+        guard !normalized.isEmpty else { return [] }
+
+        /// One operation whose leading verb is already known and whose control
+        /// name runs from just after that verb.
+        struct DeclaredButUnfinished {
+            let pointerAction: DesktopActionKind?
+            let controlNameStart: String.Index
+        }
+
+        var operations: [VoiceDeclaredOperation] = []
+        var unfinished: DeclaredButUnfinished?
+        var cursor = normalized.startIndex
+        while cursor < normalized.endIndex {
+            guard let verb = Self.verbMatch(startingAt: cursor, in: normalized) else {
+                cursor = normalized.index(after: cursor)
+                continue
+            }
+            guard Self.isClauseStart(endingAt: cursor, in: normalized) else {
+                // A verb inside a name belongs to that name.
+                cursor = verb.upperBound
+                continue
+            }
+            if let unfinished {
+                operations.append(Self.makeOperation(pointerAction: unfinished.pointerAction,
+                    rawSpan: String(normalized[unfinished.controlNameStart..<cursor])))
+            }
+            unfinished = DeclaredButUnfinished(pointerAction: verb.pointerAction,
+                controlNameStart: verb.upperBound)
+            cursor = verb.upperBound
+        }
+        if let unfinished {
+            operations.append(Self.makeOperation(pointerAction: unfinished.pointerAction,
+                rawSpan: String(normalized[unfinished.controlNameStart..<normalized.endIndex])))
+        }
+        return operations
+    }
+
+    /// Words that literally name a horizontal side. They describe where a
+    /// control is, never which mouse button to use.
+    static let rightSideWords = ["右边", "右侧", "右方"]
+    static let leftSideWords = ["左边", "左侧", "左方"]
+
+    /// The horizontal side the wording names, or nil when it names both sides
+    /// or neither. Both sides at once is not a usable restriction.
+    static func horizontalRegion(in text: String?) -> DesktopTargetRegion? {
+        guard let text else { return nil }
+        let normalized = DesktopActionStep.normalized(text).lowercased()
+        let saysRight = Self.rightSideWords.contains { normalized.contains($0) }
+        let saysLeft = Self.leftSideWords.contains { normalized.contains($0) }
+        guard saysRight != saysLeft else { return nil }
+        return saysRight ? .right : .left
+    }
+
+    // MARK: - Private scanning
+
+    private struct VerbMatch {
+        let upperBound: String.Index
+        let pointerAction: DesktopActionKind?
+    }
+
+    /// Longest verb first, so 右键点击 is never read as 点击 and "right-click"
+    /// is never read as "click".
+    private static let verbs: [(text: String, pointerAction: DesktopActionKind?)] = [
+        ("右键点击", .rightClick), ("点击一下", .click), ("double-click", .doubleClick),
+        ("right-click", .rightClick), ("doubleclick", .doubleClick), ("rightclick", .rightClick),
+        ("右击", .rightClick), ("双击", .doubleClick), ("单击", .click), ("点击", .click),
+        ("点一下", .click), ("启动一下", nil), ("打开一下", nil), ("启动", nil),
+        ("打开", nil), ("运行", nil), ("launch", nil), ("open", nil),
+        ("点", .click), ("click", .click), ("tap", .click)
+    ]
+
+    /// Words that end one operation and begin the next.
+    private static let clauseBoundaryWords = [
+        "然后", "接着", "之后", "随后", "最后", "并且", "再然后", "and then", "then",
+        "先", "再", "并", "和", "请", "帮", "给我", "麻烦"
+    ]
+
+    /// Punctuation is always a clause boundary.
+    private static let clauseBoundaryPunctuation = Set("，。、；：:;,.!！?？~～… ")
+
+    /// How far back to look for a boundary word. Long enough for the longest
+    /// boundary word plus one character of context.
+    private static let clauseBoundaryLookback = 8
+
+    private static func verbMatch(startingAt index: String.Index, in text: String) -> VerbMatch? {
+        for verb in Self.verbs where text[index...].hasPrefix(verb.text) {
+            return VerbMatch(upperBound: text.index(index, offsetBy: verb.text.count),
+                pointerAction: verb.pointerAction)
+        }
+        return nil
+    }
+
+    private static func isClauseStart(endingAt index: String.Index, in text: String) -> Bool {
+        guard index != text.startIndex else { return true }
+        let lookbackStart = text.distance(from: text.startIndex, to: index) > Self.clauseBoundaryLookback
+            ? text.index(index, offsetBy: -Self.clauseBoundaryLookback)
+            : text.startIndex
+        let preceding = text[lookbackStart..<index]
+        if let last = preceding.last, Self.clauseBoundaryPunctuation.contains(last) { return true }
+        for word in Self.clauseBoundaryWords where preceding.hasSuffix(word) { return true }
+        return false
+    }
+
+    /// Builds one operation from the leading verb the scan found and the raw
+    /// span that follows it.
+    private static func makeOperation(pointerAction: DesktopActionKind?, rawSpan: String) -> VoiceDeclaredOperation {
+        VoiceDeclaredOperation(pointerAction: pointerAction,
+            targetLabel: Self.controlName(in: rawSpan),
+            region: Self.horizontalRegion(in: rawSpan))
+    }
+
+    /// Turns the raw span between two verbs into a control name: no clause
+    /// words, no punctuation, no spatial wording (that became `region`).
+    private static func controlName(in rawSpan: String) -> String {
+        var name = Self.trimLeadingClausePunctuation(rawSpan)
+        while true {
+            let beforeTrimming = name
+            name = Self.trimTrailingClausePunctuation(name)
+            // A trailing sequencing word ("…设置，然后") belongs to the
+            // sentence, not to the control's name.
+            for word in Self.clauseBoundaryWords where name.hasSuffix(word) {
+                name = String(name.dropLast(word.count))
+            }
+            if name == beforeTrimming { break }
+        }
+        for word in Self.rightSideWords + Self.leftSideWords {
+            name = name.replacingOccurrences(of: word, with: "")
+        }
+        while name.hasPrefix("的") { name = String(name.dropFirst()) }
+        while name.hasSuffix("的") { name = String(name.dropLast()) }
+        return name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func trimLeadingClausePunctuation(_ text: String) -> String {
+        var trimmed = text
+        while let first = trimmed.first,
+              first.isWhitespace || Self.clauseBoundaryPunctuation.contains(first) {
+            trimmed.removeFirst()
+        }
+        return trimmed
+    }
+
+    private static func trimTrailingClausePunctuation(_ text: String) -> String {
+        var trimmed = text
+        while let last = trimmed.last,
+              last.isWhitespace || Self.clauseBoundaryPunctuation.contains(last) {
+            trimmed.removeLast()
+        }
+        return trimmed
     }
 }
 
