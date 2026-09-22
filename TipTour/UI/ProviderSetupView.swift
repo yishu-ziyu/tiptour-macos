@@ -158,7 +158,10 @@ struct ProviderKeyCard: View {
     private var detail: String { mode.privacySummary }
     private var keyName: String { mode.keyName }
     @State private var input = ""
-    @State private var hasSavedKey = false
+    /// Why there is or is not a key. Three states must never collapse into one
+    /// "需要密钥" badge: nothing saved, saved but macOS refuses the read, and
+    /// saved but not decodable are different problems with different remedies.
+    @State private var keyState: KeychainItemState = .absent
     @State private var status = ""
 
     var body: some View {
@@ -168,9 +171,11 @@ struct ProviderKeyCard: View {
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(DS.Colors.textPrimary)
                 Spacer()
-                Text(hasSavedKey ? "密钥已保存" : "需要密钥")
+                Text(badgeText)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(hasSavedKey ? DS.Colors.success : DS.Colors.textSecondary)
+                    .foregroundColor(badgeColor)
+                    .accessibilityLabel("密钥状态")
+                    .accessibilityValue(badgeText)
             }
             Text(detail)
                 .font(.system(size: 12))
@@ -186,7 +191,7 @@ struct ProviderKeyCard: View {
             Text("API 密钥")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(DS.Colors.textSecondary)
-            SecureField(hasSavedKey ? "粘贴新的密钥以替换" : "粘贴你的 API 密钥", text: $input)
+            SecureField(keyState.itemExists ? "粘贴新的密钥以替换" : "粘贴你的 API 密钥", text: $input)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .foregroundColor(DS.Colors.textPrimary)
@@ -204,23 +209,22 @@ struct ProviderKeyCard: View {
                     .tint(DS.Colors.accent)
                     .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .pointerCursor()
-                Button("删除密钥") {
-                    if KeychainStore.delete(forKey: keyName) {
-                        hasSavedKey = false
-                        input = ""
-                        status = "已删除"
-                        onKeyChanged()
-                    } else {
-                        status = "删除失败，请重试。"
-                    }
-                }
-                .buttonStyle(.bordered)
-                .tint(DS.Colors.destructiveText)
-                .disabled(!hasSavedKey)
-                .pointerCursor()
+                Button("删除密钥", action: delete)
+                    .buttonStyle(.bordered)
+                    .tint(DS.Colors.destructiveText)
+                    .disabled(!keyState.itemExists)
+                    .pointerCursor()
             }
             if !status.isEmpty {
                 Text(status).font(.system(size: 12)).foregroundColor(DS.Colors.textSecondary)
+            }
+            // The state line only appears when there is something to act on, so
+            // a healthy card stays quiet.
+            if !keyState.isUsable {
+                Text(keyState.userMessage(subject: title))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(keyState == .absent ? DS.Colors.textSecondary : DS.Colors.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Text("安全存储在 macOS 钥匙串中。")
                 .font(.system(size: 11)).foregroundColor(DS.Colors.textSecondary)
@@ -228,19 +232,58 @@ struct ProviderKeyCard: View {
         .padding(16)
         .background(RoundedRectangle(cornerRadius: 12).fill(DS.Colors.surface1))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(DS.Colors.borderSubtle))
-        .onAppear { hasSavedKey = KeychainStore.contains(forKey: keyName) }
+        // Presence only: no data is requested, nothing is decrypted and no
+        // authorization dialog is opened by looking at the card.
+        .onAppear { keyState = KeychainStore.presence(forKey: keyName) }
+    }
+
+    /// The badge is deliberately not a two-state "saved / needs a key" pair.
+    private var badgeText: String {
+        switch keyState {
+        case .available: return "密钥已保存"
+        case .absent: return "尚未保存"
+        case .readDenied: return "钥匙串读取失败"
+        case .undecodable: return "密钥无法解析"
+        case .unavailable: return "钥匙串状态未知"
+        }
+    }
+
+    private var badgeColor: Color {
+        switch keyState {
+        case .available: return DS.Colors.success
+        case .absent: return DS.Colors.textSecondary
+        // The key is saved; the problem is access, not a missing save. Warning
+        // color, never the "you must save a key" treatment.
+        case .readDenied, .undecodable, .unavailable: return DS.Colors.warning
+        }
     }
 
     private func save() {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         if KeychainStore.set(trimmed, forKey: keyName) {
-            hasSavedKey = true
+            // The write path already holds the value in process, so this is a
+            // presence read served from memory: no second decrypt, no prompt.
+            // It re-reads the state instead of assuming success, so an item
+            // that was written but is not readable now is reported as exactly
+            // that rather than as a saved key.
+            keyState = KeychainStore.presence(forKey: keyName)
             input = ""
             status = "已保存"
             onKeyChanged()
         } else {
             status = "保存到钥匙串失败，请重试。"
+        }
+    }
+
+    private func delete() {
+        if KeychainStore.delete(forKey: keyName) {
+            keyState = .absent
+            input = ""
+            status = "已删除"
+            onKeyChanged()
+        } else {
+            status = "删除失败，请重试。"
         }
     }
 }

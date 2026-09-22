@@ -27,14 +27,57 @@ enum CompanionVoiceState {
 final class CompanionManager: ObservableObject {
     @Published private(set) var selectedMode = TipTourDefaults.selectedMode
     @Published private(set) var hasSelectedModeKey = false
+    /// Why the selected mode's key is or is not usable. Published so the panel,
+    /// the settings cards and the acceptance log all read the same state instead
+    /// of each re-deriving "saved / not saved".
+    @Published private(set) var selectedModeKeyState: KeychainItemState = .absent
     @Published private(set) var hasCompletedOnboarding = TipTourDefaults.hasCompletedOnboarding
 
     var hasSelectedModePermissions: Bool {
         selectedMode.permissionsReady(desktop: hasDesktopPermissions, microphone: hasMicrophonePermission)
     }
 
+    /// Re-read the selected mode's key status from the Keychain.
+    ///
+    /// This is what runs the moment a key is saved or deleted in Settings: the
+    /// write path already has the value in process, so the presence probe
+    /// answers from memory without decrypting anything again, and a key that is
+    /// now present retires the "please save a key" message that was published
+    /// when it was not.
     func refreshProviderKeyStatus() {
-        hasSelectedModeKey = KeychainStore.contains(forKey: selectedMode.keyName)
+        applySelectedModeKeyState(KeychainStore.presence(forKey: selectedMode.keyName))
+    }
+
+    /// Adopt a freshly read key state.
+    ///
+    /// `hasSelectedModeKey` follows *item existence*, not readability: a key the
+    /// user already saved must never be reported as missing. When it cannot be
+    /// read, the copy that reaches the user says so instead of asking for
+    /// another save.
+    private func applySelectedModeKeyState(_ state: KeychainItemState) {
+        let changed = state != selectedModeKeyState
+        selectedModeKeyState = state
+        hasSelectedModeKey = state.itemExists
+        if changed {
+            // State and OSStatus only. The stored value is never logged.
+            print("🔑 selected mode '\(selectedMode.keyName)' key: \(state.logDescription) (hasSelectedModeKey=\(hasSelectedModeKey))")
+        }
+        if state.itemExists { clearResolvedKeyFailure() }
+    }
+
+    /// Retire a key-refusal message that no longer applies.
+    ///
+    /// Only the exact string this manager published for a key problem is
+    /// cleared, so a provider error, a permission refusal or a live session
+    /// failure can never be hidden by a key refresh.
+    private func clearResolvedKeyFailure() {
+        guard let published = publishedVoiceKeyFailure else { return }
+        if voiceSessionErrorMessage == published { voiceSessionErrorMessage = nil }
+        publishedVoiceKeyFailure = nil
+        if let publishedText = publishedTextKeyFailure, textCommandActivityText == publishedText {
+            textCommandActivityText = nil
+        }
+        publishedTextKeyFailure = nil
     }
 
     func setSelectedMode(_ mode: TipTourMode) {
@@ -44,6 +87,8 @@ final class CompanionManager: ObservableObject {
         textCommandPanelManager.hide()
         textCommandActivityText = nil
         voiceSessionErrorMessage = nil
+        publishedVoiceKeyFailure = nil
+        publishedTextKeyFailure = nil
         voiceState = .idle
         selectedMode = mode
         TipTourDefaults.selectedMode = mode
@@ -70,11 +115,17 @@ final class CompanionManager: ObservableObject {
 
     @Published private(set) var voiceState: CompanionVoiceState = .idle
     @Published private(set) var lastTranscript: String?
-    /// Latest voice-session failure — missing key, missing microphone, provider
-    /// error. Kept separate from `lastTranscript` so a spoken reply and an
-    /// error can coexist on the panel instead of overwriting each other.
+    /// Latest voice-session failure — missing key, key the OS refused to read,
+    /// missing microphone, provider error. Kept separate from `lastTranscript`
+    /// so a spoken reply and an error can coexist on the panel instead of
+    /// overwriting each other.
     @Published private(set) var voiceSessionErrorMessage: String?
     @Published private(set) var textCommandActivityText: String?
+    /// The exact key-related messages this manager published, kept so a later
+    /// key refresh can retire *those* strings and only those. A message nobody
+    /// published here is somebody else's failure and stays on screen.
+    private var publishedVoiceKeyFailure: String?
+    private var publishedTextKeyFailure: String?
     /// The Jev loop's latest decision, drawn under the Ctrl+K input.
     @Published private(set) var jevStep: JevStepSnapshot?
     @Published private(set) var currentAudioPowerLevel: CGFloat = 0
@@ -1237,6 +1288,13 @@ final class CompanionManager: ObservableObject {
     // MARK: - Lifecycle
 
     func start() {
+        #if DEBUG
+        // DEBUG acceptance only: point every provider-key lookup at an isolated
+        // service, so no acceptance step can touch the user's real keys. Reads
+        // as a no-op argument-free in every other launch and does not exist in
+        // a Release build.
+        KeychainStore.applyAcceptanceLaunchArguments(CommandLine.arguments)
+        #endif
         refreshProviderKeyStatus()
         refreshAllPermissions()
         print("🔑 TipTour start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
@@ -2817,12 +2875,25 @@ final class CompanionManager: ObservableObject {
         var stepfunAPIKey: String?
         if selectedMode == .stepfun {
             // One synchronous Keychain read, before anything is torn down — a
-            // missing key must be a visible refusal, not a session that dies
+            // key problem must be a visible refusal, not a session that dies
             // the moment it tries to connect.
-            stepfunAPIKey = KeychainStore.stepfunAPIKey
-            guard let apiKey = stepfunAPIKey, !apiKey.isEmpty else {
+            let read = KeychainStore.readItem(forKey: selectedMode.keyName)
+            switch read.state {
+            case .available:
+                stepfunAPIKey = read.value
+                // The key is in hand: publish that state and retire whatever
+                // key refusal the panel is still showing, so the panel never
+                // keeps quoting a problem the user has already fixed.
+                applySelectedModeKeyState(.available)
+            case .absent, .readDenied, .undecodable, .unavailable:
                 voiceState = .idle
-                voiceSessionErrorMessage = "未读到阶跃密钥：请在「设置 → 模型」保存密钥后重试。"
+                publishVoiceKeyFailure(read.state.userMessage(subject: "阶跃密钥"))
+                return false
+            }
+            guard let apiKey = stepfunAPIKey, !apiKey.isEmpty else {
+                // Reachable only for an item whose stored bytes are empty.
+                voiceState = .idle
+                publishVoiceKeyFailure(KeychainItemState.absent.userMessage(subject: "阶跃密钥"))
                 return false
             }
         }
@@ -2894,8 +2965,12 @@ final class CompanionManager: ObservableObject {
             textCommandActivityText = "当前任务仍保留桌面控制权，请先继续或取消该任务。"
             return
         }
-        guard !(KeychainStore.jevAPIKey ?? "").isEmpty else {
-            textCommandActivityText = "请在「设置 → 模型」中添加 JEV 密钥"
+        // JEV needs its own key to talk to TypeSafe. A key that is saved but
+        // unreadable gets a different sentence from one that was never saved.
+        let jevKey = KeychainStore.readItem(forKey: TipTourMode.jev.keyName)
+        guard jevKey.state == .available, !(jevKey.value ?? "").isEmpty else {
+            publishedTextKeyFailure = jevKey.state.userMessage(subject: "JEV 密钥")
+            textCommandActivityText = publishedTextKeyFailure
             return
         }
         let runID = UUID()
@@ -2910,6 +2985,12 @@ final class CompanionManager: ObservableObject {
             guard self.textCommandRunID == runID else { return }
             self.finishTextCommand()
         }
+    }
+
+    /// Publish a key refusal and remember it so a later refresh can retire it.
+    private func publishVoiceKeyFailure(_ message: String) {
+        voiceSessionErrorMessage = message
+        publishedVoiceKeyFailure = message
     }
 
     func cancelTextCommand() {
