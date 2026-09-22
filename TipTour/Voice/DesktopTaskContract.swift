@@ -393,7 +393,7 @@ struct DesktopTaskReceipt: Codable {
     /// provider's confident prose cannot turn into a new completion claim.
     var spokenSummary: String {
         if status == "running" || status == "pausing" {
-            return "任务尚未完成，已确认 \(completedStepCount)/\(totalStepCount) 步。"
+            return progressAnnouncement
         }
         if status == "cancelling" { return "已停止后续操作，正在核查已经发出的部分。" }
         if status == "cancelled" { return "任务已取消，已经发生的操作记录保留。" }
@@ -428,6 +428,58 @@ struct DesktopTaskReceipt: Codable {
             return "我发出了打开「\(last.label)」的请求，但没有确认到它的可见前台窗口，所以不能说已经打开。"
         }
         return "已向「\(last.label)」发送操作，但目标结果还没有确认，已停下。"
+    }
+}
+
+extension DesktopTaskReceipt {
+    /// Steps that count as done so far in this task: delivery-confirmed direct
+    /// inputs, system-verified outcomes and user-confirmed outcomes. This is the
+    /// "已处理" count. It deliberately never claims that an independent
+    /// read-back proved the effect, because a delivered input is not a verified
+    /// state change.
+    var processedStepCount: Int { completedStepCount }
+
+    /// Steps an independent system read-back proved. A delivered input and a
+    /// user confirmation never enter this count, which is why "已确认" can only
+    /// be spoken when the evidence actually earned it.
+    var systemVerifiedStepCount: Int { verifiedActionHistory.count }
+
+    /// Steps the user resolved by hand during this invocation. The system never
+    /// reports these as its own verification: speech and the panel both
+    /// attribute them to the user.
+    var userConfirmedStepCount: Int {
+        currentActions.filter { $0.outcomeEvidence == .userConfirmed }.count
+    }
+
+    /// "已确认" is honest only when every processed step was independently
+    /// verified by the system. Mixed evidence — some steps verified, others only
+    /// delivered or user-confirmed — must be announced as "已处理" instead, and a
+    /// task that has not processed a step yet cannot claim a confirmation either.
+    var areAllProcessedStepsSystemVerified: Bool {
+        processedStepCount > 0 && systemVerifiedStepCount >= processedStepCount
+    }
+
+    /// The same two facts the spoken progress uses, on one line, so the panel can
+    /// never claim more than the voice does.
+    var progressEvidenceLine: String {
+        "已处理 \(processedStepCount)/\(totalStepCount) 步 · 系统验证 \(systemVerifiedStepCount) · 你确认 \(userConfirmedStepCount)"
+    }
+
+    /// Progress speech states only what the recorded evidence can prove.
+    ///
+    /// A step counts as done for three different reasons — the input was
+    /// delivered, the system read the result back, or the user said it worked —
+    /// and they are not interchangeable. Only the second may be reported as
+    /// "已确认"; the other two are reported as "已处理", and a user confirmation
+    /// is always attributed to the user rather than presented as Her's own
+    /// independent verification.
+    var progressAnnouncement: String {
+        let announcement = areAllProcessedStepsSystemVerified
+            ? "任务尚未完成，已确认 \(processedStepCount)/\(totalStepCount) 步。"
+            : "任务尚未完成，已处理 \(processedStepCount)/\(totalStepCount) 步。"
+        let userConfirmedSteps = userConfirmedStepCount
+        guard userConfirmedSteps > 0 else { return announcement }
+        return announcement + "其中 \(userConfirmedSteps) 步是你确认的，不是系统独立验证的结果。"
     }
 }
 
