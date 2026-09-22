@@ -46,6 +46,14 @@ struct CompanionPanelView: View {
                             Text(receipt.spokenSummary).font(.system(size: 11))
                                 .foregroundColor(DS.Colors.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
+                            // The same evidence counters the spoken progress uses,
+                            // so the panel can never report a delivered input as a
+                            // result the system verified.
+                            if receipt.totalStepCount > 0 {
+                                Text(receipt.progressEvidenceLine).font(.system(size: 10))
+                                    .foregroundColor(DS.Colors.textTertiary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     }
                     readyControlSection
