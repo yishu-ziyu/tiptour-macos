@@ -2,9 +2,10 @@
 
 此目录只提供本地测试页；真实客户端和任务入口使用 Debug 构建中的显式探针参数。
 不读取环境密钥或其他项目配置，密钥由签名应用正常读取自己的 Keychain。
-Release 构建没有这些入口。探针不打开麦克风，不自动播放输出音频。
+Release 构建没有这些入口。除 `--voice-playback-probe` 专门检查音频播放外，
+其余探针都不打开麦克风、不播放输出音频（音频只写入结果文件）。
 
-先在 Xcode 构建 `tiptour-macos`。不要从终端运行 xcodebuild。
+先在 Xcode 构建 `tiptour-macos`（当前 `PRODUCT_NAME` 为 `Her`，产物即 `Her.app`）。不要从终端运行 xcodebuild。
 
 ## 独立结果页面
 
@@ -21,9 +22,10 @@ python3 tools/voice-acceptance/fixture.py
 服务端也拒绝在菜单打开前选中 `scale`。`POST /reset` 只重置此测试数据；
 重置后刷新 Safari 标签页，确保可见状态与服务端一致。
 
-## 四种 Debug 探针
+## 六种 Debug 探针
 
-以下 `APP_BINARY` 指 Xcode 构建产物的 `TipTour.app/Contents/MacOS/TipTour`。
+以下 `APP_BINARY` 指 Xcode 构建产物的 `Her.app/Contents/MacOS/Her`
+（Xcode 工程中 target / scheme 仍叫 `tiptour-macos`，`PRODUCT_NAME=Her`，bundle ID `com.yishuziyu.her`）。
 它仅是命令中的路径占位符，不是新的凭据配置。
 
 ```sh
@@ -31,6 +33,8 @@ APP_BINARY --desktop-task-probe com.apple.Safari '{"goal":"点击检查官网部
 APP_BINARY --voice-route-probe /tmp/input.pcm /tmp/voice-comparison
 APP_BINARY --voice-task-probe com.apple.Safari /tmp/input.pcm /tmp/voice-task
 APP_BINARY --jev-fanout-probe com.apple.Safari '点击检查官网部署状态（3）' /tmp/jev-fanout.json
+APP_BINARY --voice-continuity-probe /tmp/progress.pcm /tmp/cancel.pcm /tmp/continuity-report.json
+APP_BINARY --voice-playback-probe
 ```
 
 - `desktop-task-probe` 调用生产工具路由、协调器和执行引擎；输出任务回执。
@@ -46,6 +50,12 @@ APP_BINARY --jev-fanout-probe com.apple.Safari '点击检查官网部署状态�
 - `jev-fanout-probe` 只读取当前应用的本地候选并调用生产 JEV question set。
   它一次发送 `done/absent/action/target_click/target_double_click/target_right_click`，
   写入选择、概率、margin、token 与耗时；输出必须包含 `executed=false`，不会调用 action engine。
+- `voice-continuity-probe` 跑两轮真实供应商会话：第一轮合成语音只问进度，第二轮重连后取消。
+  执行器是内存夹具（`fixtureActions` 计数），不打开麦克风、不播放声音、不驱动桌面、不读写真实
+  TaskRecovery 日志。报告含 `passed`、`phase`、`provider_connection_attempted`、`keychain_status`
+  与每轮的 `tool_count` / `status` / `turn_id`；`passed` 只代表探针自身的两轮断言成立。
+- `voice-playback-probe` 只建立一次生产 Realtime 会话并播放其音频，不在工具声明里暴露任何桌面动作。
+  Keychain 无交互读取失败时明确退出，不弹出授权窗口。
 
 输入必须是 **无 WAV 文件头**的 24 kHz 单声道 PCM16 小端字节。可用系统 `say`
 产生测试语音，`afconvert` 转成 WAV 后通过 Python `wave.readframes` 提取 PCM。
