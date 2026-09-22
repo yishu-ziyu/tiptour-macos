@@ -223,3 +223,136 @@ def run_probe(
         output_files=output_files,
         duration_seconds=time.monotonic() - started_at,
     )
+
+
+# ------------------------------------------------------------------- preflight
+
+# The DEBUG-only, read-only acceptance preflight owned by work order 03/T1
+# (TipTour/Voice/DiagnosticPreflight.swift). It runs inside the signed app so the
+# runner can prove the *real in-process* preconditions before any provider or
+# Driver call. Its argv is exactly: <app> --preflight <output.json>.
+PREFLIGHT_FLAG = "--preflight"
+PREFLIGHT_REPORT_FILE_NAME = "preflight.json"
+# Short bound: the probe is synchronous and self-exits; a hung older build must
+# not be able to stall the whole run (well under the 300s scenario probe bound).
+PREFLIGHT_TIMEOUT_SECONDS = 60.0
+
+
+@dataclass
+class PreflightResult:
+    """Outcome of the app's own read-only `--preflight` probe.
+
+    The authoritative fields are the app's `required_checks.accessibility` and
+    `blocked_reasons`. A missing, non-object or unreadable report fails closed:
+    the runner must never treat a permission it could not observe as granted.
+    """
+
+    supported: bool
+    argv: list[str]
+    report_path: Path
+    report: dict | None
+    report_error: str | None
+    exit_record: dict | None
+    duration_seconds: float
+    child: OwnedProcess | None = None
+
+    @property
+    def blocking_reasons(self) -> list[str]:
+        """Exact reasons that force BLOCK; empty when the preflight is clear.
+
+        Order is stable and de-duplicated: a runner-synthesised accessibility
+        note first (only when the app did not confirm it), then the app's own
+        `blocked_reasons` verbatim.
+        """
+        reasons: list[str] = []
+
+        def _add(reason: object) -> None:
+            text = str(reason).strip()
+            if text and text not in reasons:
+                reasons.append(text)
+
+        if not isinstance(self.report, dict):
+            detail = self.report_error or "no report file was written"
+            _add(f"preflight did not prove preconditions (unreadable report: {detail})")
+            return reasons
+        required = self.report.get("required_checks")
+        if not (isinstance(required, dict) and required.get("accessibility") is True):
+            _add("required_checks.accessibility is not confirmed true in the app process")
+        app_reasons = self.report.get("blocked_reasons")
+        if isinstance(app_reasons, list):
+            for reason in app_reasons:
+                _add(reason)
+        return reasons
+
+    @property
+    def clear(self) -> bool:
+        return not self.blocking_reasons
+
+    def to_evidence(self) -> dict:
+        return {
+            "supported": True,
+            "clear": self.clear,
+            "blocking_reasons": self.blocking_reasons,
+            "argv": self.argv,
+            "report_path": str(self.report_path),
+            "report": self.report,
+            "report_error": self.report_error,
+            "exit_record": self.exit_record,
+            "duration_seconds": round(self.duration_seconds, 3),
+            "log_path": str(self.child.log_path) if self.child and self.child.log_path else None,
+        }
+
+
+def run_preflight(
+    app_binary: Path,
+    registry: OwnedProcessRegistry,
+    out_dir: Path,
+    timeout_seconds: float = PREFLIGHT_TIMEOUT_SECONDS,
+) -> PreflightResult:
+    """Run the app's read-only `--preflight` probe once through the registry.
+
+    Read-only by construction (the DEBUG probe never opens the desktop, the
+    microphone, a permission prompt or a Keychain secret), bounded to a short
+    timeout. The whole JSON object is parsed and handed back to the caller for
+    the gate decision and the evidence package.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report_path = out_dir / PREFLIGHT_REPORT_FILE_NAME
+    argv = [str(app_binary), PREFLIGHT_FLAG, str(report_path)]
+    started_at = time.monotonic()
+    child = spawn_owned_process(
+        registry,
+        label="preflight",
+        argv=argv,
+        log_path=out_dir / "preflight.log",
+    )
+    exit_record = wait_for_owned_exit(child, timeout_seconds=timeout_seconds)
+    if exit_record["timed_out"]:
+        # The probe did not exit by itself: stop only our own child, then record it.
+        exit_record = terminate_owned_process(child)
+        exit_record["timed_out"] = True
+    report: dict | None = None
+    report_error: str | None = None
+    if report_path.is_file():
+        try:
+            parsed = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            report_error = f"Preflight report is not valid JSON: {error}"
+        else:
+            if isinstance(parsed, dict):
+                report = parsed
+            else:
+                report_error = "Preflight report is not a JSON object."
+    else:
+        report_error = "The preflight did not write its report file."
+    return PreflightResult(
+        supported=True,
+        argv=argv,
+        report_path=report_path,
+        report=report,
+        report_error=report_error,
+        exit_record=exit_record,
+        duration_seconds=time.monotonic() - started_at,
+        child=child,
+    )

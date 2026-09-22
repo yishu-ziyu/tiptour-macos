@@ -28,8 +28,11 @@ from .process_control import (
     port_accepts_connections,
 )
 from .probe_runner import (
+    PREFLIGHT_FLAG,
+    PREFLIGHT_TIMEOUT_SECONDS,
     ProbeRequest,
     binary_supports_flag,
+    run_preflight,
     run_probe,
 )
 from .scenario_judges import (
@@ -41,6 +44,11 @@ from .scenario_judges import (
 from .synthetic_speech import SpeechSynthesisError, synthesize_placeholder_for_self_tests, synthesize_utterance
 
 HER_PROCESS_PATTERN = "Her.app/Contents/MacOS/Her"
+
+# A distinct exit code for the in-app preflight gate: 3 means "the app's own
+# read-only preflight failed or could not prove preconditions", separate from
+# the identity/fixture BLOCK (1) and the scenario verdict exit (0/1).
+PREFLIGHT_BLOCKED_EXIT_CODE = 3
 
 
 @dataclass
@@ -228,6 +236,41 @@ def run_acceptance(options: RunOptions) -> int:
         for reason in identity.blocking_reasons:
             print(f"  - {reason}", flush=True)
 
+    # ---- in-app read-only preflight gate (full mode only) ----
+    # Identity has passed. Before any provider call or Driver call the runner
+    # runs the app's own DEBUG --preflight probe once (read-only, no permission
+    # prompt) and BLOCKs the entire run with a distinct exit code when the app
+    # process cannot prove its real preconditions. The aggregate result.json is
+    # still written. Dry-run never reaches here, so it is untouched.
+    if options.mode == "full":
+        app_binary = context.app_path / "Contents/MacOS" / (
+            (context.app_identity_dict or {}).get("bundle_executable") or "Her"
+        )
+        preflight_evidence, preflight_block_reasons = _preflight_gate(
+            app_binary, registry, out_dir / "preflight"
+        )
+        environment["preflight"] = preflight_evidence
+        # Attach the whole object to the identity evidence too: the target
+        # process's own report is part of proving *which* process ran.
+        context.app_identity_dict["preflight"] = preflight_evidence
+        print("In-app preflight:", flush=True)
+        print(json.dumps(preflight_evidence, ensure_ascii=False, indent=2), flush=True)
+        if preflight_evidence.get("supported") is False:
+            print("App binary lacks --preflight (older build): recording "
+                  "preflight.supported=false and continuing without inventing a "
+                  "verdict.", flush=True)
+        elif preflight_block_reasons:
+            blocked_reason = ("In-app preflight BLOCKED: "
+                              + "; ".join(preflight_block_reasons))
+            print(blocked_reason, flush=True)
+            scenario_results = _build_blocked_scenarios(
+                loaded_scenarios, preflight_block_reasons, preflight_evidence
+            )
+            return _finish(context, options, scenario_results, environment,
+                           exit_code=PREFLIGHT_BLOCKED_EXIT_CODE, blocked_reason=blocked_reason)
+        # else: preflight passed -> recorded above under environment["preflight"]
+        # and the identity evidence; the run continues normally.
+
     # ---- fixture lifecycle (real in every mode) ----
     fixture = FixtureServer(out_dir, registry)
     fixture_record: dict = {}
@@ -320,6 +363,62 @@ def run_acceptance(options: RunOptions) -> int:
     statuses = [scenario["status"] for scenario in scenario_results]
     exit_code = 0 if statuses and all(status == STATUS_PASSED for status in statuses) else 1
     return _finish(context, options, scenario_results, environment, exit_code=exit_code)
+
+
+def _preflight_gate(app_binary, registry: OwnedProcessRegistry,
+                    preflight_dir) -> tuple[dict, list[str]]:
+    """Run the in-app read-only preflight once and decide BLOCK vs continue.
+
+    Returns (evidence, block_reasons). ``block_reasons`` is non-empty exactly
+    when the run must BLOCK: the app process either reported a false required
+    check / non-empty ``blocked_reasons``, or it failed to produce a readable
+    report (fail closed). A binary without the ``--preflight`` flag (an older
+    build) is never a verdict: it returns ``{"supported": False}`` evidence and
+    no reasons so the run continues without fabricating a pass or a block.
+    """
+    if not binary_supports_flag(app_binary, PREFLIGHT_FLAG):
+        return {"supported": False}, []
+    try:
+        result = run_preflight(
+            app_binary, registry, preflight_dir,
+            timeout_seconds=PREFLIGHT_TIMEOUT_SECONDS,
+        )
+    except OSError as error:
+        reason = f"preflight process could not be started: {error}"
+        return {"supported": True, "clear": False, "blocking_reasons": [reason]}, [reason]
+    return result.to_evidence(), result.blocking_reasons
+
+
+def _build_blocked_scenarios(scenarios, reasons: list[str], preflight_evidence: dict) -> list[dict]:
+    """One BLOCKED record per scenario, before any provider or Driver call.
+
+    Every entry carries the exact preflight reasons and the whole preflight JSON
+    so an evidence reader can re-derive the block without rerunning the app.
+    """
+    records: list[dict] = []
+    for scenario in scenarios:
+        records.append({
+            "name": scenario.name,
+            "title": scenario.title,
+            "status": "blocked",
+            "user_words": scenario.user_words,
+            "model_tool_arguments": None,
+            "task_turn_attempt_ids": None,
+            "her_receipt": None,
+            "independent_state": None,
+            "final_speech": None,
+            "failure_recovery": {
+                "fault_injected": False,
+                "recovery_evidence": None,
+                "note": ("Blocked by the app's own read-only preflight before any "
+                         "provider or Driver call; no desktop side effect was produced."),
+            },
+            "basis": [],
+            "failure_reasons": list(reasons),
+            "attempts": [],
+            "preflight": preflight_evidence,
+        })
+    return records
 
 
 def _run_scenario(scenario, options: RunOptions, context: RunContext,

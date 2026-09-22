@@ -26,7 +26,15 @@ from .process_control import (
     spawn_owned_process,
     terminate_owned_process,
 )
-from .probe_runner import ProbeError, ProbeRequest, binary_supports_flag, build_probe_argv, run_probe
+from .probe_runner import (
+    PREFLIGHT_FLAG,
+    ProbeError,
+    ProbeRequest,
+    binary_supports_flag,
+    build_probe_argv,
+    run_preflight,
+    run_probe,
+)
 from .scenario_judges import judge_scenario
 from .scenarios import load_scenarios
 from .synthetic_speech import (
@@ -36,7 +44,7 @@ from .synthetic_speech import (
     synthesize_utterance,
     validate_raw_pcm,
 )
-from .orchestration import RunOptions, run_acceptance
+from .orchestration import RunOptions, _preflight_gate, run_acceptance
 
 
 class SelfTestFailure(AssertionError):
@@ -762,6 +770,88 @@ def test_probe_execution_lifecycle(work_dir: Path) -> list[str]:
             "hanging probe terminated by the runner with the timeout recorded"]
 
 
+# ------------------------------------------------------------ preflight gate
+
+
+def test_preflight_gate_blocks_and_continues(work_dir: Path) -> list[str]:
+    """The in-app --preflight gate decision, proven with fake binaries.
+
+    No real app, provider, desktop or permission prompt is involved: this is a
+    runner unit test of the BLOCK-vs-continue rule only.
+    """
+    registry = OwnedProcessRegistry()
+
+    def _fake_preflight_app(name: str, payload: dict | None) -> Path:
+        # The `--preflight` string is embedded (a comment) so binary_supports_flag
+        # detects it exactly as it would in the real DEBUG Mach-O. When a payload
+        # is supplied the script copies it to $2 (the runner-passed report path).
+        binary = work_dir / name
+        if payload is None:
+            script = "#!/bin/bash\n# handles --preflight <output>\nexit 0\n"
+        else:
+            payload_path = work_dir / f"{name}.payload.json"
+            payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            script = ("#!/bin/bash\n"
+                      "# handles --preflight <output>\n"
+                      f'cp "{payload_path}" "$2"\n'
+                      "exit 0\n")
+        binary.write_text(script, encoding="utf-8")
+        binary.chmod(0o755)
+        return binary
+
+    failing = {
+        "bundle_identifier": "com.yishuziyu.her", "accessibility_trusted": False,
+        "frontmost_bundle_id": "com.apple.finder",
+        "required_checks": {"accessibility": False},
+        "blocked_reasons": ["accessibility_not_trusted"],
+    }
+    passing = {
+        "bundle_identifier": "com.yishuziyu.her", "accessibility_trusted": True,
+        "frontmost_bundle_id": "com.apple.finder",
+        "required_checks": {"accessibility": True},
+        "blocked_reasons": [],
+    }
+
+    # 1. Older build without the flag: never a verdict; continue with supported=False.
+    older = work_dir / "older-her"
+    older.write_bytes(b"\x00fake-macho without the preflight flag\n")
+    older.chmod(0o755)
+    evidence, reasons = _preflight_gate(older, registry, work_dir / "pf-older")
+    _check(evidence == {"supported": False},
+           f"older build must record exactly supported=false: {evidence}")
+    _check(reasons == [], f"older build must not block: {reasons}")
+
+    # 2. Supported, preconditions failed: BLOCK, carrying the app's exact reason
+    #    and the whole preflight JSON.
+    blocked_app = _fake_preflight_app("blocked-her", failing)
+    _check(binary_supports_flag(blocked_app, PREFLIGHT_FLAG), "fake --preflight not detected")
+    evidence, reasons = _preflight_gate(blocked_app, registry, work_dir / "pf-blocked")
+    _check(evidence.get("supported") is True, f"supported app mislabeled: {evidence}")
+    _check(evidence.get("clear") is False, f"failed preflight must not be clear: {evidence}")
+    _check("accessibility_not_trusted" in reasons,
+           f"the app's exact blocked reason was not surfaced: {reasons}")
+    _check(evidence["report"]["required_checks"]["accessibility"] is False,
+           "the whole preflight JSON was not attached to the evidence")
+
+    # 3. Supported, preconditions met: continue (clear), no reasons.
+    ok_app = _fake_preflight_app("ok-her", passing)
+    evidence, reasons = _preflight_gate(ok_app, registry, work_dir / "pf-ok")
+    _check(evidence.get("clear") is True and reasons == [],
+           f"passing preflight must continue: clear={evidence.get('clear')} reasons={reasons}")
+
+    # 4. Supported but wrote no report: fail closed (cannot prove preconditions).
+    silent = run_preflight(_fake_preflight_app("silent-her", None), registry,
+                           work_dir / "pf-silent", timeout_seconds=30.0)
+    _check(silent.report is None, "silent preflight should have produced no report")
+    _check(silent.clear is False and silent.blocking_reasons,
+           "a supported preflight with no report must fail closed")
+
+    _check(not registry.running(), "a preflight child was left running by the test")
+    return ["preflight gate: older build records supported=false and continues; failing "
+            "preconditions BLOCK with the app's exact reason and whole JSON; passing "
+            "preconditions continue; a report-less supported preflight fails closed"]
+
+
 # ------------------------------------------------------------------- runner
 
 
@@ -781,6 +871,7 @@ TESTS = (
     ("probe argument plumbing", test_probe_argument_plumbing),
     ("binary flag detection", test_binary_flag_detection),
     ("probe execution lifecycle", test_probe_execution_lifecycle),
+    ("preflight gate blocks and continues", test_preflight_gate_blocks_and_continues),
     ("evidence schema validation", test_evidence_schema_validation),
     ("secret scan canaries", test_secret_scan_detects_canaries),
     ("judge: single-step right setting", test_judge_single_step_scenario),
