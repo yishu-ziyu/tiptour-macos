@@ -327,7 +327,8 @@ final class CompanionManager: ObservableObject {
         标记为“窗口观察数据”的消息不需要主动回应；等用户实际说话再行动。
         你没有持续的屏幕视频，回答依据最新工具结果；没有观察到的历史不能猜测。
         act_on_screen 默认只尝试一个动作。短流程用 steps 给出最多六个明确步骤及每步必要参数。
-        打开应用用 open_app 和 application，不要在当前页面猜找应用图标。
+        启动一个已安装应用时才用 open_app 和 application（例如“打开 Safari”“启动系统设置”），不要在当前页面猜找应用图标。
+        用户要求依次操作界面控件时，即使控件名以“打开”开头，也必须用 steps 提交 click 步骤，每步 target_label 写用户原话里的控件名；open_app 不能用来点控件。
         输入用 type、target_label、text；字段尚未聚焦时先给一个明确点击步骤。滚动、按键也传完整参数。
         用户明确给出的名称、位置和相对锚点分别放入 target_label、region、anchor_label/relation；不能省略限定后猜另一个目标。
         严格区分位置词和鼠标动作：“右边/右侧的控件”表示普通 click 加 region=right，“左边/左侧”同理；只有用户明确说“右键、右击、打开右键菜单”才用 right_click。goal 尽量保留用户原话，绝不能把“右边”改写成“右键”。
