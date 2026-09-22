@@ -10,10 +10,11 @@
 //  from other services. No iCloud sync — these are device-local keys only.
 //
 //  Every lookup reports *why* it failed, not just that it did: "no key was
-//  ever saved", "macOS refused to read the key that is there" and "the stored
-//  key cannot be decoded" are three different problems with three different
-//  remedies, and collapsing them into one "please save your key" message is
-//  what sent users in circles after they had already saved a key.
+//  ever saved", "the item is stored but this process has not read it",
+//  "macOS refused to read the key that is there" and "the stored key cannot be
+//  decoded" are different problems with different remedies, and collapsing
+//  them into one "please save your key" message is what sent users in circles
+//  after they had already saved a key.
 //
 
 import Foundation
@@ -25,11 +26,23 @@ import Security
 /// An item the user already saved must never be reported as "not saved", and a
 /// key that was never saved must never be reported as a read failure. Both
 /// mistakes are avoided by carrying the state instead of a `String?`.
+///
+/// Existence and readability are two separate facts, so they get two separate
+/// cases: `saved` means an attributes-only query found the item without ever
+/// handing its secret to this process, while `available` means this process
+/// actually holds a non-empty, decodable value. Only `available` licenses
+/// "usable", and `itemExists` is only ever a positive claim.
 enum KeychainItemState: Equatable {
-    /// The value is usable by this process right now: either it is still in
-    /// the in-process cache from an earlier successful read or write, or the
-    /// presence probe found the item.
+    /// A non-empty, decodable value was actually obtained in this process:
+    /// either a read returned bytes that decode to a UTF-8 string, or the value
+    /// is still in the in-process cache from an earlier successful read or
+    /// write. This is the only state that proves the key is usable right now.
     case available
+    /// The item is stored, but its secret was never read: an attributes-only
+    /// presence query found it. That query asks for no data, decrypts nothing
+    /// and opens no prompt, so existence is proven while readability is not.
+    /// Reported as "saved", never as "usable".
+    case saved
     /// Nothing was ever stored under that account — the user has not saved a
     /// key yet.
     case absent
@@ -45,11 +58,19 @@ enum KeychainItemState: Equatable {
     /// "no key" or into a read denial.
     case unavailable(OSStatus)
 
-    /// True when a stored item exists, whether or not it can be read right
-    /// now. A key the user already saved is a key the app cannot claim is
-    /// missing.
+    /// True when a stored item is positively proven to exist, whether or not it
+    /// can be read right now. A key the user already saved is a key the app
+    /// cannot claim is missing.
+    ///
+    /// The proof has to come from the state itself: `.absent` and `.unavailable`
+    /// are the two states that do not prove anything (nothing was ever stored,
+    /// or the lookup did not settle), so a state that merely failed to disprove
+    /// existence must never be reported as holding an item.
     var itemExists: Bool {
-        self != .absent
+        switch self {
+        case .available, .saved, .readDenied, .undecodable: return true
+        case .absent, .unavailable: return false
+        }
     }
 
     /// True only when this process can actually use the stored value.
@@ -61,7 +82,7 @@ enum KeychainItemState: Equatable {
     /// copy. Never anything taken from the item itself.
     var failureStatus: OSStatus {
         switch self {
-        case .available: return errSecSuccess
+        case .available, .saved: return errSecSuccess
         case .absent: return errSecItemNotFound
         case .undecodable: return errSecDecode
         case .readDenied(let status), .unavailable(let status): return status
@@ -73,6 +94,7 @@ enum KeychainItemState: Equatable {
     var logDescription: String {
         switch self {
         case .available: return "available"
+        case .saved: return "saved (item exists, secret not read)"
         case .absent: return "absent"
         case .undecodable: return "undecodable (errSecDecode \(errSecDecode))"
         case .readDenied(let status): return "read denied (OSStatus \(status), \(Self.message(for: status)))"
@@ -85,6 +107,7 @@ enum KeychainItemState: Equatable {
     var summary: String {
         switch self {
         case .available: return "密钥已保存在 macOS 钥匙串"
+        case .saved: return "密钥已保存在 macOS 钥匙串（尚未读取验证）"
         case .absent: return "尚未保存密钥"
         case .readDenied(let status): return "钥匙串读取失败（系统状态 \(status)）"
         case .undecodable: return "已保存的密钥无法解析"
@@ -96,16 +119,19 @@ enum KeychainItemState: Equatable {
     ///
     /// `subject` names whose key it is ("阶跃密钥", "JEV 密钥"), so the settings
     /// card, the voice refusal and the panel all quote this one source and can
-    /// never drift apart. The three failures never share a sentence:
-    /// "nothing was saved" asks for a save, "macOS refused the read" says the
-    /// key is already saved and points at the authorization, and "the stored
-    /// bytes are not usable text" asks for a single re-save. The old single
-    /// sentence — "未读到阶跃密钥：请在「设置 → 模型」保存密钥后重试" — was wrong
-    /// for the middle case, which is exactly the user who had already saved a
-    /// key and was told to save it again.
+    /// never drift apart. The failures never share a sentence: "nothing was
+    /// saved" asks for a save, "the item is saved but unread" keeps the save
+    /// fact while saying the value is not in hand yet, "macOS refused the read"
+    /// says the key is already saved and points at the authorization, and "the
+    /// stored bytes are not usable text" asks for a single re-save. The old
+    /// single sentence — "未读到阶跃密钥：请在「设置 → 模型」保存密钥后重试" — was
+    /// wrong for the middle cases, which are exactly the users who had already
+    /// saved a key and were told to save it again.
     func userMessage(subject: String) -> String {
         switch self {
         case .available: return "\(subject)已保存。"
+        case .saved:
+            return "\(subject)已保存在 macOS 钥匙串（尚未读取验证）：条目确实存在，是否可用要等这次实际读取到密钥才能确认。"
         case .absent: return "未保存\(subject)：请在「设置 → 模型」保存密钥后重试。"
         case .readDenied(let status):
             return "钥匙串读取失败：macOS 拒绝读取\(subject)（系统状态 \(status)）。密钥已保存，请在系统提示里允许 Her 访问该钥匙串条目后重试，不需要重新保存。"
@@ -118,6 +144,10 @@ enum KeychainItemState: Equatable {
 
     /// Map an OSStatus onto a state. `SecCopyErrorMessageString` supplies the
     /// human-readable half of the log line and nothing else.
+    ///
+    /// `errSecSuccess` here means an actual *read* succeeded and the value is
+    /// in hand. A presence query, which proves existence without decrypting
+    /// anything, maps through `presenceState(for:)` instead.
     static func state(for status: OSStatus) -> KeychainItemState {
         switch status {
         case errSecSuccess: return .available
@@ -126,6 +156,21 @@ enum KeychainItemState: Equatable {
             return .readDenied(status)
         case errSecDecode: return .undecodable
         default: return .unavailable(status)
+        }
+    }
+
+    /// Map the OSStatus of an attributes-only presence query onto a state.
+    ///
+    /// That query asks for no `kSecReturnData`, so nothing is decrypted and no
+    /// prompt is opened: a success proves the item is stored and says nothing
+    /// about whether this process may read it. Success therefore maps to
+    /// `.saved`, never to `.available`. Every other status means the same thing
+    /// it means for a read — including `.readDenied`, which proves an item is
+    /// there precisely because macOS refused to hand it over.
+    static func presenceState(for status: OSStatus) -> KeychainItemState {
+        switch status {
+        case errSecSuccess: return .saved
+        default: return state(for: status)
         }
     }
 
@@ -252,6 +297,9 @@ enum KeychainStore {
             return (nil, KeychainItemState.state(for: denied))
         }
         #endif
+        // A remembered value is one this process already obtained, so it still
+        // counts as an actual read: the bytes were decoded here and are usable
+        // here.
         if let cached = unlockedValues.object(forKey: cacheKey(key)) {
             return (cached as String, .available)
         }
@@ -271,7 +319,13 @@ enum KeychainStore {
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         if status == errSecSuccess {
-            guard let data = item as? Data, let string = String(data: data, encoding: .utf8) else {
+            // `.available` promises a value this process can actually use, so
+            // the bytes must decode *and* be non-empty: stored data that
+            // decodes to nothing is an unreadable item, not a usable key.
+            guard let data = item as? Data,
+                  let string = String(data: data, encoding: .utf8),
+                  !string.isEmpty
+            else {
                 return (nil, .undecodable)
             }
             unlockedValues.setObject(string as NSString, forKey: cacheKey(key))
@@ -285,10 +339,17 @@ enum KeychainStore {
     /// cards only need to know a key is there — but a non-success status is
     /// mapped instead of being dropped, so the caller can tell "nothing saved"
     /// from "the item is there but this process may not touch it".
+    ///
+    /// Success here proves existence only, so it answers `.saved`: this process
+    /// has not read the secret and must not be told the key is usable. The one
+    /// exception is the in-process cache, whose value was read (or written)
+    /// here, so a cached item really is `.available`.
     static func presence(forKey key: String) -> KeychainItemState {
         #if DEBUG
         if let denied = acceptanceDeniedReadStatus { return KeychainItemState.state(for: denied) }
         #endif
+        // The process already holds this value, so presence can honestly claim
+        // readability here — no Keychain trip, no prompt, no second decrypt.
         if unlockedValues.object(forKey: cacheKey(key)) != nil { return .available }
         let context = LAContext()
         context.interactionNotAllowed = true
@@ -299,7 +360,7 @@ enum KeychainStore {
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecUseAuthenticationContext as String: context
         ]
-        return KeychainItemState.state(for: SecItemCopyMatching(query as CFDictionary, nil))
+        return KeychainItemState.presenceState(for: SecItemCopyMatching(query as CFDictionary, nil))
     }
 
     /// Delete the item for the given key. Returns true if deleted OR
