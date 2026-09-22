@@ -64,6 +64,15 @@ final class ActionExecutor {
                 atGlobalScreenPoint: globalScreenPoint,
                 activatingTargetApp: targetApp
             )
+            #if DEBUG
+            // DEBUG-only receipt-loss injection point. The real driver has
+            // already delivered this click; throwing before the success is
+            // recorded makes the product observe `delivery=unknown` exactly as
+            // it would when a driver receipt is lost in production. Release
+            // builds never compile this call, so production behavior is
+            // unchanged and no retry switch exists.
+            try DesktopReceiptLossFault.dropSuccessfulDeliveryReceiptIfArmed()
+            #endif
             recordActionEvent(name: "click", status: "ok", metadata: metadata)
         } catch {
             recordActionEvent(
