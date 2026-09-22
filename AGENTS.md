@@ -167,9 +167,10 @@ Known non-blocking Swift 6 concurrency and deprecated `onChange` warnings must n
 
 ## Testing Rules
 
-- NEVER write unit tests after you write code.
-- Highly prefer E2E tests as the sole testing mechanism. Use them to verify complex features work. At the end of E2E tests, produce a verifiable and repeatable artifact.
-- If you must test a system in isolation, FIRST write all the ways it could fail, THEN write the code.
+- Tests must be **results-based, not implementation-based**: assert the observable outcome the user cares about — receipts, spoken text, independent `/state` readback, real side effects — never that a particular function was called or implemented in a specific way. When a collaborator must be stubbed, stub at a real protocol/URL seam and still assert on the end result, not on which collaborators were invoked.
+- E2E through the real product entrypoint is the primary completion gate: user's words → real Her build → real provider and executor → controlled local fixture page → real side effects → independent `/state` readback → Her receipt and speech → post-failure deduplication and recovery. Every E2E run must save a verifiable, repeatable evidence artifact (JSON) capturing the user's exact words, the model's tool arguments, task/turn/attempt IDs, Her receipts, independent `/state`, final speech text, and failure-recovery results.
+- Existing XCTest / Swift Testing suites are regression protection only. They are never a completion criterion: no coverage targets, no test-count metrics, no exit-code-0 or reviewer self-assessment as proof of completion.
+- If a system must be verified in isolation, first enumerate every way it can fail, then write the code against those failure outcomes — still asserting observable results, not internal mechanics.
 
 ## Code Style & Conventions
 
