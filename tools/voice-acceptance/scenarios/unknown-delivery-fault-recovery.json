@@ -1,7 +1,7 @@
 {
   "name": "unknown_delivery_fault_recovery",
   "title": "Unknown：真实 delivery-unknown 故障注入与恢复（工单 04 提供）",
-  "description": "PENDING-INTEGRATOR-RUN by design: this scenario is owned by work order 04 (real fault injection through the production Action Driver plus a DEBUG-only probe, no fault entry in Release). Until that probe exists in a built Her.app, the runner marks this scenario pending with the exact reproduction command instead of guessing a verdict.",
+  "description": "Wired to the merged work order 04 probe: the runner arms the one-shot DEBUG receipt-loss fault with --drop-next-delivery-receipt and runs --receipt-loss-probe through the production route. It still requires the signed DEBUG build, the controlled frontmost fixture page and real Accessibility/Screen Recording permissions, so a run is refused rather than guessed when the binary is stale or the capability flag is absent.",
   "user_words": "点击右边的设置按钮（随后在同一任务中请求继续）",
   "utterances": ["点击右边的设置按钮"],
   "probe": {
@@ -10,16 +10,19 @@
     "timeout_seconds": 300,
     "argv_template": [
       "{app_binary}",
-      "--unknown-delivery-probe",
+      "--drop-next-delivery-receipt",
+      "--receipt-loss-probe",
       "{bundle_id}",
-      "{pcm}",
+      "{fixture_url}",
+      "{\"goal\":\"点击右侧设置\",\"action\":\"click\",\"target_label\":\"设置\",\"region\":\"right\"}",
+      "{\"goal\":\"点击右侧设置\",\"intent\":\"resume\"}",
       "{report}"
     ],
-    "capability_flag": "--unknown-delivery-probe"
+    "capability_flag": "--receipt-loss-probe"
   },
   "repeat": 1,
   "expectations": {
-    "note": "Configured after work order 04 merges. The checks below encode work order 04's acceptance contract for scenario U so the integrator rerun is a single command.",
+    "note": "Checks encode work order 04's acceptance contract for scenario U so the integrator rerun is a single command.",
     "state_before_after": {
       "expected_selected_value": "right-setting",
       "expected_total_clicks_after_continue": 1,
@@ -35,9 +38,9 @@
   "reproduction": {
     "one_command": "python3 scripts/acceptance/her_voice_e2e.py --app \"$PWD/Debug/Her.app\" --out out/acceptance/03-her-e2e-runner",
     "prerequisites": [
-      "Merge 01, 02 and 04 into the integration branch (merge order 01 → 02 → 04 → 03).",
-      "Rebuild the DEBUG Her.app in Xcode from the integration branch.",
-      "Confirm this scenario's argv_template matches work order 04's probe, then rerun the one command."
+      "Integration branch contains work orders 01, 02, 03, 04, 05 (merge order 01 → 02 → 04 → 03 → 05).",
+      "Rebuild the DEBUG Her.app in Xcode from the integration branch (the runner refuses a stale binary).",
+      "Fixture page open in frontmost Safari; Accessibility and Screen Recording granted."
     ]
   }
 }

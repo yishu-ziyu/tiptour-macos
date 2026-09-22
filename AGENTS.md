@@ -132,7 +132,7 @@ only the OS failure code/message, not a key. See the current task document for e
 | `TipTour/App/CompanionManager.swift` | Shared state, provider coordination, hotkeys, highlight and detection lifecycle |
 | `TipTour/App/TipTourApp.swift` | App entry point, Sparkle gate (skipped without `SUFeedURL`/`SUPublicEDKey`) and DEBUG probe dispatch (~124 lines) |
 | `TipTour/Workflow/WorkflowRunner.swift` | Operation tokens, pause/resume, target resolution and post-action checks shared by every entry (~1842 lines) |
-| `TipTour/Actions/ActionExecutor.swift` | Delivers CUA input and reports the delivery fact for an attempt (~1178 lines) |
+| `TipTour/Actions/ActionExecutor.swift` | Delivers CUA input and reports the delivery fact for an attempt; DEBUG-only receipt-loss fault injection for the unknown/recovery acceptance (~1187 lines) |
 | `TipTour/Actions/TipTourActionDriver.swift` | CUA driver boundary (~69 lines) |
 | `TipTour/Harnesses/TipTourHarnessServer.swift` | Localhost engine API on `127.0.0.1:19474`, `/v1/agent-contract` canonical (~1128 lines) |
 | `TipTour/Perception/LocalTargetContinuity.swift` | Matches the same label/source/display across small detection bounds changes before execution (~20 lines) |
@@ -146,15 +146,15 @@ only the OS failure code/message, not a key. See the current task document for e
 | `TipTour/Voice/GeminiLiveClient.swift` | Gemini WebSocket protocol and tool declarations |
 | `TipTour/Voice/StepFunRealtimeClient.swift` | Ordered WebSocket events, response identity filtering, deduplicated calls and task-context data (~710 lines) |
 | `TipTour/Voice/StepFunRealtimeSession.swift` | Full-duplex session, receipt speech, cancellation and production-path synthetic probe (~1090 lines) |
-| `TipTour/Voice/StepFunRealtimeTools.swift` | Strict task/step parameters and observation-bound indices (~313 lines) |
+| `TipTour/Voice/StepFunRealtimeTools.swift` | Strict task/step parameters, observation-bound indices, and the goal-declared operation gate that refuses collapsing multi-step intents (~544 lines) |
 | `TipTour/Voice/StepFunRealtimeToolRouter.swift` | Shared scene identity, constrained routing, task controls and session-bound access (~545 lines) |
 | `TipTour/Voice/StepFunVisionClient.swift` | Screen understanding, history-aware comparison and bounded general-model decisions (~295 lines) |
 | `TipTourTests/StepFunVisionClientTests.swift` | Vision request format and malformed screen-description regressions (~65 lines) |
 | `TipTour/Voice/DesktopTaskCoordinator.swift` | Task-owned execution, goal revisions, step budget, verified progress, safe continuation and uncertainty (~671 lines) |
-| `TipTour/Voice/DesktopTaskContract.swift` | Typed actions, literal/spatial constraints, delivery vs outcome evidence, step completion predicates, receipts and speech (~491 lines) |
+| `TipTour/Voice/DesktopTaskContract.swift` | Typed actions, literal/spatial constraints, delivery vs outcome evidence, step completion predicates, receipts and speech (~543 lines) |
 | `TipTour/Voice/DesktopTaskAdmission.swift` | Process-local task ownership and per-execution dispatch admission (~23 lines) |
 | `TipTour/Voice/DesktopTaskJournal.swift` | Private, atomic metadata-only recovery checkpoint; no automatic replay (~187 lines) |
-| `TipTour/Voice/VoiceTaskContinuityProbe.swift` | Signed-app, no-mic/no-desktop provider smoke with a fixture executor (~123 lines) |
+| `TipTour/Voice/VoiceTaskContinuityProbe.swift` | Signed-app, no-mic/no-desktop provider smoke with a fixture executor; delivery-only vs verified progress wording and cancellation chains (~493 lines) |
 | `TipTourTests/DesktopTaskContinuityTests.swift` | Task identity, interruption, deferred continuation, journal and recovery behavior (~462 lines) |
 | `TipTourTests/WorkflowRunnerIntegrationTests.swift` | Actual engine/runner admission, delivery lifetime and terminal-status tests (~176 lines) |
 | `TipTourTests/TaskRouterIntegrationTests.swift` | Actual router binding, status controls and constrained resume tests (~125 lines) |
@@ -167,7 +167,8 @@ only the OS failure code/message, not a key. See the current task document for e
 | `TipTour/Perception/DesktopAccessibilityReader.swift` | Bounded read-only AX evidence and local candidate geometry (~110 lines) |
 | `TipTour/Voice/StepFunResponseBoundary.swift` | Stale/duplicate response rejection and verified-receipt transcript matching (~55 lines) |
 | `TipTour/Voice/DesktopVoiceTrace.swift` | Metadata telemetry and explicitly enabled bounded local diagnostics (~55 lines) |
-| `TipTour/Voice/VoiceRouteProbe.swift` | DEBUG probes; voice-task uses the production session and JEV fan-out probe never executes actions (~260 lines) |
+| `TipTour/Voice/VoiceRouteProbe.swift` | DEBUG probes; voice-task uses the production session, JEV fan-out probe never executes actions, receipt-loss/journal-recovery probe dispatch (~301 lines) |
+| `TipTour/Voice/DesktopFaultRecoveryProbe.swift` | DEBUG-only one-shot receipt-loss fault plus receipt-loss and v1 journal-recovery acceptance probes (~724 lines) |
 | `TipTour/Workflow/WorkflowModalPolicy.swift` | Distinguishes blocking modals from unrelated modeless windows (~11 lines) |
 | `TipTourTests/DesktopTaskCoordinatorTests.swift` | Execution, cancellation, budget, escalation and continuation regressions, including the delivery-vs-outcome completion matrix (~1013 lines) |
 | `TipTourTests/DesktopControlContractTests.swift` | Receipt, targeting, verification, response boundary, window identity and resume regressions (~648 lines) |

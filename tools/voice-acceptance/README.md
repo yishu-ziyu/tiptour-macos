@@ -22,7 +22,7 @@ python3 tools/voice-acceptance/fixture.py
 服务端也拒绝在菜单打开前选中 `scale`。`POST /reset` 只重置此测试数据；
 重置后刷新 Safari 标签页，确保可见状态与服务端一致。
 
-## 六种 Debug 探针
+## 八种 Debug 探针
 
 以下 `APP_BINARY` 指 Xcode 构建产物的 `Her.app/Contents/MacOS/Her`
 （Xcode 工程中 target / scheme 仍叫 `tiptour-macos`，`PRODUCT_NAME=Her`，bundle ID `com.yishuziyu.her`）。
@@ -34,6 +34,8 @@ APP_BINARY --voice-route-probe /tmp/input.pcm /tmp/voice-comparison
 APP_BINARY --voice-task-probe com.apple.Safari /tmp/input.pcm /tmp/voice-task
 APP_BINARY --jev-fanout-probe com.apple.Safari '点击检查官网部署状态（3）' /tmp/jev-fanout.json
 APP_BINARY --voice-continuity-probe /tmp/progress.pcm /tmp/cancel.pcm /tmp/continuity-report.json
+APP_BINARY --drop-next-delivery-receipt --receipt-loss-probe com.apple.Safari http://127.0.0.1:19475 '{"goal":"点击右侧设置","action":"click","target_label":"设置","region":"right"}' '{"goal":"点击右侧设置","intent":"resume"}' /tmp/unknown-report.json
+APP_BINARY --journal-recovery-probe /tmp/app-support-root /tmp/journal-report.json
 APP_BINARY --voice-playback-probe
 ```
 
@@ -55,6 +57,16 @@ APP_BINARY --voice-playback-probe
   TaskRecovery 日志。报告含 `passed`、`phase`、`provider_connection_attempted`、`keychain_status`
   与每轮的 `tool_count` / `status` / `turn_id`；`passed` 只代表探针自身的两轮断言成立。
 - `voice-playback-probe` 只建立一次生产 Realtime 会话并播放其音频，不在工具声明里暴露任何桌面动作。
+- `--drop-next-delivery-receipt` 是全局一次性故障武装开关，可叠加在任意探针前：
+   下一次成功的 driver 投递会丢失回执（`ActionExecutor.click` 内 `#if DEBUG` 注入），
+   Release 构建不含该开关；它不改变任何生产默认行为，也**不会**自动重试。
+- `receipt-loss-probe` 走生产路由（`act_on_screen` → 工具路由 → 协调器 → 执行器 → 引擎 →
+   WorkflowRunner → ActionExecutor → CUA driver）完成真实点击后丢失回执，验证 `delivery=unknown` 进入
+   `uncertain_effect`、不被重复执行、显式恢复请求被拒绝；输出前后各一次独立 `/state` 快照。
+   需要前置受控页面与真实 Accessibility/Screen Recording 权限。
+- `journal-recovery-probe` 用真实 v1 字节驱动 `configureJournal/submit/cancelTask`：
+   `completed` + `verified=false` 必须得到 `recovery_required`（保留任务身份、拒绝 plain resume、
+   显式 cancel 后保留历史 attempt），不可读日志必须 `storage_failed` 且字节原样保留。
   Keychain 无交互读取失败时明确退出，不弹出授权窗口。
 
 输入必须是 **无 WAV 文件头**的 24 kHz 单声道 PCM16 小端字节。可用系统 `say`

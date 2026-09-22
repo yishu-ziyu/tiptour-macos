@@ -28,3 +28,6 @@ buildServer.json
 
 # Serena code-navigation tool state — local agent config, never product source
 .serena/
+
+# Acceptance evidence artifacts — regenerated per run, never source
+out/
