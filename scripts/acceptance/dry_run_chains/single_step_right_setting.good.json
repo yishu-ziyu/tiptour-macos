@@ -1,0 +1,31 @@
+{
+  "quality": "good",
+  "description": "Mock chain: honest uncertain_effect receipt for the right-hand 设置 click with corroborating independent /state. Everything the six-layer comparison requires agrees.",
+  "argv": [
+    "<mock>Her.app/Contents/MacOS/Her",
+    "--voice-task-probe",
+    "com.apple.Safari",
+    "<utterance-pcm>",
+    "<attempt-dir>"
+  ],
+  "state_before": {"selected": null, "clicks": 0, "menu_open": false, "events": [], "page_views": 2},
+  "state_after": {"selected": "right-setting", "clicks": 1, "menu_open": false, "events": ["right-setting"], "page_views": 2},
+  "report": {
+    "route": "production_realtime_session",
+    "synthetic_input": true,
+    "microphone": "not_opened",
+    "speaker": "not_played",
+    "completed": true,
+    "error": "",
+    "timed_out": false,
+    "input_transcript": "点击右边的设置按钮",
+    "calls": [
+      {"name": "act_on_screen", "arguments": "{\"goal\":\"点击右边的设置按钮\",\"intent\":\"new\",\"action\":\"click\",\"target_label\":\"设置\",\"region\":\"right\"}"}
+    ],
+    "tool_results": [
+      "{\"goal\":\"点击右边的设置按钮\",\"status\":\"uncertain_effect\",\"actions\":[\"click「设置」：结果未确认\"],\"detail\":\"操作结果未确认，已停止；页面变化不等于目标完成。\",\"app\":\"com.apple.Safari\",\"task_id\":\"11111111-2222-3333-4444-555555555555\",\"turn_id\":\"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\",\"target_version\":1,\"prior_actions\":[],\"current_actions\":[{\"id\":\"attempt-0001\",\"observationID\":\"obs-0001\",\"app\":\"com.apple.Safari\",\"targetID\":\"target-right-setting\",\"label\":\"设置\",\"action\":\"click\",\"decision_packet\":{\"action\":\"click\",\"where\":{\"region\":\"right\"},\"evidence\":[\"action_locked\",\"target_exact\",\"location_filtered_in_code\"]},\"completionPolicy\":\"delivery_sufficient\",\"delivery\":\"sent\",\"outcomeEvidence\":\"not_observed\",\"detail\":\"driver confirmed delivery\",\"completionBasis\":\"delivery_confirmed\",\"satisfied\":true,\"verified\":false}],\"verified_action_history\":[],\"satisfied_action_history\":[\"click「设置」：动作已送达\"],\"completed_step_count\":0,\"total_step_count\":1}"
+    ],
+    "rendered_texts": ["已向「设置」发送操作，但目标结果还没有确认，已停下。"],
+    "realtime_audio_bytes": 84000
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "name": "unknown_delivery_fault_recovery",
+  "title": "Unknown：真实 delivery-unknown 故障注入与恢复（工单 04 提供）",
+  "description": "PENDING-INTEGRATOR-RUN by design: this scenario is owned by work order 04 (real fault injection through the production Action Driver plus a DEBUG-only probe, no fault entry in Release). Until that probe exists in a built Her.app, the runner marks this scenario pending with the exact reproduction command instead of guessing a verdict.",
+  "user_words": "点击右边的设置按钮（随后在同一任务中请求继续）",
+  "utterances": ["点击右边的设置按钮"],
+  "probe": {
+    "mode": "unknown",
+    "report_file_name": "unknown-fault-report.json",
+    "timeout_seconds": 300,
+    "argv_template": [
+      "{app_binary}",
+      "--unknown-delivery-probe",
+      "{bundle_id}",
+      "{pcm}",
+      "{report}"
+    ],
+    "capability_flag": "--unknown-delivery-probe"
+  },
+  "repeat": 1,
+  "expectations": {
+    "note": "Configured after work order 04 merges. The checks below encode work order 04's acceptance contract for scenario U so the integrator rerun is a single command.",
+    "state_before_after": {
+      "expected_selected_value": "right-setting",
+      "expected_total_clicks_after_continue": 1,
+      "forbid_left_setting_event": true
+    },
+    "receipt_sequence": [
+      {"delivery": "unknown", "status": "uncertain_effect"}
+    ],
+    "forbid_attempt_reuse_click": true,
+    "final_speech_must_contain_any": ["不确定", "未确认", "已停下", "停下"],
+    "final_speech_must_not_contain": ["已经完成", "已完成并确认"]
+  },
+  "reproduction": {
+    "one_command": "python3 scripts/acceptance/her_voice_e2e.py --app \"$PWD/Debug/Her.app\" --out out/acceptance/03-her-e2e-runner",
+    "prerequisites": [
+      "Merge 01, 02 and 04 into the integration branch (merge order 01 → 02 → 04 → 03).",
+      "Rebuild the DEBUG Her.app in Xcode from the integration branch.",
+      "Confirm this scenario's argv_template matches work order 04's probe, then rerun the one command."
+    ]
+  }
+}

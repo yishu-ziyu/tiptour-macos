@@ -1,0 +1,25 @@
+{
+  "name": "single_step_right_setting",
+  "title": "A：单步“点击右边的设置按钮”",
+  "description": "One-step spatial click through the real StepFun voice session. The controlled page has two same-named 设置 buttons; the runner requires the right-hand one to be clicked exactly once, through a click contract with region=right (never an open_app, never a right_click, never the left-hand twin).",
+  "user_words": "点击右边的设置按钮",
+  "utterances": ["点击右边的设置按钮"],
+  "probe": {
+    "mode": "voice_task",
+    "expected_bundle_identifier": "com.apple.Safari",
+    "report_file_name": "realtime.json",
+    "timeout_seconds": 300
+  },
+  "repeat": 1,
+  "expectations": {
+    "expected_selected_value": "right-setting",
+    "expected_click_delta": 1,
+    "forbidden_event_values": ["left-setting", "task-2", "task-3", "open-menu", "scale"],
+    "require_no_open_app": true,
+    "require_click_action": true,
+    "require_region_right": true,
+    "accepted_receipt_statuses": ["completed", "uncertain_effect"],
+    "require_uncertainty_wording_when_unverified": true,
+    "forbidden_speech_claims_when_unverified": ["已完成并确认", "已确认「", "已经完成"]
+  }
+}

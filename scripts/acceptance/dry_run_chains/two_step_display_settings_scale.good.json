@@ -1,0 +1,31 @@
+{
+  "quality": "good",
+  "description": "Mock chain: two explicit click steps on the page controls with independent /state events exactly [open-menu, scale]. No open_app anywhere.",
+  "argv": [
+    "<mock>Her.app/Contents/MacOS/Her",
+    "--voice-task-probe",
+    "com.apple.Safari",
+    "<utterance-pcm>",
+    "<attempt-dir>"
+  ],
+  "state_before": {"selected": null, "clicks": 0, "menu_open": false, "events": [], "page_views": 3},
+  "state_after": {"selected": "scale", "clicks": 1, "menu_open": true, "events": ["open-menu", "scale"], "page_views": 3},
+  "report": {
+    "route": "production_realtime_session",
+    "synthetic_input": true,
+    "microphone": "not_opened",
+    "speaker": "not_played",
+    "completed": true,
+    "error": "",
+    "timed_out": false,
+    "input_transcript": "点击打开显示设置，然后点击缩放选项。",
+    "calls": [
+      {"name": "act_on_screen", "arguments": "{\"goal\":\"点击打开显示设置，然后点击缩放选项。\",\"intent\":\"new\",\"steps\":[{\"action\":\"click\",\"target_label\":\"打开显示设置\"},{\"action\":\"click\",\"target_label\":\"缩放选项\"}]}"}
+    ],
+    "tool_results": [
+      "{\"goal\":\"点击打开显示设置，然后点击缩放选项。\",\"status\":\"completed\",\"actions\":[\"click「打开显示设置」：动作已送达\",\"click「缩放选项」：动作已送达\"],\"detail\":\"任务步骤均已结束；各步完成依据已记录在操作历史中。\",\"app\":\"com.apple.Safari\",\"task_id\":\"22222222-3333-4444-5555-666666666666\",\"turn_id\":\"bbbbbbbb-cccc-dddd-eeee-ffffffffffff\",\"target_version\":1,\"prior_actions\":[],\"current_actions\":[{\"id\":\"attempt-0002\",\"observationID\":\"obs-0002\",\"app\":\"com.apple.Safari\",\"targetID\":\"target-open-display\",\"label\":\"打开显示设置\",\"action\":\"click\",\"decision_packet\":{\"action\":\"click\",\"evidence\":[\"action_locked\",\"target_exact\"]},\"completionPolicy\":\"outcome_required\",\"delivery\":\"sent\",\"outcomeEvidence\":\"system_verified\",\"detail\":\"menu became visible\",\"completionBasis\":\"system_verified_outcome\",\"satisfied\":true,\"verified\":true},{\"id\":\"attempt-0003\",\"observationID\":\"obs-0003\",\"app\":\"com.apple.Safari\",\"targetID\":\"target-scale\",\"label\":\"缩放选项\",\"action\":\"click\",\"decision_packet\":{\"action\":\"click\",\"evidence\":[\"action_locked\",\"target_exact\"]},\"completionPolicy\":\"delivery_sufficient\",\"delivery\":\"sent\",\"outcomeEvidence\":\"not_observed\",\"detail\":\"driver confirmed delivery\",\"completionBasis\":\"delivery_confirmed\",\"satisfied\":true,\"verified\":false}],\"verified_action_history\":[\"click「打开显示设置」：结果已验证\"],\"satisfied_action_history\":[\"click「打开显示设置」：结果已验证\",\"click「缩放选项」：动作已送达\"],\"completed_step_count\":2,\"total_step_count\":2}"
+    ],
+    "rendered_texts": ["已点击「打开显示设置」。已点击「缩放选项」。"],
+    "realtime_audio_bytes": 91000
+  }
+}

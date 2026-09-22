@@ -1,0 +1,27 @@
+{
+  "name": "two_step_display_settings_scale",
+  "title": "C：两步“点击打开显示设置，然后点击缩放选项”",
+  "description": "Two-step web-control sequence through the real StepFun voice session. The runner requires two click steps on the page controls — never an open_app of a fictional '显示设置' application — and the controlled page to show the exact ordered side effects open-menu then scale.",
+  "user_words": "点击打开显示设置，然后点击缩放选项。",
+  "utterances": [
+    "点击打开显示设置，然后点击缩放选项。",
+    "先点打开显示设置，再点缩放选项。"
+  ],
+  "probe": {
+    "mode": "voice_task",
+    "expected_bundle_identifier": "com.apple.Safari",
+    "report_file_name": "realtime.json",
+    "timeout_seconds": 300
+  },
+  "repeat": 1,
+  "expectations": {
+    "expected_event_sequence": ["open-menu", "scale"],
+    "expected_selected_value": "scale",
+    "expected_click_delta": 1,
+    "require_no_open_app": true,
+    "require_two_click_steps": true,
+    "accepted_receipt_statuses": ["completed", "uncertain_effect"],
+    "require_uncertainty_wording_when_unverified": true,
+    "forbidden_speech_claims_when_unverified": ["已完成并确认", "已确认「", "已经完成"]
+  }
+}

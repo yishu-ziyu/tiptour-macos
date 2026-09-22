@@ -2,7 +2,10 @@
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-STATE = {"selected": None, "clicks": 0, "menu_open": False, "events": []}
+# page_views counts page loads for the acceptance runner so it can prove the
+# controlled page was actually (re)loaded in the browser; it is diagnostic and
+# is deliberately not reset by /reset (a reset resets test semantics only).
+STATE = {"selected": None, "clicks": 0, "menu_open": False, "events": [], "page_views": 0}
 HTML = """<!doctype html><html lang="zh"><meta charset="utf-8">
 <title>TipTour 操作验收</title><style>
 body{font:24px system-ui;margin:70px;background:#fafafa;color:#202020}
@@ -50,6 +53,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/state":
             self.respond(json.dumps(STATE))
         else:
+            STATE["page_views"] += 1
             self.respond(HTML, "text/html")
 
     def do_POST(self):

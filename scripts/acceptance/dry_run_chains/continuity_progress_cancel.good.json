@@ -1,0 +1,58 @@
+{
+  "quality": "good",
+  "description": "Mock chain: progress question keeps the same task paused with zero re-executed steps; the reconnect binds a fresh turn and cancels the same task. Independent /state never moves (no desktop side effects).",
+  "argv": [
+    "<mock>Her.app/Contents/MacOS/Her",
+    "--voice-continuity-probe",
+    "<progress-pcm>",
+    "<cancel-pcm>",
+    "<attempt-dir>/continuity-report.json"
+  ],
+  "state_before": {"selected": null, "clicks": 0, "menu_open": false, "events": [], "page_views": 4},
+  "state_after": {"selected": null, "clicks": 0, "menu_open": false, "events": [], "page_views": 4},
+  "report": {
+    "passed": true,
+    "synthetic_input": true,
+    "desktop_actions": 0,
+    "microphone_opened": false,
+    "audio_played": false,
+    "provider_connection_attempted": true,
+    "verification_level": "real_provider_with_fixture_executor",
+    "fixture_actions": 1,
+    "unexpected_engine_accesses": 0,
+    "rounds": [
+      {
+        "name": "progress",
+        "passed": true,
+        "timed_out": false,
+        "error": "",
+        "tool_count": 1,
+        "input_transcript": "这个任务进行到哪一步了？",
+        "rejected_tools": 0,
+        "action": "status",
+        "control_binding_valid": true,
+        "task_id": "33333333-4444-5555-6666-777777777777",
+        "turn_id": "cccccccc-dddd-eeee-ffff-000000000000",
+        "status": "paused",
+        "rendered_texts": ["任务尚未完成，已处理 1/2 步。"],
+        "captured_audio_bytes": 74000
+      },
+      {
+        "name": "cancel_after_reconnect",
+        "passed": true,
+        "timed_out": false,
+        "error": "",
+        "tool_count": 1,
+        "input_transcript": "取消这个任务",
+        "rejected_tools": 0,
+        "action": "cancel",
+        "control_binding_valid": true,
+        "task_id": "33333333-4444-5555-6666-777777777777",
+        "turn_id": "dddddddd-eeee-ffff-0000-111111111111",
+        "status": "cancelled",
+        "rendered_texts": ["任务已取消，已经发生的操作记录保留。"],
+        "captured_audio_bytes": 78000
+      }
+    ]
+  }
+}

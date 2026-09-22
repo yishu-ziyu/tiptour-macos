@@ -1,0 +1,38 @@
+{
+  "quality": "bad",
+  "description": "Injected failure: after the delivery-unknown receipt the same attempt was re-delivered (independent /state clicks=2). The judge must refuse PASS: an unconfirmed attempt must never be repeated.",
+  "argv": [
+    "<mock>Her.app/Contents/MacOS/Her",
+    "--unknown-delivery-probe",
+    "com.apple.Safari",
+    "<utterance-pcm>",
+    "<attempt-dir>/unknown-fault-report.json"
+  ],
+  "state_before": {"selected": null, "clicks": 0, "menu_open": false, "events": [], "page_views": 5},
+  "state_after": {"selected": "right-setting", "clicks": 2, "menu_open": false, "events": ["right-setting", "right-setting"], "page_views": 5},
+  "report": {
+    "completed": true,
+    "error": "",
+    "timed_out": false,
+    "input_transcript": "点击右边的设置按钮",
+    "calls": [
+      {"name": "act_on_screen", "arguments": "{\"goal\":\"点击右边的设置按钮\",\"intent\":\"new\",\"action\":\"click\",\"target_label\":\"设置\",\"region\":\"right\"}"}
+    ],
+    "receipt": {
+      "goal": "点击右边的设置按钮",
+      "status": "uncertain_effect",
+      "detail": "操作结果未确认，已停止；不会自动重复。",
+      "app": "com.apple.Safari",
+      "task_id": "44444444-5555-6666-7777-888888888888",
+      "turn_id": "eeeeeeee-ffff-0000-1111-222222222222",
+      "target_version": 1,
+      "current_actions": [
+        {"id": "attempt-0004", "observationID": "obs-0004", "app": "com.apple.Safari", "targetID": "target-right-setting", "label": "设置", "action": "click", "delivery": "unknown", "outcome_evidence": "not_observed", "completion_policy": "delivery_sufficient", "completion_basis": null, "satisfied": false, "verified": false, "detail": "DEBUG fault dropped the success confirmation after delivery"}
+      ],
+      "completed_step_count": 0,
+      "total_step_count": 1
+    },
+    "rendered_texts": ["本轮尝试了操作，但结果还不确定，已停下，没有继续尝试其他目标。"],
+    "realtime_audio_bytes": 88000
+  }
+}
