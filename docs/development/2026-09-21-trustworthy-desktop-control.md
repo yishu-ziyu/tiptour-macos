@@ -1,5 +1,12 @@
 # 可信桌面语音控制：技术方案与验收契约
 
+> **文档性质：现行控制契约。** `AGENTS.md` 的 Build and verification 一节把本文件指向为当前契约，
+> 因此上面的架构选择、验证与可证伪验收章节必须与代码保持一致，可按需修改。
+> `执行记录` 与 `最终记录` 两节是 2026-09-21 的现场证据记录，冻结不改。
+> 步骤完成判据以 `AGENTS.md` 的 `Step completion truth table` 与
+> `TipTour/Voice/DesktopTaskContract.swift` 的 `DesktopActionCompletion` 为准。
+> 文档性质分类由 2026-09-23 的文档核对工单添加。
+
 日期：2026-09-21。执行者：当前 ChatGPT 主代理，直接通过 DevSpace 修改本地 checkout。
 基线：`main@6dbba3a`，包含接手时已有的未提交 StepFun/desktop companion 改动。
 不提交、合并、发布，不重置已有改动，不运行终端 xcodebuild，不操作真实应用做点击实验。
@@ -36,7 +43,7 @@ flowchart TD
     E --> V[执行后独立读回]
     V --> C[本轮回执：下发状态与达成证据]
     C --> A[程序生成动作播报 → Realtime 原样朗读并核对转写]
-    V -->|显式多步且前一步验证通过| T
+    V -->|显式多步且前一步已满足完成策略| T
 ```
 
 ### 任务及纠正
@@ -52,6 +59,11 @@ flowchart TD
 默认单目标只有一次副作用预算；点击、双击、右击各算一个动作原语。
 多步必须提供显式有界步骤（最多六步），每步有目标和动作参数；不能让“没有完成”
 成为换一个无关目标再点的理由。程序限制预算，不依赖模型自觉。
+每一步是否算完成由代码按该步的 completion policy 判定，不由模型选择：
+`open_app`、`type` 一律 `outcome_required`；`click/double_click/right_click/press_key/
+shortcut/scroll` 在带显式 `expected_label` 时也是 `outcome_required`，否则
+`delivery_sufficient`，凭 `delivery=sent` 即算完成。完整真值表见 `AGENTS.md`
+的 `Step completion truth table`。
 打开应用、输入、按键、滚动复用已有 WorkflowRunner，不经 JEV 假装寻找屏幕上的应用图标。
 输入必须带确定文本，快捷键必须带确定键值；缺失参数不猜测。
 后果较大的发送/删除等保留原有授权边界，不通过新增路径旁路。
@@ -68,8 +80,12 @@ flowchart TD
 ### 验证与语音
 
 区分请求已接受、输入可能送达、已送达、目标状态已验证。界面变化或模型 done 不能
-独自证明目标完成。打开应用检查目标前台进程；输入检查目标字段值；点击检查目标
-选中/焦点或显式预期结果。无法得到语义证据时报告未确认，不能伪造成功。
+独自证明目标完成。打开应用确认目标安装包（含嵌套 helper）有 on-screen 顶层窗口且位于前台——
+进程存在不等于用户看见窗口，无窗口时有界 reopen 一次后仍不可见则保持未验证；
+输入检查目标字段值；点击检查目标选中/焦点或显式预期结果。无法得到语义证据时报告未确认，不能伪造成功。
+每一步算不算完成按 `DesktopActionCompletion` 判定（见 `AGENTS.md` 的真值表）：
+`delivery_sufficient` 的直接输入步骤凭 `delivery=sent` 即算完成并如实播报“已点击/已按下”，
+不得改口成结果已确认；`outcome_required` 步骤没有效果证据就是 `uncertain_effect`，不是完成。
 操作结果由代码根据当前回执生成中文播报。同一 Realtime 会话以单次指令
 原样朗读该文本；音频先缓冲，只有返回转写与回执匹配才播放，否则仅显示真实回执。
 普通对话的 `response.audio.delta` 到达后直接播放，不再二次调用独立 TTS。模型在工具前
@@ -92,7 +108,8 @@ flowchart TD
 4. 模型返回 done 或界面变化但无目标达成证据：不得返回 completed。
 5. 旧观察编号、换窗口、慢模型期间用户纠正、执行异常/取消：不得产生迟到旧动作。
 6. 动作回执的 Realtime 转写与程序文本不匹配：音频不播放，面板仍显示本轮真实状态。
-7. 显式多步只有前一步通过结果检查才继续；预算不得通过重复 tool call 重置。
+7. 显式多步只有前一步已满足 code-owned 完成策略才继续（`delivery_sufficient` 的直接输入步骤
+   凭 `delivery=sent` 即算完成，`outcome_required` 步骤必须有效果证据）；预算不得通过重复 tool call 重置。
 8. 打开应用/输入/滚动等走既有共享引擎；参数不全、权限未开、上下文变化时不执行。
 9. 现有 JEV、StepFun 解码、Realtime 音频、语音生命周期与感知回归继续通过。
 
