@@ -241,6 +241,11 @@ struct ProviderKeyCard: View {
     private var badgeText: String {
         switch keyState {
         case .available: return "密钥已保存"
+        // A presence query proved the item exists but handed this process no
+        // data, so the badge claims only the save and flags the unverified
+        // read. It must not slide to "尚未保存" — a save demonstrably happened
+        // — nor to the bare `.available` copy, which reads as "usable now".
+        case .saved: return "密钥已保存（尚未读取验证）"
         case .absent: return "尚未保存"
         case .readDenied: return "钥匙串读取失败"
         case .undecodable: return "密钥无法解析"
@@ -251,6 +256,11 @@ struct ProviderKeyCard: View {
     private var badgeColor: Color {
         switch keyState {
         case .available: return DS.Colors.success
+        // Presence is evidence of a save, not of readiness: neutral primary
+        // text rather than the success green `.available` earns by holding the
+        // value, and rather than the warning amber reserved for states that
+        // block use outright.
+        case .saved: return DS.Colors.textPrimary
         case .absent: return DS.Colors.textSecondary
         // The key is saved; the problem is access, not a missing save. Warning
         // color, never the "you must save a key" treatment.
