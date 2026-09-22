@@ -70,7 +70,8 @@ enum KeychainStore {
     /// Read the stored UTF-8 string for the given key. Returns nil if
     /// nothing was ever stored, or if the item exists but isn't valid
     /// UTF-8 (shouldn't happen for keys written via `set`).
-    static func get(forKey key: String, allowInteraction: Bool = true) -> String? {
+    static func get(forKey key: String, allowInteraction: Bool = true,
+                    onFailure: ((OSStatus) -> Void)? = nil) -> String? {
         if let cached = unlockedValues.object(forKey: key as NSString) { return cached as String }
         var query: [String: Any] = [
             kSecClass as String:       kSecClassGenericPassword,
@@ -90,6 +91,7 @@ enum KeychainStore {
         guard status == errSecSuccess,
               let data = item as? Data,
               let string = String(data: data, encoding: .utf8) else {
+            onFailure?(status == errSecSuccess ? errSecDecode : status)
             return nil
         }
         unlockedValues.setObject(string as NSString, forKey: key as NSString)

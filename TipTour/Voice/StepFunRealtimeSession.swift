@@ -36,13 +36,19 @@ import Foundation
 /// what it will speak next, so keep it short and plain.
 @MainActor
 protocol StepFunRealtimeToolHandling {
+    var preservesTaskLifetime: Bool { get }
+    var taskContext: String? { get }
     func handleToolCall(name: String, argumentsJSON: String) async throws -> String
     func interrupt()
+    func prepareForUserSpeech()
     func beginUserTurn(_ turnID: String)
 }
 
 extension StepFunRealtimeToolHandling {
+    var preservesTaskLifetime: Bool { false }
+    var taskContext: String? { nil }
     func interrupt() {}
+    func prepareForUserSpeech() {}
     func beginUserTurn(_ turnID: String) {}
 }
 
@@ -355,6 +361,7 @@ final class StepFunRealtimeSession {
 
     struct SyntheticProbeResult {
         let timedOut: Bool
+        let inputTranscript: String
         let renderedTexts: [String]
         let audio: Data
         let error: String?
@@ -404,7 +411,8 @@ final class StepFunRealtimeSession {
                     break
                 }
             }
-            let result = SyntheticProbeResult(timedOut: !completed, renderedTexts: renderedTexts,
+            let result = SyntheticProbeResult(timedOut: !completed, inputTranscript: state.lastInputTranscript,
+                renderedTexts: renderedTexts,
                 audio: capturedAudio, error: state.errorMessage)
             await stop()
             return result
@@ -471,6 +479,7 @@ final class StepFunRealtimeSession {
     }
 
     func stop() async {
+        if toolHandler.preservesTaskLifetime { toolHandler.interrupt() }
         sessionRunID += 1
         // Mark the session down before teardown so an event already in flight
         // takes the early-return path in handle() instead of touching a player
@@ -605,7 +614,7 @@ final class StepFunRealtimeSession {
 
     // MARK: - Server events
 
-    private func handle(_ event: StepFunRealtimeEvent) {
+    func handle(_ event: StepFunRealtimeEvent) {
         // Events can already be in flight when stop() runs. Acting on one after
         // teardown would touch a detached player or a cancelled tool call.
         guard state.isSessionActive || state.isConnecting else { return }
@@ -613,6 +622,7 @@ final class StepFunRealtimeSession {
         switch event {
         case .sessionReady:
             print("[StepFunRealtimeSession] Session ready")
+            refreshTaskContext()
 
         case .sessionConfigured(let voiceMatchesRequest, let effectiveVoice):
             DesktopVoiceTrace.event("realtime_voice_configured", turnID: currentTurnID,
@@ -709,6 +719,13 @@ final class StepFunRealtimeSession {
             playbackProbeSpeechStarts += 1
             #endif
             didRequestDesktopTaskThisUtterance = false
+            // Always pause the application task, including while the realtime
+            // response is idle after an asynchronous task admission.
+            if toolHandler.preservesTaskLifetime {
+                audioPlayer.clearQueuedAudio()
+                state.isModelSpeaking = false
+                toolHandler.prepareForUserSpeech()
+            }
             print("[StepFunRealtimeSession] speech started, phase=\(turnLifecycle.phase), queued=\(audioPlayer.pendingBufferCount)")
             handleUserStartedSpeaking()
             currentTurnID = UUID().uuidString
@@ -716,6 +733,7 @@ final class StepFunRealtimeSession {
             currentUserSpeechStoppedAt = nil
             currentResponseCreatedAt = nil
             toolHandler.beginUserTurn(currentTurnID)
+            refreshTaskContext()
             DesktopVoiceTrace.event("user_turn_started", turnID: currentTurnID)
 
         case .userStoppedSpeaking:
@@ -744,7 +762,8 @@ final class StepFunRealtimeSession {
     // MARK: - Turn handling
 
     private func startToolWork(callID: String, name: String, argumentsJSON: String) {
-        let repeatedDesktopTask = name == "act_on_screen" && didRequestDesktopTaskThisUtterance
+        let isTaskRequest = name == "act_on_screen" || name == "task_control"
+        let repeatedDesktopTask = isTaskRequest && didRequestDesktopTaskThisUtterance
         // Reject additional model calls without cancelling or replacing the
         // first accepted task. Only a user interruption can supersede it.
         if repeatedDesktopTask || pendingToolWork != nil {
@@ -758,7 +777,7 @@ final class StepFunRealtimeSession {
             return
         }
         state.lastToolActivity = name == "describe_screen" ? "读取屏幕" : "处理桌面任务"
-        if name == "act_on_screen" { didRequestDesktopTaskThisUtterance = true }
+        if isTaskRequest { didRequestDesktopTaskThisUtterance = true }
 
         // The model may start a spoken preamble around the same time as its
         // function call. Once a real tool call exists, that preamble is both
@@ -922,7 +941,7 @@ final class StepFunRealtimeSession {
                   callSequence == self.pendingToolCallSequence,
                   self.turnLifecycle.phase == .awaitingToolResult else { return }
 
-            let isActionResult = self.pendingToolName == "act_on_screen"
+            let isActionResult = self.pendingToolName == "act_on_screen" || self.pendingToolName == "task_control"
             let receipt = isActionResult
                 ? try? JSONDecoder().decode(DesktopTaskReceipt.self, from: Data(output.utf8))
                 : nil
@@ -1005,7 +1024,7 @@ final class StepFunRealtimeSession {
     }
 
     private func cancelOutstandingToolWork() {
-        toolHandler.interrupt()
+        if !toolHandler.preservesTaskLifetime { toolHandler.interrupt() }
         pendingToolWork?.cancel()
         pendingToolWork = nil
         pendingToolCallID = nil
@@ -1020,6 +1039,11 @@ final class StepFunRealtimeSession {
     private func resetTurnTranscripts() {
         state.lastInputTranscript = ""
         state.lastOutputTranscript = ""
+    }
+
+    func refreshTaskContext() {
+        guard let context = toolHandler.taskContext else { return }
+        client.updateTaskContext(context)
     }
 
     /// One explicit session rebuild for the discarded-follow-up race.

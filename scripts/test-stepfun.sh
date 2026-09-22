@@ -36,6 +36,8 @@ cp "$project_dir/TipTour/Voice/StepFunRealtimeTools.swift" \
    "$project_dir/TipTour/Voice/DesktopTaskContract.swift" \
    "$project_dir/TipTour/Voice/DesktopDecisionPacket.swift" \
    "$project_dir/TipTour/Voice/DesktopTaskCoordinator.swift" \
+   "$project_dir/TipTour/Voice/DesktopTaskAdmission.swift" \
+   "$project_dir/TipTour/Voice/DesktopTaskJournal.swift" \
    "$project_dir/TipTour/Voice/DesktopVoiceTrace.swift" \
    "$project_dir/TipTour/Perception/LocalTargetContinuity.swift" \
    "$test_dir/Sources/StepFunVoiceCore/"

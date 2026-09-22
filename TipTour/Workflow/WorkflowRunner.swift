@@ -37,6 +37,23 @@ final class WorkflowRunner: ObservableObject {
 
     static let shared = WorkflowRunner()
 
+    private let captureScreens: @MainActor () async -> [CompanionScreenCapture]
+
+    init(captureScreens: (@MainActor () async -> [CompanionScreenCapture])? = nil) {
+        self.captureScreens = captureScreens ?? { await WorkflowRunner.captureAllScreens() }
+    }
+
+    enum TerminalStatus: Equatable {
+        case completed
+        case stopped
+        case skipped
+    }
+
+    struct Settlement: Equatable {
+        let operationID: UUID
+        let status: TerminalStatus
+    }
+
     /// The currently-active plan, or nil if no workflow is running.
     @Published private(set) var activePlan: WorkflowPlan?
 
@@ -75,6 +92,7 @@ final class WorkflowRunner: ObservableObject {
         case actionRequiresAutopilot(label: String)
         /// A typed request no longer points at the focused field it named.
         case inputTargetChanged
+        case userSpeaking
 
         var humanReadable: String {
             switch self {
@@ -91,6 +109,8 @@ final class WorkflowRunner: ObservableObject {
                 return "\"\(label)\" needs Autopilot"
             case .inputTargetChanged:
                 return "input target changed; no text was sent"
+            case .userSpeaking:
+                return "user speaking; task retained"
             }
         }
     }
@@ -153,6 +173,51 @@ final class WorkflowRunner: ObservableObject {
     ///   5. WITH TOKEN: the A callback sees the token mismatch and exits
     private var currentOperationToken: UUID?
 
+    var currentOperationID: UUID? { currentOperationToken }
+    private(set) var lastSettlement: Settlement?
+    private var settlements: [Settlement] = []
+    private var deliveryTasks: [UUID: Task<Void, Error>] = [:]
+    private var deliveryEvidence: [UUID: DesktopActionDelivery] = [:]
+    private var deliveryStarted = false
+
+    var isBusy: Bool { activePlan != nil || !deliveryTasks.isEmpty }
+
+    func settlement(for operationID: UUID) -> Settlement? {
+        settlements.last { $0.operationID == operationID }
+    }
+
+    func isDelivering(_ operationID: UUID) -> Bool {
+        deliveryTasks[operationID] != nil
+    }
+
+    func delivery(for operationID: UUID) -> DesktopActionDelivery {
+        deliveryEvidence[operationID] ?? .unknown
+    }
+
+    func pauseBeforeDelivery(traceID: String) {
+        guard activePlan?.traceID == traceID, !deliveryStarted else { return }
+        pause(.userSpeaking)
+    }
+
+    // Own the actual driver lifetime, not just its caller's wait. A stopped
+    // operation cannot release the desktop while its driver is still returning.
+    func performAction(operationID: UUID,
+                       action: @escaping @MainActor () async throws -> Void) async throws {
+        guard DesktopTaskAdmission.allowsCurrentTask,
+              currentOperationToken == operationID, pausedReason == nil,
+              !deliveryStarted, !Task.isCancelled else { throw CancellationError() }
+        deliveryStarted = true
+        let delivery = Task { @MainActor in
+            try Task.checkCancellation()
+            self.deliveryEvidence[operationID] = .unknown
+            try await action()
+            self.deliveryEvidence[operationID] = .sent
+        }
+        deliveryTasks[operationID] = delivery
+        defer { deliveryTasks.removeValue(forKey: operationID) }
+        try await delivery.value
+    }
+
     /// AX-tree fingerprint snapshotted just before we arm the click
     /// detector. Used by the post-click validator to decide whether
     /// the click actually changed UI state — if the hash is identical
@@ -202,6 +267,12 @@ final class WorkflowRunner: ObservableObject {
         let traceID = plan.traceID ?? TipTourActionTrace.makeID(source: "workflow")
         let tracedPlan = plan.withTraceID(traceID)
 
+        guard !isBusy, DesktopTaskAdmission.allowsCurrentTask else {
+            recordWorkflowEvent(name: "start", status: "rejected", message: "Desktop execution is busy.",
+                                metadata: workflowPlanMetadata(tracedPlan))
+            return
+        }
+
         guard !tracedPlan.steps.isEmpty else {
             print("[Workflow] ignoring plan with no steps")
             recordWorkflowEvent(
@@ -235,6 +306,8 @@ final class WorkflowRunner: ObservableObject {
         activeStepResolutionTask?.cancel()
         let freshOperationToken = UUID()
         currentOperationToken = freshOperationToken
+        deliveryStarted = false
+        deliveryEvidence[freshOperationToken] = .notSent
         activePlan = singleActionPlan
         activeStepIndex = 0
         currentStepResolutionFailureLabel = nil
@@ -281,7 +354,18 @@ final class WorkflowRunner: ObservableObject {
 
     /// Clear any active plan. Called when the user starts a new
     /// interaction or the session ends.
-    func stop() {
+    func stop() { finishOperation(as: .stopped) }
+
+    func stop(operationID: UUID) {
+        guard currentOperationToken == operationID else { return }
+        stop()
+    }
+
+    private func finishOperation(as terminalStatus: TerminalStatus) {
+        let stoppingOperationID = currentOperationToken
+        if terminalStatus != .completed, let stoppingOperationID {
+            deliveryTasks[stoppingOperationID]?.cancel()
+        }
         activeStepResolutionTask?.cancel()
         activeStepResolutionTask = nil
         currentOperationToken = nil
@@ -306,6 +390,15 @@ final class WorkflowRunner: ObservableObject {
         preClickAccessibilityFingerprint = nil
         planTargetAppBundleID = nil
         ClickDetector.shared.disarm()
+        if let stoppingOperationID {
+            let settlement = Settlement(operationID: stoppingOperationID, status: terminalStatus)
+            lastSettlement = settlement
+            settlements.append(settlement)
+            if settlements.count > 64 {
+                let expired = settlements.removeFirst()
+                if deliveryTasks[expired.operationID] == nil { deliveryEvidence.removeValue(forKey: expired.operationID) }
+            }
+        }
         print("[Workflow] stopped")
         if let stoppedPlan {
             recordWorkflowEvent(
@@ -344,7 +437,13 @@ final class WorkflowRunner: ObservableObject {
     /// switched back to the right app.
     func resume() {
         guard activePlan != nil, pausedReason != nil else { return }
-        guard let token = currentOperationToken else { return }
+        guard !deliveryStarted, deliveryTasks.isEmpty, currentOperationToken != nil else { return }
+        let token = UUID()
+        if let previous = currentOperationToken {
+            settlements.append(Settlement(operationID: previous, status: .stopped))
+        }
+        currentOperationToken = token
+        deliveryEvidence[token] = .notSent
         print("[Workflow] user resumed paused plan")
         recordWorkflowEvent(
             name: "resume",
@@ -389,14 +488,20 @@ final class WorkflowRunner: ObservableObject {
         )
         currentStepResolutionFailureLabel = nil
         pausedReason = nil
-        advanceUsingCachedHandlers(isPostClick: false)
+        finishOperation(as: .skipped)
     }
 
     /// Retry resolving the current step from scratch — re-captures the
     /// screen and reruns the full resolver cascade. Used when an
     /// earlier attempt timed out and the user taps "Try again".
     func retryCurrentStep() {
-        guard let token = currentOperationToken else { return }
+        guard !deliveryStarted, deliveryTasks.isEmpty, currentOperationToken != nil else { return }
+        let token = UUID()
+        if let previous = currentOperationToken {
+            settlements.append(Settlement(operationID: previous, status: .stopped))
+        }
+        currentOperationToken = token
+        deliveryEvidence[token] = .notSent
         print("[Workflow] user retrying step \(activeStepIndex + 1)")
         recordWorkflowEvent(
             name: "retry_step",
@@ -527,7 +632,7 @@ final class WorkflowRunner: ObservableObject {
                     uniquingKeysWith: { existing, _ in existing }
                 )
             )
-            stop()
+            finishOperation(as: .completed)
             return
         }
         activeStepIndex += 1
@@ -564,7 +669,8 @@ final class WorkflowRunner: ObservableObject {
             return
         }
 
-        let freshCaptures = await Self.captureAllScreens()
+        let freshCaptures = await captureScreens()
+        guard operationToken == currentOperationToken, !Task.isCancelled else { return }
         recordWorkflowEvent(
             name: "capture_for_resolution",
             status: freshCaptures.isEmpty ? "warning" : "ok",
@@ -616,7 +722,7 @@ final class WorkflowRunner: ObservableObject {
                         uniquingKeysWith: { existing, _ in existing }
                     )
                 )
-                advanceUsingCachedHandlers(isPostClick: false)
+                stop()
                 return
             }
             await resolveActiveStepWithRetryBudget(
@@ -683,7 +789,7 @@ final class WorkflowRunner: ObservableObject {
 
         case .waitForState:
             print("[Workflow] step \"\(step.hint)\" is .waitForState — not yet implemented, skipping")
-            advanceUsingCachedHandlers(isPostClick: false)
+            finishOperation(as: .skipped)
         }
     }
 
@@ -772,7 +878,7 @@ final class WorkflowRunner: ObservableObject {
 
             // Pass 2: refresh the screenshot (app may have redrawn since
             // the last capture) and try Gemini's box_2d fallback.
-            latestAllCaptures = await Self.captureAllScreens()
+            latestAllCaptures = await captureScreens()
             let pickedCapture = latestAllCaptures.first(where: { $0.isCursorScreen }) ?? latestAllCaptures.first
             latestCaptureForActivePlan = pickedCapture
 
@@ -1003,22 +1109,21 @@ final class WorkflowRunner: ObservableObject {
                 return AccessibilityTreeResolver().runningAppMatching(hint: hint)
             }()
             do {
-                switch stepType {
-                case .rightClick:
-                    try await ActionExecutor.shared.rightClick(
-                        atGlobalScreenPoint: resolution.globalScreenPoint,
-                        activatingTargetApp: targetApp
-                    )
-                case .doubleClick:
-                    try await ActionExecutor.shared.doubleClick(
-                        atGlobalScreenPoint: resolution.globalScreenPoint,
-                        activatingTargetApp: targetApp
-                    )
-                default:
-                    try await ActionExecutor.shared.click(
-                        atGlobalScreenPoint: resolution.globalScreenPoint,
-                        activatingTargetApp: targetApp
-                    )
+                try await self.performAction(operationID: operationToken) {
+                    switch stepType {
+                    case .rightClick:
+                        try await ActionExecutor.shared.rightClick(
+                            atGlobalScreenPoint: resolution.globalScreenPoint,
+                            activatingTargetApp: targetApp)
+                    case .doubleClick:
+                        try await ActionExecutor.shared.doubleClick(
+                            atGlobalScreenPoint: resolution.globalScreenPoint,
+                            activatingTargetApp: targetApp)
+                    default:
+                        try await ActionExecutor.shared.click(
+                            atGlobalScreenPoint: resolution.globalScreenPoint,
+                            activatingTargetApp: targetApp)
+                    }
                 }
                 guard operationToken == self.currentOperationToken else { return }
                 guard self.activePlan != nil, self.pausedReason == nil else { return }
@@ -1042,12 +1147,14 @@ final class WorkflowRunner: ObservableObject {
         let applicationName = step.label ?? activePlan?.app
         guard let applicationName, !applicationName.isEmpty else {
             print("[Workflow] openApp step has no application name — skipping")
-            advanceUsingCachedHandlers(isPostClick: false)
+            stop()
             return
         }
 
         do {
-            try await ActionExecutor.shared.openApplication(named: applicationName)
+            try await performAction(operationID: operationToken) {
+                try await ActionExecutor.shared.openApplication(named: applicationName)
+            }
             guard operationToken == currentOperationToken else { return }
             advanceUsingCachedHandlers(isPostClick: true)
         } catch {
@@ -1066,15 +1173,15 @@ final class WorkflowRunner: ObservableObject {
         }
         guard let rawURLString = step.label, !rawURLString.isEmpty else {
             print("[Workflow] openURL step has no URL — skipping")
-            advanceUsingCachedHandlers(isPostClick: false)
+            stop()
             return
         }
 
         do {
-            try await ActionExecutor.shared.openURL(
-                rawURLString,
-                preferredApplicationName: activePlan?.app
-            )
+            let preferredApplicationName = activePlan?.app
+            try await performAction(operationID: operationToken) {
+                try await ActionExecutor.shared.openURL(rawURLString, preferredApplicationName: preferredApplicationName)
+            }
             guard operationToken == currentOperationToken else { return }
             advanceUsingCachedHandlers(isPostClick: true)
         } catch {
@@ -1096,7 +1203,7 @@ final class WorkflowRunner: ObservableObject {
         }
         guard let shortcut = step.label, !shortcut.isEmpty else {
             print("[Workflow] keyboard shortcut step has no label — skipping")
-            advanceUsingCachedHandlers(isPostClick: false)
+            stop()
             return
         }
 
@@ -1105,10 +1212,9 @@ final class WorkflowRunner: ObservableObject {
             return AccessibilityTreeResolver().runningAppMatching(hint: hint)
         }()
         do {
-            try await ActionExecutor.shared.pressKeyboardShortcut(
-                shortcut,
-                activatingTargetApp: targetApp
-            )
+            try await performAction(operationID: operationToken) {
+                try await ActionExecutor.shared.pressKeyboardShortcut(shortcut, activatingTargetApp: targetApp)
+            }
             guard operationToken == currentOperationToken else { return }
             advanceUsingCachedHandlers(isPostClick: false)
         } catch {
@@ -1127,16 +1233,15 @@ final class WorkflowRunner: ObservableObject {
         }
         guard let keyName = step.label, !keyName.isEmpty else {
             print("[Workflow] pressKey step has no key — skipping")
-            advanceUsingCachedHandlers(isPostClick: false)
+            stop()
             return
         }
 
         let targetApp = targetAppForActivePlan()
         do {
-            try await ActionExecutor.shared.pressKey(
-                keyName,
-                activatingTargetApp: targetApp
-            )
+            try await performAction(operationID: operationToken) {
+                try await ActionExecutor.shared.pressKey(keyName, activatingTargetApp: targetApp)
+            }
             guard operationToken == currentOperationToken else { return }
             advanceUsingCachedHandlers(isPostClick: false)
         } catch {
@@ -1160,7 +1265,7 @@ final class WorkflowRunner: ObservableObject {
         let textToType = step.value ?? step.label
         guard let textToType, !textToType.isEmpty else {
             print("[Workflow] type step has no text — skipping")
-            advanceUsingCachedHandlers(isPostClick: false)
+            stop()
             return
         }
 
@@ -1190,10 +1295,9 @@ final class WorkflowRunner: ObservableObject {
                     return
                 }
             }
-            try await ActionExecutor.shared.typeText(
-                textToType,
-                activatingTargetApp: targetApp
-            )
+            try await performAction(operationID: operationToken) {
+                try await ActionExecutor.shared.typeText(textToType, activatingTargetApp: targetApp)
+            }
             guard operationToken == currentOperationToken else { return }
             advanceUsingCachedHandlers(isPostClick: false)
         } catch {
@@ -1213,16 +1317,15 @@ final class WorkflowRunner: ObservableObject {
         let valueToSet = step.value ?? step.label
         guard let valueToSet, !valueToSet.isEmpty else {
             print("[Workflow] setValue step has no value — skipping")
-            advanceUsingCachedHandlers(isPostClick: false)
+            stop()
             return
         }
 
         let targetApp = targetAppForActivePlan()
         do {
-            try await ActionExecutor.shared.setFocusedValue(
-                valueToSet,
-                activatingTargetApp: targetApp
-            )
+            try await performAction(operationID: operationToken) {
+                try await ActionExecutor.shared.setFocusedValue(valueToSet, activatingTargetApp: targetApp)
+            }
             guard operationToken == currentOperationToken else { return }
             advanceUsingCachedHandlers(isPostClick: true)
         } catch {
@@ -1245,12 +1348,10 @@ final class WorkflowRunner: ObservableObject {
 
         let targetApp = targetAppForActivePlan()
         do {
-            try await ActionExecutor.shared.scroll(
-                direction: direction,
-                amount: amount,
-                by: granularity,
-                activatingTargetApp: targetApp
-            )
+            try await performAction(operationID: operationToken) {
+                try await ActionExecutor.shared.scroll(direction: direction, amount: amount,
+                    by: granularity, activatingTargetApp: targetApp)
+            }
             guard operationToken == currentOperationToken else { return }
             advanceUsingCachedHandlers(isPostClick: true)
         } catch {

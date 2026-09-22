@@ -44,6 +44,8 @@ cp "$project_dir/TipTour/Voice/StepFunRealtimeClient.swift" \
    "$project_dir/TipTour/Voice/PCM16AudioConverter.swift" \
    "$project_dir/TipTour/Voice/StepFunVisionClient.swift" \
    "$project_dir/TipTour/Voice/DesktopTaskCoordinator.swift" \
+   "$project_dir/TipTour/Voice/DesktopTaskAdmission.swift" \
+   "$project_dir/TipTour/Voice/DesktopTaskJournal.swift" \
    "$project_dir/TipTour/Voice/DesktopTaskContract.swift" \
    "$project_dir/TipTour/Voice/DesktopDecisionPacket.swift" \
    "$project_dir/TipTour/Voice/DesktopApplicationResolver.swift" \
@@ -66,6 +68,9 @@ sed 's/@testable import TipTour/@testable import StepFunVoiceLifecycle/' \
 sed 's/@testable import TipTour/@testable import StepFunVoiceLifecycle/' \
     "$project_dir/TipTourTests/DesktopTaskCoordinatorTests.swift" \
     > "$test_dir/Tests/StepFunVoiceLifecycleTests/DesktopTaskCoordinatorTests.swift"
+sed 's/@testable import TipTour/@testable import StepFunVoiceLifecycle/' \
+    "$project_dir/TipTourTests/DesktopTaskContinuityTests.swift" \
+    > "$test_dir/Tests/StepFunVoiceLifecycleTests/DesktopTaskContinuityTests.swift"
 sed 's/@testable import TipTour/@testable import StepFunVoiceLifecycle/' \
     "$project_dir/TipTourTests/DesktopControlContractTests.swift" \
     > "$test_dir/Tests/StepFunVoiceLifecycleTests/DesktopControlContractTests.swift"

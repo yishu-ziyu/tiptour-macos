@@ -17,8 +17,11 @@ final class DesktopControlContractTests: XCTestCase {
     }
 
     func testReceiptCompletionStatusAloneCannotProduceSuccessSpeech() {
+        // Two-layer facts: the click was delivered, but the step demanded an
+        // outcome that nobody observed, so it is not satisfied.
         let record = DesktopActionRecord(id: "attempt", observationID: "obs", app: "fixture", targetID: target.id,
-            label: target.label, action: .click, decisionPacket: nil, delivery: .sent, verified: false, detail: "page changed")
+            label: target.label, action: .click, decisionPacket: nil, completionPolicy: .outcomeRequired,
+            delivery: .sent, outcomeEvidence: .notObserved, detail: "page changed")
         let receipt = DesktopTaskReceipt(goal: "打开 os", status: "completed", actions: [record.summary],
             detail: "model said done", currentActions: [record])
         XCTAssertTrue(receipt.spokenSummary.contains("没有确认"))
@@ -78,7 +81,8 @@ final class DesktopControlContractTests: XCTestCase {
             return DesktopTaskDecision(targetID: nil, action: "none", completed: false, reason: "")
         }, executeStep: { _, _, _, step in
             dispatched.append(step.action)
-            return DesktopTaskActionResult(completed: true, detail: "application foreground verified", resultingApp: "target")
+            return DesktopTaskActionResult(delivery: .sent, outcomeEvidence: .systemVerified,
+                detail: "application foreground verified", resultingApp: "target")
         })
         let result = await runner.run(goal: "打开计算器", steps: [
             DesktopActionStep(action: .openApp, application: "计算器")
@@ -102,7 +106,7 @@ final class DesktopControlContractTests: XCTestCase {
                 targetProbability: 0.91, targetMargin: 0.74)
         }, executeStep: { _, _, _, selectedStep in
             executedActions.append(selectedStep.action)
-            return DesktopTaskActionResult(completed: true, detail: "verified")
+            return DesktopTaskActionResult(delivery: .sent, outcomeEvidence: .systemVerified, detail: "verified")
         })
         let result = await runner.run(goal: "打开那个项目", steps: [step])
         XCTAssertEqual(executedActions, [.doubleClick])
@@ -125,7 +129,7 @@ final class DesktopControlContractTests: XCTestCase {
                 targetProbability: 0.88)
         }, executeStep: { _, _, _, selectedStep in
             executedActions.append(selectedStep.action)
-            return DesktopTaskActionResult(completed: true, detail: "verified")
+            return DesktopTaskActionResult(delivery: .sent, outcomeEvidence: .systemVerified, detail: "verified")
         })
         let result = await runner.run(goal: "右键目标", steps: [step])
         XCTAssertEqual(executedActions, [.rightClick])
@@ -191,8 +195,11 @@ final class DesktopControlContractTests: XCTestCase {
     }
 
     func testUnverifiedOpenApplicationSpeechNeverClaimsSuccess() {
+        // open_app is always outcome-required: the request was delivered, but
+        // no visible foreground window was ever confirmed.
         let record = DesktopActionRecord(id: "attempt", observationID: "obs", app: "fixture", targetID: nil,
-            label: "豆包", action: .openApp, decisionPacket: nil, delivery: .sent, verified: false,
+            label: "豆包", action: .openApp, decisionPacket: nil, completionPolicy: .outcomeRequired,
+            delivery: .sent, outcomeEvidence: .notObserved,
             detail: "目标应用进程已运行，但当前没有可见窗口，不能报告已打开。")
         let receipt = DesktopTaskReceipt(goal: "打开豆包", status: "paused", actions: [record.summary],
             detail: record.detail, currentActions: [record])
@@ -243,7 +250,7 @@ final class DesktopControlContractTests: XCTestCase {
                 return DesktopTaskDecision(targetID: self.target.id, action: "click", completed: false, reason: "1.0")
             }, execute: { _, _, _, _ in
                 XCTFail("No unrelated click")
-                return DesktopTaskActionResult(completed: false, detail: "unexpected")
+                return DesktopTaskActionResult(delivery: .notSent, outcomeEvidence: .notObserved, detail: "unexpected")
             })
         let result = await runner.run(goal: "点击不存在的目标", namedTarget: "missing")
         XCTAssertEqual(result.status, "needs_clarification")
@@ -259,7 +266,7 @@ final class DesktopControlContractTests: XCTestCase {
                 return DesktopTaskDecision(targetID: nil, action: "none", completed: false, reason: "")
             }, execute: { _, _, _, _ in
                 dispatches += 1
-                return DesktopTaskActionResult(completed: true, detail: "unexpected")
+                return DesktopTaskActionResult(delivery: .notSent, outcomeEvidence: .notObserved, detail: "unexpected")
             })
         let result = await runner.run(goal: "点击 os", namedTarget: "os")
         XCTAssertEqual(dispatches, 0)
@@ -276,7 +283,7 @@ final class DesktopControlContractTests: XCTestCase {
             DesktopTaskDecision(targetID: self.target.id, action: "click", completed: false, reason: "chosen")
         }, execute: { _, _, _, _ in
             XCTFail("A recycled ID is not the same target")
-            return DesktopTaskActionResult(completed: false, detail: "unexpected")
+            return DesktopTaskActionResult(delivery: .notSent, outcomeEvidence: .notObserved, detail: "unexpected")
         })
         let result = await runner.run(goal: "点击刚才那个")
         XCTAssertEqual(result.status, "paused")
@@ -291,7 +298,8 @@ final class DesktopControlContractTests: XCTestCase {
                 return DesktopTaskDecision(targetID: nil, action: "none", completed: false, reason: "")
             }, execute: { _, _, _, _ in
                 dispatches += 1
-                return DesktopTaskActionResult(completed: false, detail: "driver sent but goal unverified", delivery: .sent)
+                return DesktopTaskActionResult(delivery: .sent, outcomeEvidence: .notObserved,
+                    detail: "driver sent but goal unverified")
             })
         let result = await runner.run(goal: "执行两个明确步骤", steps: [
             DesktopActionStep(targetLabel: target.label), DesktopActionStep(targetLabel: target.label)
@@ -311,7 +319,7 @@ final class DesktopControlContractTests: XCTestCase {
             return DesktopTaskDecision(targetID: nil, action: "none", completed: false, reason: "")
         }, execute: { _, _, target, _ in
             clicked.append(target.id)
-            return DesktopTaskActionResult(completed: true, detail: "independent state confirmed")
+            return DesktopTaskActionResult(delivery: .sent, outcomeEvidence: .systemVerified, detail: "independent state confirmed")
         })
         _ = await runner.run(goal: "两个步骤", steps: [DesktopActionStep(targetLabel: target.label), DesktopActionStep(targetLabel: second.label)])
         secondVisible = true
@@ -330,7 +338,7 @@ final class DesktopControlContractTests: XCTestCase {
                 return DesktopTaskDecision(targetID: nil, action: "none", completed: false, reason: "")
             }, executeStep: { _, _, _, _ in
                 dispatches += 1
-                return DesktopTaskActionResult(completed: false, detail: "unknown", delivery: .unknown)
+                return DesktopTaskActionResult(delivery: .unknown, outcomeEvidence: .notObserved, detail: "unknown")
             })
         _ = await runner.run(goal: "向下滚动", steps: [DesktopActionStep(action: .scroll, direction: "down")])
         let resumed = await runner.run(goal: "向下滚动", intent: .resume)
@@ -341,7 +349,8 @@ final class DesktopControlContractTests: XCTestCase {
     func testRejectedBeforeDispatchHasNoNewActionClaim() async {
         let runner = DesktopTaskCoordinator(observe: { DesktopTaskObservation(app: "fixture", targets: [self.target]) },
             decide: { _, _, _, _ in DesktopTaskDecision(targetID: nil, action: "none", completed: false, reason: "") },
-            execute: { _, _, _, _ in DesktopTaskActionResult(completed: false, detail: "权限不足。", delivery: .notSent) })
+            execute: { _, _, _, _ in DesktopTaskActionResult(delivery: .notSent, outcomeEvidence: .notObserved,
+                detail: "权限不足。") })
         let result = await runner.run(goal: "点击 os", namedTarget: "os")
         XCTAssertTrue(result.actions.isEmpty)
         XCTAssertTrue(result.spokenSummary.contains("没有执行"))
@@ -361,7 +370,7 @@ final class DesktopControlContractTests: XCTestCase {
         }, execute: { _, _, selected, _ in
             clicked.append(selected.id)
             if clicked.count == 1 { runner.interrupt() }
-            return DesktopTaskActionResult(completed: true, detail: "独立结果已确认")
+            return DesktopTaskActionResult(delivery: .sent, outcomeEvidence: .systemVerified, detail: "独立结果已确认")
         })
         let interrupted = await runner.run(goal: "两个明确步骤", steps: [
             DesktopActionStep(targetLabel: target.label), DesktopActionStep(targetLabel: second.label)
@@ -386,7 +395,7 @@ final class DesktopControlContractTests: XCTestCase {
             return DesktopTaskDecision(targetID: nil, action: "none", completed: false, reason: "")
         }, execute: { _, _, selected, _ in
             clicked.append(selected.id)
-            return DesktopTaskActionResult(completed: true, detail: "独立结果已确认")
+            return DesktopTaskActionResult(delivery: .sent, outcomeEvidence: .systemVerified, detail: "独立结果已确认")
         })
         _ = await runner.run(goal: "旧任务", steps: [
             DesktopActionStep(targetLabel: target.label), DesktopActionStep(targetLabel: second.label)

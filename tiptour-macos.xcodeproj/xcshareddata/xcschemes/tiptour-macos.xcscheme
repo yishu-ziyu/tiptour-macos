@@ -16,7 +16,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "28F22CBE2F56440300A0FC59"
-               BuildableName = "TipTour.app"
+               BuildableName = "Her.app"
                BlueprintName = "tiptour-macos"
                ReferencedContainer = "container:tiptour-macos.xcodeproj">
             </BuildableReference>
@@ -69,7 +69,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "28F22CBE2F56440300A0FC59"
-            BuildableName = "TipTour.app"
+            BuildableName = "Her.app"
             BlueprintName = "tiptour-macos"
             ReferencedContainer = "container:tiptour-macos.xcodeproj">
          </BuildableReference>
@@ -86,7 +86,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "28F22CBE2F56440300A0FC59"
-            BuildableName = "TipTour.app"
+            BuildableName = "Her.app"
             BlueprintName = "tiptour-macos"
             ReferencedContainer = "container:tiptour-macos.xcodeproj">
          </BuildableReference>

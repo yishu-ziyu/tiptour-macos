@@ -54,9 +54,9 @@ final class DesktopTaskExecutor {
             let result = await engine.runPointerAction(PointerActionRequest(goal: goal, app: observation.app,
                 actionType: WorkflowStep.StepType.normalized(from: step.action.rawValue), targetLabel: target.label,
                 targetID: target.id, targetMark: nil, execute: true, allowScreenshotPlanning: false,
-                validateStateChange: true, traceID: observation.id))
-            delivery = result.workflowOutcome?.status == "completed" ? .sent
-                : ((result.submission?.acceptedSteps ?? 0) > 0 ? .unknown : .notSent)
+                validateStateChange: true, traceID: observation.actionAttemptID ?? observation.id))
+            delivery = result.workflowOutcome?.delivery
+                ?? ((result.submission?.acceptedSteps ?? 0) > 0 ? .unknown : .notSent)
         case .type, .pressKey, .shortcut, .scroll:
             let workflowType: WorkflowStep.StepType
             switch step.action {
@@ -74,8 +74,8 @@ final class DesktopTaskExecutor {
                 targetContext: step.action == .type ? .focusedElement : nil, hint: goal,
                 hintX: nil, hintY: nil, box2DNormalized: nil, screenNumber: nil)
             let result = await engine.submitSingleActionWorkflowPlanAndWait(WorkflowPlan(goal: goal,
-                app: observation.app, steps: [workflowStep], traceID: observation.id))
-            delivery = result.workflowOutcome?.status == "completed" ? .sent : (result.acceptedSteps > 0 ? .unknown : .notSent)
+                app: observation.app, steps: [workflowStep], traceID: observation.actionAttemptID ?? observation.id))
+            delivery = result.workflowOutcome?.delivery ?? (result.acceptedSteps > 0 ? .unknown : .notSent)
         case .openApp:
             preconditionFailure("open_app uses its dedicated fast path")
         }
@@ -83,21 +83,27 @@ final class DesktopTaskExecutor {
         guard delivery != .notSent else { return notSent("执行引擎没有接受该操作。") }
 
         guard let afterContext = currentContext(), afterContext.app == context.app else {
-            return DesktopTaskActionResult(completed: false, detail: "操作后前台应用改变，结果未确认。", delivery: delivery)
+            return DesktopTaskActionResult(delivery: delivery, outcomeEvidence: .notObserved,
+                detail: "操作后前台应用改变，结果未确认。")
         }
         let afterControls = await readAccessibility(processIdentifier: afterContext.processIdentifier)
         let targets = await engine.localPerceptionTargets(refresh: true, reason: "voice independent result verification")
         try Task.checkCancellation()
         guard currentContext()?.app == context.app, currentContext()?.windowID == afterContext.windowID else {
-            return DesktopTaskActionResult(completed: false, detail: "结果读回期间窗口变化，未确认完成。", delivery: delivery)
+            return DesktopTaskActionResult(delivery: delivery, outcomeEvidence: .notObserved,
+                detail: "结果读回期间窗口变化，未确认完成。")
         }
         let afterTargets = targets.targets.map {
             DesktopTaskTarget(id: $0.id, label: $0.label, source: $0.source, box: $0.globalBox, display: $0.displayFrame)
         }
         let verified = delivery == .sent && DesktopActionVerifier.verify(step: step, target: target,
             before: beforeControls, after: afterControls, beforeTargets: observation.targets, afterTargets: afterTargets)
-        return DesktopTaskActionResult(completed: verified,
-            detail: verified ? "独立读回已确认目标状态。" : "操作已尝试，但没有足够的目标结果证据。", delivery: delivery)
+        return DesktopTaskActionResult(delivery: delivery,
+            outcomeEvidence: verified ? .systemVerified : .notObserved,
+            detail: verified ? "独立读回已确认目标状态。" : "操作已尝试，但没有足够的目标结果证据。",
+            resultingScene: currentContext().map {
+                DesktopTaskSceneIdentity(app: $0.app, windowID: $0.windowID, contentVersion: $0.contentVersion)
+            })
     }
 
     private func readAccessibility(processIdentifier: pid_t) async -> [DesktopAccessibleControl] {
@@ -134,20 +140,20 @@ final class DesktopTaskExecutor {
             goal: goal,
             app: observation.app,
             steps: [workflowStep],
-            traceID: observation.id
+            traceID: observation.actionAttemptID ?? observation.id
         ))
         guard !Task.isCancelled else {
-            return DesktopTaskActionResult(completed: false, detail: "应用启动结果在取消后返回，未继续执行。",
-                delivery: result.acceptedSteps > 0 ? .unknown : .notSent,
+            return DesktopTaskActionResult(delivery: result.acceptedSteps > 0 ? .unknown : .notSent,
+                outcomeEvidence: .notObserved,
+                detail: "应用启动结果在取消后返回，未继续执行。",
                 failureStage: "cancel", reasonCode: "cancelled_after_dispatch")
         }
-        let delivery: DesktopActionDelivery = result.workflowOutcome?.status == "completed"
-            ? .sent : (result.acceptedSteps > 0 ? .unknown : .notSent)
+        let delivery = result.workflowOutcome?.delivery ?? (result.acceptedSteps > 0 ? .unknown : .notSent)
         guard delivery != .notSent else {
             return notSent("执行引擎没有接受应用启动操作。", stage: "workflow", reason: result.reason ?? "workflow_rejected")
         }
         var presence = await waitForUserVisibleApplication(resolvedApplication, timeout: 0.8)
-        if delivery == .sent, !presence.isUserVisible, !Task.isCancelled {
+        if delivery == .sent, !presence.isUserVisible, !Task.isCancelled, DesktopTaskAdmission.allowsCurrentTask {
             // Some Chromium/Electron wrappers keep a background process alive
             // after their last window closes. Launching that bundle can return
             // successfully without reopening a window. Ask LaunchServices to
@@ -157,8 +163,9 @@ final class DesktopTaskExecutor {
             presence = await waitForUserVisibleApplication(resolvedApplication, timeout: 1.2)
         }
         guard !Task.isCancelled else {
-            return DesktopTaskActionResult(completed: false, detail: "应用启动后任务被取消，未继续确认窗口。",
-                delivery: delivery, failureStage: "cancel", reasonCode: "cancelled_after_dispatch")
+            return DesktopTaskActionResult(delivery: delivery, outcomeEvidence: .notObserved,
+                detail: "应用启动后任务被取消，未继续确认窗口。",
+                failureStage: "cancel", reasonCode: "cancelled_after_dispatch")
         }
 
         let verified = delivery == .sent && presence.isUserVisible
@@ -178,10 +185,13 @@ final class DesktopTaskExecutor {
             reasonCode = "target_not_foreground"
         }
         return DesktopTaskActionResult(
-            completed: verified,
-            detail: detail,
             delivery: delivery,
+            outcomeEvidence: verified ? .systemVerified : .notObserved,
+            detail: detail,
             resultingApp: verified ? resolvedApplication.bundleIdentifier : nil,
+            resultingScene: currentContext().map {
+                DesktopTaskSceneIdentity(app: $0.app, windowID: $0.windowID, contentVersion: $0.contentVersion)
+            },
             failureStage: verified ? nil : "verify_application",
             reasonCode: reasonCode
         )
@@ -206,16 +216,14 @@ final class DesktopTaskExecutor {
         configuration.createsNewApplicationInstance = false
         configuration.addsToRecentItems = false
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            NSWorkspace.shared.openApplication(at: application.url, configuration: configuration) { runningApplication, _ in
-                runningApplication?.unhide()
-                runningApplication?.activate(options: [.activateAllWindows])
+            NSWorkspace.shared.openApplication(at: application.url, configuration: configuration) { _, _ in
                 continuation.resume()
             }
         }
     }
 
     private func notSent(_ detail: String, stage: String = "dispatch", reason: String = "not_sent") -> DesktopTaskActionResult {
-        DesktopTaskActionResult(completed: false, detail: detail, delivery: .notSent,
-            failureStage: stage, reasonCode: reason)
+        DesktopTaskActionResult(delivery: .notSent, outcomeEvidence: .notObserved,
+            detail: detail, failureStage: stage, reasonCode: reason)
     }
 }

@@ -240,7 +240,7 @@ final class GeminiLiveClient: @unchecked Sendable {
                                 ],
                                 "targetContext": [
                                     "type": "string",
-                                    "description": "Optional grounding target for generic action steps. Use 'currentHighlight' when the user referred to the painted highlight/current highlighted area; use 'currentSelection' for a native selected text range; use 'focusedElement' for the active focused field; use 'visibleElement' for ordinary visible UI targets. This lets TipTour bind type/delete/setValue/click actions to the right app/window/element/range without relying on labels alone.",
+                                    "description": "Optional grounding target for generic action steps. Use 'currentHighlight' when the user referred to the painted highlight/current highlighted area; use 'currentSelection' for a native selected text range; use 'focusedElement' for the active focused field; use 'visibleElement' for ordinary visible UI targets. This lets Her bind type/delete/setValue/click actions to the right app/window/element/range without relying on labels alone.",
                                     "enum": [
                                         "visibleElement",
                                         "currentHighlight",
@@ -279,7 +279,7 @@ final class GeminiLiveClient: @unchecked Sendable {
                 "properties": [
                     "title": [
                         "type": "string",
-                        "description": "Optional short title for the note. If omitted, TipTour will use the first line of the body."
+                        "description": "Optional short title for the note. If omitted, Her will use the first line of the body."
                     ],
                     "body": [
                         "type": "string",

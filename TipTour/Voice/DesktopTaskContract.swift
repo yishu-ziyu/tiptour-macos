@@ -145,8 +145,94 @@ enum DesktopTaskContractError: LocalizedError {
     }
 }
 
+// MARK: - Two-layer action facts: "what Her did" vs "what the action caused".
+//
+// `DesktopActionDelivery` records whether the input reached the target.
+// `DesktopActionOutcomeEvidence` records whether an independent read-back
+// proved the requested effect. They never substitute for each other:
+// a sent click is a delivered click, not a verified state change.
+
 enum DesktopActionDelivery: String, Codable {
     case notSent = "not_sent", unknown, sent
+}
+
+/// Code-owned rule for when a step counts as done. The model cannot choose it.
+/// Direct input actions without an explicit expected label only need proof of
+/// delivery; everything that claims a resulting state needs outcome evidence.
+enum DesktopStepCompletionPolicy: String, Codable {
+    case deliverySufficient = "delivery_sufficient"
+    case outcomeRequired = "outcome_required"
+
+    init(step: DesktopActionStep) {
+        switch step.action {
+        case .openApp, .type:
+            self = .outcomeRequired
+        case .click, .doubleClick, .rightClick, .pressKey, .shortcut, .scroll:
+            self = step.expectedLabel == nil ? .deliverySufficient : .outcomeRequired
+        }
+    }
+}
+
+/// Independent evidence about the effect, kept distinct from delivery.
+enum DesktopActionOutcomeEvidence: String, Codable {
+    case notObserved = "not_observed"
+    case systemVerified = "system_verified"
+    case userConfirmed = "user_confirmed"
+}
+
+/// Why a step counts as satisfied, for receipts, speech and telemetry.
+enum DesktopActionCompletionBasis: String, Codable {
+    case deliveryConfirmed = "delivery_confirmed"
+    case systemVerifiedOutcome = "system_verified_outcome"
+    case userConfirmedOutcome = "user_confirmed_outcome"
+}
+
+/// The single source of truth for step satisfaction. The coordinator, receipt
+/// wording and telemetry must all read these predicates instead of re-deriving
+/// their own completion rules.
+enum DesktopActionCompletion {
+    static func isStepSatisfied(policy: DesktopStepCompletionPolicy,
+                                delivery: DesktopActionDelivery,
+                                outcomeEvidence: DesktopActionOutcomeEvidence) -> Bool {
+        if outcomeEvidence == .systemVerified || outcomeEvidence == .userConfirmed { return true }
+        return policy == .deliverySufficient && delivery == .sent
+    }
+
+    /// `uncertain_effect` has exactly two causes: the delivery itself is
+    /// unknown, or the policy demands outcome evidence that never arrived.
+    static func isUncertainEffect(policy: DesktopStepCompletionPolicy,
+                                  delivery: DesktopActionDelivery,
+                                  outcomeEvidence: DesktopActionOutcomeEvidence) -> Bool {
+        if delivery == .unknown { return true }
+        return delivery == .sent && policy == .outcomeRequired && outcomeEvidence == .notObserved
+    }
+
+    static func completionBasis(policy: DesktopStepCompletionPolicy,
+                                delivery: DesktopActionDelivery,
+                                outcomeEvidence: DesktopActionOutcomeEvidence) -> DesktopActionCompletionBasis? {
+        switch outcomeEvidence {
+        case .systemVerified: return .systemVerifiedOutcome
+        case .userConfirmed: return .userConfirmedOutcome
+        case .notObserved:
+            return policy == .deliverySufficient && delivery == .sent ? .deliveryConfirmed : nil
+        }
+    }
+}
+
+/// The executor's factual report for one attempt. `completed` is a read-only
+/// compatibility view of `outcomeEvidence == .systemVerified`; task progress
+/// must be decided through `DesktopActionCompletion` with the step's policy.
+struct DesktopTaskActionResult {
+    let delivery: DesktopActionDelivery
+    let outcomeEvidence: DesktopActionOutcomeEvidence
+    let detail: String
+    var resultingApp: String? = nil
+    var resultingScene: DesktopTaskSceneIdentity? = nil
+    var failureStage: String? = nil
+    var reasonCode: String? = nil
+
+    /// Compatibility only: true solely after an independent system read-back.
+    var completed: Bool { outcomeEvidence == .systemVerified }
 }
 
 struct DesktopActionRecord: Codable {
@@ -157,42 +243,145 @@ struct DesktopActionRecord: Codable {
     let label: String
     let action: DesktopActionKind
     let decisionPacket: DesktopDecisionPacket?
+    var completionPolicy: DesktopStepCompletionPolicy
     var delivery: DesktopActionDelivery
-    var verified: Bool
+    var outcomeEvidence: DesktopActionOutcomeEvidence
     var detail: String
 
     enum CodingKeys: String, CodingKey {
-        case id, observationID, app, targetID, label, action, delivery, verified, detail
+        case id, observationID, app, targetID, label, action, delivery, detail
         case decisionPacket = "decision_packet"
+        case completionPolicy = "completion_policy"
+        case outcomeEvidence = "outcome_evidence"
+        case completionBasis = "completion_basis"
+        case satisfied, verified
     }
 
+    init(id: String, observationID: String, app: String, targetID: String?, label: String,
+         action: DesktopActionKind, decisionPacket: DesktopDecisionPacket?,
+         completionPolicy: DesktopStepCompletionPolicy, delivery: DesktopActionDelivery,
+         outcomeEvidence: DesktopActionOutcomeEvidence, detail: String) {
+        self.id = id
+        self.observationID = observationID
+        self.app = app
+        self.targetID = targetID
+        self.label = label
+        self.action = action
+        self.decisionPacket = decisionPacket
+        self.completionPolicy = completionPolicy
+        self.delivery = delivery
+        self.outcomeEvidence = outcomeEvidence
+        self.detail = detail
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        observationID = try values.decode(String.self, forKey: .observationID)
+        app = try values.decode(String.self, forKey: .app)
+        targetID = try values.decodeIfPresent(String.self, forKey: .targetID)
+        label = try values.decode(String.self, forKey: .label)
+        action = try values.decode(DesktopActionKind.self, forKey: .action)
+        decisionPacket = try values.decodeIfPresent(DesktopDecisionPacket.self, forKey: .decisionPacket)
+        delivery = try values.decode(DesktopActionDelivery.self, forKey: .delivery)
+        detail = try values.decode(String.self, forKey: .detail)
+        if let policy = try values.decodeIfPresent(DesktopStepCompletionPolicy.self, forKey: .completionPolicy) {
+            // New-format record: the two facts were stored separately.
+            completionPolicy = policy
+            outcomeEvidence = try values.decodeIfPresent(DesktopActionOutcomeEvidence.self, forKey: .outcomeEvidence)
+                ?? (try values.decodeIfPresent(Bool.self, forKey: .verified) == true ? .systemVerified : .notObserved)
+        } else {
+            // Old-format record: only a flattened `verified` Bool existed.
+            // Conservatively require outcome evidence — a legacy
+            // `verified=false` record must never read as delivery-completed.
+            completionPolicy = .outcomeRequired
+            outcomeEvidence = try values.decodeIfPresent(Bool.self, forKey: .verified) == true
+                ? .systemVerified : .notObserved
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encode(observationID, forKey: .observationID)
+        try values.encode(app, forKey: .app)
+        try values.encodeIfPresent(targetID, forKey: .targetID)
+        try values.encode(label, forKey: .label)
+        try values.encode(action, forKey: .action)
+        try values.encodeIfPresent(decisionPacket, forKey: .decisionPacket)
+        try values.encode(completionPolicy, forKey: .completionPolicy)
+        try values.encode(delivery, forKey: .delivery)
+        try values.encode(outcomeEvidence, forKey: .outcomeEvidence)
+        // Derived reporting fields for tool JSON consumers; never input.
+        try values.encodeIfPresent(completionBasis, forKey: .completionBasis)
+        try values.encode(satisfied, forKey: .satisfied)
+        try values.encode(detail, forKey: .detail)
+        // Compatibility for old JSON consumers; derived, never authoritative.
+        try values.encode(verified, forKey: .verified)
+    }
+
+    /// Compatibility view for older call sites and JSON consumers. Only an
+    /// independent system read-back counts; a user confirmation does not.
+    var verified: Bool { outcomeEvidence == .systemVerified }
+
+    var satisfied: Bool {
+        DesktopActionCompletion.isStepSatisfied(policy: completionPolicy, delivery: delivery,
+                                                outcomeEvidence: outcomeEvidence)
+    }
+
+    var uncertainEffect: Bool {
+        DesktopActionCompletion.isUncertainEffect(policy: completionPolicy, delivery: delivery,
+                                                  outcomeEvidence: outcomeEvidence)
+    }
+
+    var completionBasis: DesktopActionCompletionBasis? {
+        DesktopActionCompletion.completionBasis(policy: completionPolicy, delivery: delivery,
+                                                outcomeEvidence: outcomeEvidence)
+    }
+
+    /// The three satisfiable wordings stay distinct: a delivered action is
+    /// never reported as a verified state change.
     var summary: String {
-        let state = verified ? "目标状态已验证" : (delivery == .notSent ? "未下发" : "结果未确认")
+        let state: String
+        switch completionBasis {
+        case .systemVerifiedOutcome: state = "结果已验证"
+        case .userConfirmedOutcome: state = "用户已确认结果"
+        case .deliveryConfirmed: state = "动作已送达"
+        case nil: state = delivery == .notSent ? "未下发" : "结果未确认"
+        }
         return "\(action.rawValue)「\(label)」：\(state)"
     }
 }
 
 struct DesktopTaskReceipt: Codable {
     let goal: String
-    let status: String
+    var status: String
     /// Compatibility field: ONLY actions attempted in this invocation.
     let actions: [String]
-    let detail: String
+    var detail: String
     var app: String? = nil
     var taskID: String = UUID().uuidString
     var turnID: String = UUID().uuidString
     var targetVersion: Int = 1
     var priorActions: [String] = []
     var currentActions: [DesktopActionRecord] = []
-    /// Verified effects only, carried across the whole task chain. Unverified
-    /// or unsent attempts are NOT "already done" and never enter this list.
+    /// Effects independently verified by the system, carried across the whole
+    /// task chain. User-confirmed and delivery-only actions never enter here.
     var verifiedActionHistory: [String] = []
+    /// Every step that counts as done — delivery-confirmed direct inputs,
+    /// system-verified outcomes and user-confirmed outcomes. The decision
+    /// model reads this as "already done", never the verified-only list.
+    var satisfiedActionHistory: [String] = []
+    var completedStepCount: Int = 0
+    var totalStepCount: Int = 0
 
     enum CodingKeys: String, CodingKey {
         case goal, status, actions, detail, app
         case taskID = "task_id", turnID = "turn_id", targetVersion = "target_version"
         case priorActions = "prior_actions", currentActions = "current_actions"
         case verifiedActionHistory = "verified_action_history"
+        case satisfiedActionHistory = "satisfied_action_history"
+        case completedStepCount = "completed_step_count", totalStepCount = "total_step_count"
     }
 
     var toolOutput: String {
@@ -203,23 +392,100 @@ struct DesktopTaskReceipt: Codable {
     /// Action speech is not another model inference. An old action or a
     /// provider's confident prose cannot turn into a new completion claim.
     var spokenSummary: String {
+        if status == "running" || status == "pausing" {
+            return "任务尚未完成，已确认 \(completedStepCount)/\(totalStepCount) 步。"
+        }
+        if status == "cancelling" { return "已停止后续操作，正在核查已经发出的部分。" }
+        if status == "cancelled" { return "任务已取消，已经发生的操作记录保留。" }
         let sent = currentActions.filter { $0.delivery != .notSent }
         guard let last = sent.last else {
             return "这次没有执行操作。\(detail)"
         }
-        if status == "completed", currentActions.allSatisfy({ $0.verified }), last.verified {
-            if currentActions.count > 1 { return "已完成并确认这 \(currentActions.count) 步操作。" }
-            switch last.action {
-            case .openApp: return "已确认「\(last.label)」已启动。"
-            case .type: return "文字已输入，并已读回确认。"
-            default: return "已确认「\(last.label)」的操作结果。"
+        if status == "completed" {
+            if currentActions.count > 1, currentActions.allSatisfy({ $0.outcomeEvidence == .systemVerified }) {
+                return "已完成并确认这 \(currentActions.count) 步操作。"
+            }
+            switch last.completionBasis {
+            case .systemVerifiedOutcome:
+                switch last.action {
+                case .openApp: return "已确认「\(last.label)」已启动。"
+                case .type: return "文字已输入，并已读回确认。"
+                default: return "已确认「\(last.label)」的操作结果。"
+                }
+            case .userConfirmedOutcome:
+                return "你已确认上一轮操作已经生效。"
+            case .deliveryConfirmed:
+                return last.deliveryConfirmedSpeech
+            case nil:
+                break
             }
         }
         if last.delivery == .unknown { return "本轮尝试了操作，但结果还不确定，已停下，没有继续尝试其他目标。" }
-        if last.verified { return "本轮已确认 \(currentActions.filter(\.verified).count) 步；后续条件未满足，已停下。" }
+        if last.outcomeEvidence == .systemVerified {
+            return "本轮已确认 \(currentActions.filter(\.verified).count) 步；后续条件未满足，已停下。"
+        }
         if last.action == .openApp {
             return "我发出了打开「\(last.label)」的请求，但没有确认到它的可见前台窗口，所以不能说已经打开。"
         }
         return "已向「\(last.label)」发送操作，但目标结果还没有确认，已停下。"
+    }
+}
+
+extension DesktopActionRecord {
+    /// Factual wording for a completed step whose only proof is delivery.
+    /// It names the input action and never claims a business outcome.
+    var deliveryConfirmedSpeech: String {
+        switch action {
+        case .click: return "已点击「\(label)」。"
+        case .doubleClick: return "已双击「\(label)」。"
+        case .rightClick: return "已右键点击「\(label)」。"
+        case .pressKey: return "已按下 \(label)。"
+        case .shortcut: return "已执行快捷键 \(label)。"
+        case .scroll: return "已\(Self.scrollDirectionName(label))滚动。"
+        case .openApp: return "已打开「\(label)」。"
+        case .type: return "已输入文字。"
+        }
+    }
+
+    private static func scrollDirectionName(_ direction: String) -> String {
+        switch direction {
+        case "up": return "向上"
+        case "left": return "向左"
+        case "right": return "向右"
+        default: return "向下"
+        }
+    }
+}
+
+struct DesktopTaskSubmission {
+    let goal: String
+    var exactTarget: DesktopTaskTarget? = nil
+    var steps: [DesktopActionStep]? = nil
+    var intent: DesktopTaskIntent = .new
+    var uncertainResolution: DesktopTaskUncertainResolution? = nil
+    let turnID: String
+    /// Product-owned constraint for automatic speech-only continuation; never
+    /// decoded from a model tool request or used as fresh authorization.
+    var expectedResumeScene: DesktopTaskSceneIdentity? = nil
+}
+
+extension DesktopTaskReceipt {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let verifiedHistory = try values.decodeIfPresent([String].self, forKey: .verifiedActionHistory) ?? []
+        self.init(goal: try values.decode(String.self, forKey: .goal),
+            status: try values.decode(String.self, forKey: .status),
+            actions: try values.decode([String].self, forKey: .actions),
+            detail: try values.decode(String.self, forKey: .detail),
+            app: try values.decodeIfPresent(String.self, forKey: .app),
+            taskID: try values.decodeIfPresent(String.self, forKey: .taskID) ?? UUID().uuidString,
+            turnID: try values.decodeIfPresent(String.self, forKey: .turnID) ?? UUID().uuidString,
+            targetVersion: try values.decodeIfPresent(Int.self, forKey: .targetVersion) ?? 1,
+            priorActions: try values.decodeIfPresent([String].self, forKey: .priorActions) ?? [],
+            currentActions: try values.decodeIfPresent([DesktopActionRecord].self, forKey: .currentActions) ?? [],
+            verifiedActionHistory: verifiedHistory,
+            satisfiedActionHistory: try values.decodeIfPresent([String].self, forKey: .satisfiedActionHistory) ?? verifiedHistory,
+            completedStepCount: try values.decodeIfPresent(Int.self, forKey: .completedStepCount) ?? 0,
+            totalStepCount: try values.decodeIfPresent(Int.self, forKey: .totalStepCount) ?? 0)
     }
 }

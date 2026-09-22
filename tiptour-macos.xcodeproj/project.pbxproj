@@ -30,7 +30,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		28F22CBF2F56440300A0FC59 /* TipTour.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TipTour.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		28F22CBF2F56440300A0FC59 /* Her.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Her.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		28F22CCC2F56440300A0FC59 /* tiptour-macosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "tiptour-macosTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		28F22CD62F56440300A0FC59 /* tiptour-macosUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "tiptour-macosUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -94,7 +94,7 @@
 		28F22CC02F56440300A0FC59 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				28F22CBF2F56440300A0FC59 /* TipTour.app */,
+				28F22CBF2F56440300A0FC59 /* Her.app */,
 				28F22CCC2F56440300A0FC59 /* tiptour-macosTests.xctest */,
 				28F22CD62F56440300A0FC59 /* tiptour-macosUITests.xctest */,
 			);
@@ -125,8 +125,8 @@
 				AA00BB052F6500050039DA55 /* PostHog */,
 				AA00BB0A2F65000A0039DA55 /* CuaDriverCore */,
 			);
-			productName = TipTour;
-			productReference = 28F22CBF2F56440300A0FC59 /* TipTour.app */;
+			productName = Her;
+			productReference = 28F22CBF2F56440300A0FC59 /* Her.app */;
 			productType = "com.apple.product-type.application";
 		};
 		28F22CCB2F56440300A0FC59 /* tiptour-macosTests */ = {
@@ -319,10 +319,11 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
-				CODE_SIGN_IDENTITY = "Shangqiuko Local Code Signing";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 87DM76C54G;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -384,8 +385,11 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 87DM76C54G;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -412,10 +416,11 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = TipTour/TipTour.entitlements;
-				CODE_SIGN_IDENTITY = "Shangqiuko Local Code Signing";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 87DM76C54G;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_HARDENED_RUNTIME = NO;
@@ -426,10 +431,10 @@
 				INFOPLIST_FILE = TipTour/Info.plist;
 				INFOPLIST_KEY_AnthropicAPIURL = "https://api.anthropic.com/v1/messages";
 				INFOPLIST_KEY_AnthropicModel = "claude-sonnet-4-6";
-				INFOPLIST_KEY_CFBundleDisplayName = TipTour;
-				INFOPLIST_KEY_CFBundleName = TipTour;
+				INFOPLIST_KEY_CFBundleDisplayName = Her;
+				INFOPLIST_KEY_CFBundleName = Her;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "TipTour needs screen recording access to see your screen and help you.";
+				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "Her needs screen recording access to see your screen and help you.";
 				INFOPLIST_KEY_SUFeedURL = "";
 				INFOPLIST_KEY_SUPublicEDKey = "KNj1qMm+aKDZsv53kbgiy9Kn5aQfuGuU4EcKb+54szw=";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -437,8 +442,9 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.yishuziyu.tiptour;
-				PRODUCT_NAME = TipTour;
+				PRODUCT_BUNDLE_IDENTIFIER = com.yishuziyu.her;
+				PRODUCT_MODULE_NAME = TipTour;
+				PRODUCT_NAME = Her;
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -455,10 +461,11 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = TipTour/TipTour.entitlements;
-				CODE_SIGN_IDENTITY = "Shangqiuko Local Code Signing";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 87DM76C54G;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_HARDENED_RUNTIME = NO;
@@ -469,10 +476,10 @@
 				INFOPLIST_FILE = TipTour/Info.plist;
 				INFOPLIST_KEY_AnthropicAPIURL = "https://api.anthropic.com/v1/messages";
 				INFOPLIST_KEY_AnthropicModel = "claude-sonnet-4-6";
-				INFOPLIST_KEY_CFBundleDisplayName = TipTour;
-				INFOPLIST_KEY_CFBundleName = TipTour;
+				INFOPLIST_KEY_CFBundleDisplayName = Her;
+				INFOPLIST_KEY_CFBundleName = Her;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "TipTour needs screen recording access to see your screen and help you.";
+				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "Her needs screen recording access to see your screen and help you.";
 				INFOPLIST_KEY_SUFeedURL = "";
 				INFOPLIST_KEY_SUPublicEDKey = "KNj1qMm+aKDZsv53kbgiy9Kn5aQfuGuU4EcKb+54szw=";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -480,8 +487,9 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.yishuziyu.tiptour;
-				PRODUCT_NAME = TipTour;
+				PRODUCT_BUNDLE_IDENTIFIER = com.yishuziyu.her;
+				PRODUCT_MODULE_NAME = TipTour;
+				PRODUCT_NAME = Her;
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -496,20 +504,21 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_IDENTITY = "Shangqiuko Local Code Signing";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 87DM76C54G;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.2;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.yishuziyu.tiptour.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.yishuziyu.her.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/tiptour-macos.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/tiptour-macos";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Her.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Her";
 			};
 			name = Debug;
 		};
@@ -517,32 +526,34 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_IDENTITY = "Shangqiuko Local Code Signing";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 87DM76C54G;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.2;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.yishuziyu.tiptour.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.yishuziyu.her.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/tiptour-macos.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/tiptour-macos";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Her.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Her";
 			};
 			name = Release;
 		};
 		28F22CE72F56440300A0FC59 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_IDENTITY = "Shangqiuko Local Code Signing";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 87DM76C54G;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.yishuziyu.tiptour.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.yishuziyu.her.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -556,12 +567,13 @@
 		28F22CE82F56440300A0FC59 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_IDENTITY = "Shangqiuko Local Code Signing";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 87DM76C54G;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.yishuziyu.tiptour.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.yishuziyu.her.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;

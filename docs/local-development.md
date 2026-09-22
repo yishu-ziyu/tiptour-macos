@@ -1,36 +1,33 @@
 # Local development setup (fork)
 
-This fork is configured to build and run locally on the machine it was cloned
-onto. These settings are machine-specific on purpose — do not carry them back
-into an upstream pull request.
+This checkout now builds the local product identity **Her**. The source tree and
+Swift namespace still contain the historical TipTour name while repositories are
+being consolidated; product identity and code-namespace cleanup are deliberately
+separate changes.
 
 ## Signing
 
 | Setting | Value | Why |
 | --- | --- | --- |
-| `CODE_SIGN_STYLE` | `Manual` | The upstream project uses Automatic signing with the upstream authors' Apple teams (`993D98NH4J`, `6D7X9GGZAW`), which this machine has no account for. |
-| `CODE_SIGN_IDENTITY` | `Shangqiuko Local Code Signing` | A machine-local code signing certificate, valid until 2036. |
-| `DEVELOPMENT_TEAM` | `""` | No paid Apple Developer account on this machine. |
+| `CODE_SIGN_STYLE` | `Automatic` | Xcode provisions the local Personal Team identity for Her. |
+| `CODE_SIGN_IDENTITY` | `Apple Development` | Current identity: `Apple Development: yishuziyu@gmail.com (N7M4BXHV68)`. |
+| `DEVELOPMENT_TEAM` | `87DM76C54G` | Personal Team for this local development machine. |
 
-Why a persistent certificate instead of ad-hoc signing: macOS grants
-Accessibility / Screen Recording / Microphone permission to a *code signature*.
-An ad-hoc signature (`-`) is regenerated on every build, so macOS would
-re-ask for every permission after every rebuild. Signing with the same local
-certificate keeps the designated requirement stable, so permissions survive
-rebuilds.
-
-If the certificate is ever removed from the keychain, `security find-identity -v -p codesigning`
-will no longer list it. Either re-create a local code signing certificate
-(Keychain Access → Certificate Assistant → Code Signing Certificate) and update
-`CODE_SIGN_IDENTITY`, or accept ad-hoc signing and the repeated permission
-prompts.
+The previous self-signed `Shangqiuko Local Code Signing` identity is no longer
+the product signing identity. It had no Team ID, and legacy Keychain partition
+authorization could fall back to per-build cdhash entries. That made an
+Access Control grant fragile across rebuilds. Keep the old certificate installed
+only as historical local tooling until the Her migration is complete.
 
 ## Bundle identifiers
 
-`com.milindsoni.tiptour` → `com.yishuziyu.tiptour` (plus `.tests` / `.uitests`).
-Separate identifiers keep this fork's Keychain entries (provider API keys) and
-its macOS permission grants independent from any copy of the original app that
-might be installed side by side.
+Her uses `com.yishuziyu.her` (plus `.tests` / `.uitests`). The previous local
+TipTour identity was `com.yishuziyu.tiptour`.
+
+This is an intentional clean identity boundary: do not silently migrate, delete
+or rewrite the old TipTour Keychain items or TCC records. Provider keys are
+entered once into Her through its normal UI, and macOS permissions are granted
+to Her as a new application identity.
 
 ## Auto-update
 
@@ -57,23 +54,18 @@ replaces the signed bundle and macOS will re-request every permission. Use
 
 | Setting | Value |
 | --- | --- |
-| `CODE_SIGN_STYLE` | `Manual` |
-| `CODE_SIGN_IDENTITY` | `Shangqiuko Local Code Signing` |
+| `CODE_SIGN_STYLE` | `Automatic` |
+| `CODE_SIGN_IDENTITY` | `Apple Development` |
 | `ENABLE_HARDENED_RUNTIME` | `NO` |
-| `DEVELOPMENT_TEAM` | key removed |
+| `DEVELOPMENT_TEAM` | `87DM76C54G` |
 | `ENABLE_DEBUG_DYLIB` | `NO` |
 | `ENABLE_PREVIEWS` | `NO` |
 
-**This configuration keeps the TCC designated requirement stable across rebuilds.** That is the whole
-point of it: without it, every build resets Accessibility, Screen Recording and
-Microphone, and re-granting by hand after each build is the single biggest tax on
-iterating.
-
-Why it works: the designated requirement is
-`identifier "com.yishuziyu.tiptour" and certificate leaf = H"<cert hash>"` — it names
-the *certificate*, not the binary. Verified by changing the source and rebuilding:
-the binary's SHA-1 changed while the designated requirement stayed byte-identical.
-TCC therefore treats every build as the same app.
+Her now has the stable product identity `com.yishuziyu.her` and Team ID
+`87DM76C54G`. Moving from the old self-signed TipTour build is a one-time
+identity migration, so Accessibility / Screen Recording / Microphone must be
+granted to Her again. Future development should keep the Her team and bundle
+identity stable instead of switching back to self-signed or ad-hoc builds.
 
 Four rules, each learned from a build or launch that failed:
 
@@ -86,18 +78,15 @@ Four rules, each learned from a build or launch that failed:
   certificate was blamed for this for several rounds before the runtime flag was
   identified as the real cause. Ad-hoc signing is the other way to make the app
   launch, but it costs the stable-requirement property above.
-- **Remove `DEVELOPMENT_TEAM`; do not set it to an empty string.** An explicitly
-  empty team makes Xcode demand a team for every target that inherits it,
-  including the SPM package products (`PostHog`, `PLCrashReporter`), which then
-  fail with "Signing requires a development team".
+- **Keep the Personal Team explicit.** Do not remove or replace
+  `DEVELOPMENT_TEAM = 87DM76C54G` without an intentional signing migration.
 - **`ENABLE_DEBUG_DYLIB` must be `NO`.** Its default emits a `TipTour.debug.dylib`
   beside the executable — a SwiftUI Previews JIT artefact a menu-bar app has no
   use for — and the product then refuses to launch with the same Team ID error.
   `ENABLE_PREVIEWS = NO` does *not* remove it; the two settings are independent.
-- **Do not pass `CODE_SIGN_IDENTITY` on the `xcodebuild` command line.** It
-  overrides the setting for every target, packages included, and reproduces the
-  "requires a development team" failure. The project file already targets the
-  right configs on its own.
+- **Do not override signing on a command line.** The project already owns the
+  Her team/identity configuration; ad-hoc overrides create a different macOS
+  application identity.
 
 ### Terminal builds
 
@@ -120,15 +109,14 @@ never touch an installed bundle.
 | `upstream` | `https://github.com/milind-soni/tiptour-macos.git` |
 
 
-### Keychain prompts during local rebuilds
+### Keychain identity boundary
 
-The stable designated requirement above does **not** guarantee stable login-Keychain authorization.
-On 2026-09-20, the exact StepFun item (`com.yishuziyu.tiptour` / `stepfunAPIKey`) had trusted app
-paths but its partition ACL contained per-build `cdhash:` entries. The only available signing identity
-was the local self-signed certificate, with no Team ID. Thus a changed binary can ask for access again,
-even when Accessibility and microphone grants survive. Do not tell users they entered the key incorrectly.
+The old `com.yishuziyu.tiptour` / `stepfunAPIKey` item demonstrated the
+self-signed failure mode: Access Control could list the app while its partition
+list lacked the current build cdhash, returning OSStatus `-25293` before any
+provider connection. Her does not inherit that Keychain item.
 
-Successful key reads are now reused in process memory; settings display checks presence without decrypting.
-Successful writes replace that cached value and successful deletes remove it. This prevents repeated reads
-within one app process. It does not remove the OS authorization requirement for a newly rebuilt binary.
-Do not fix this by allowing every application to read the item, weakening its ACL, or writing the key to disk.
+Enter provider keys once through Her's normal settings. Successful key reads
+remain cached only in the current process; settings presence checks do not
+decrypt. Do not copy secrets from the old service, weaken ACLs, write keys to
+`.env`, or use the old self-signed identity as a workaround.

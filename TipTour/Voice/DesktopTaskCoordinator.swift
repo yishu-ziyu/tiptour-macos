@@ -8,6 +8,12 @@ struct DesktopTaskTarget: Equatable {
     let display: [Double]
 }
 
+struct DesktopTaskSceneIdentity: Equatable {
+    let app: String
+    let windowID: Int?
+    let contentVersion: Int
+}
+
 struct DesktopTaskObservation {
     let app: String
     let targets: [DesktopTaskTarget]
@@ -16,6 +22,11 @@ struct DesktopTaskObservation {
     var capturedAt: Date = Date()
     var contentVersion: Int = 0
     var imageDataURL: String? = nil
+    var actionAttemptID: String? = nil
+
+    var sceneIdentity: DesktopTaskSceneIdentity {
+        DesktopTaskSceneIdentity(app: app, windowID: windowID, contentVersion: contentVersion)
+    }
 }
 
 struct DesktopTaskDecision {
@@ -31,15 +42,8 @@ struct DesktopTaskDecision {
     var targetMargin: Double? = nil
 }
 
-struct DesktopTaskActionResult {
-    /// True only after an independent readback of the requested state.
-    let completed: Bool
-    let detail: String
-    var delivery: DesktopActionDelivery = .unknown
-    var resultingApp: String? = nil
-    var failureStage: String? = nil
-    var reasonCode: String? = nil
-}
+// DesktopTaskActionResult now lives in DesktopTaskContract.swift, alongside
+// the delivery/evidence fact types it reports.
 
 /// One owner for goal revisions, side-effect budgets and action evidence.
 /// A single target gets one attempt; a workflow is an explicit list of steps.
@@ -58,6 +62,7 @@ final class DesktopTaskCoordinator {
     private var generation = 0
     private var previousPlan: [DesktopActionStep] = []
     private var nextStepIndex = 0
+    private var resumeScene: DesktopTaskSceneIdentity?
     /// One side effect that was sent but whose result was never verified.
     /// Scoped to one task chain: a brand-new instruction is explicit user
     /// authorization and must not inherit an older task's blocks, while a
@@ -67,11 +72,63 @@ final class DesktopTaskCoordinator {
         let target: DesktopTaskTarget?
         let step: DesktopActionStep
         let label: String
+        /// Facts needed to rebuild the attempt record when the user later
+        /// confirms what the system could not verify on its own.
+        let attemptID: String
+        let observationID: String
+        let targetID: String?
+        var delivery: DesktopActionDelivery
     }
     private var uncertainEffects: [UncertainEffect] = []
     private var uncertainEffectsTaskID: String?
     private(set) var isRunning = false
     private(set) var lastReceipt: DesktopTaskReceipt?
+    let executionOwnerID = UUID()
+    private var ownedExecution: Task<DesktopTaskReceipt, Never>?
+    private struct PendingContinuation {
+        let taskID: String
+        let targetVersion: Int
+        let turnID: String
+        let onlyAfterUserInput: Bool
+    }
+    private var pendingContinuation: PendingContinuation?
+    private var admissionWaiter: CheckedContinuation<DesktopTaskReceipt, Never>?
+    private var cancelledTaskID: String?
+    private var currentUserTurnID: String?
+    private var activeRunGeneration: Int?
+    private var journal: DesktopTaskJournal?
+    private var journalUnavailable = false
+    private(set) var pausedForUserInput = false
+    private(set) var hasPersistentReservation = false
+    var onReceiptChanged: ((DesktopTaskReceipt) -> Void)?
+    var canReserveDesktop: () -> Bool = { true }
+    var mayDispatch: Bool { isRunning && activeRunGeneration == generation && !journalUnavailable }
+
+    func configureJournal(_ journal: DesktopTaskJournal) {
+        self.journal = journal
+        do {
+            guard let snapshot = try journal.load() else { return }
+            let terminal = ["completed", "cancelled"].contains(snapshot.status)
+            let receipt = DesktopTaskReceipt(goal: "历史任务（正文未保存）",
+                status: terminal ? snapshot.status : "recovery_required", actions: [],
+                detail: terminal ? "已恢复上次任务状态。" : "上次任务执行中断；没有自动恢复操作，请先核查已发生的部分。",
+                taskID: snapshot.taskID, targetVersion: snapshot.targetVersion,
+                completedStepCount: snapshot.completedStepCount, totalStepCount: snapshot.totalStepCount)
+            hasPersistentReservation = !terminal
+            if !terminal { _ = DesktopTaskAdmission.reserve(for: self) }
+            publish(receipt)
+        } catch {
+            journalUnavailable = true
+            hasPersistentReservation = true
+            _ = DesktopTaskAdmission.reserve(for: self)
+            // Keep unreadable recovery bytes intact. An empty replacement
+            // would erase evidence of effects we may still need to inspect.
+            let receipt = DesktopTaskReceipt(goal: "任务恢复记录不可用", status: "storage_failed", actions: [],
+                detail: "无法读取上次任务记录，桌面操作已暂停；原记录保留，不能假定没有执行过。")
+            lastReceipt = receipt
+            onReceiptChanged?(receipt)
+        }
+    }
 
     init(observe: @escaping Observe, observeContext: Observe? = nil,
          decide: @escaping Decide, executeStep: @escaping ExecuteStep) {
@@ -100,18 +157,181 @@ final class DesktopTaskCoordinator {
 
     func interrupt() { generation += 1 }
 
+    func beginUserTurn(_ turnID: String) {
+        if currentUserTurnID != turnID { pendingContinuation = nil }
+        currentUserTurnID = turnID
+    }
+    func endUserTurn() {
+        currentUserTurnID = nil
+        pendingContinuation = nil
+    }
+
+    func pauseForUserInput() {
+        guard hasPersistentReservation else { return }
+        // New speech cannot clear a pause caused by a disconnect, changed
+        // window, or uncertain effect. Only interrupting a live run creates
+        // the permission to continue after a progress-only question.
+        if isRunning, activeRunGeneration == generation {
+            pausedForUserInput = true
+        }
+        interrupt()
+        if var receipt = lastReceipt, receipt.status == "running" {
+            receipt.status = "pausing"
+            receipt.detail = "用户正在说话，后续操作暂停；已下发部分继续核查。"
+            publish(receipt)
+        }
+    }
+
+    func pauseForDisconnection() {
+        pauseForUserInput()
+        pausedForUserInput = false
+        pendingContinuation = nil
+    }
+
+    func cancelTask(taskID: String, targetVersion: Int, turnID: String) -> DesktopTaskReceipt? {
+        guard turnID == currentUserTurnID, let receipt = lastReceipt,
+              receipt.taskID == taskID, receipt.targetVersion == targetVersion,
+              hasPersistentReservation else { return nil }
+        cancelledTaskID = taskID
+        pendingContinuation = nil
+        pausedForUserInput = false
+        interrupt()
+        var cancelled = receipt
+        cancelled.status = isRunning ? "cancelling" : "cancelled"
+        cancelled.detail = "已停止后续操作；保留已经发生的事实。"
+        if !isRunning { hasPersistentReservation = false }
+        publish(cancelled)
+        return cancelled
+    }
+
+    /// The caller waits only for admission. Execution belongs to this
+    /// application-scoped coordinator, so cancelling a voice waiter cannot
+    /// cancel the task or suppress independent after-state bookkeeping.
+    func submit(_ request: DesktopTaskSubmission) async -> DesktopTaskReceipt {
+        // Reject expired controls before they can pause an existing execution.
+        // The second check below still fences a turn change while awaiting it.
+        guard !Task.isCancelled, request.turnID == currentUserTurnID else {
+            return DesktopTaskReceipt(goal: request.goal, status: "paused", actions: [],
+                detail: "请求所属发言已过期，未执行。", turnID: request.turnID)
+        }
+        guard !journalUnavailable else {
+            return DesktopTaskReceipt(goal: request.goal, status: "storage_failed", actions: [],
+                detail: "任务记录当前不可用，未启动新操作。", turnID: request.turnID)
+        }
+        if request.intent == .new, hasPersistentReservation {
+            return DesktopTaskReceipt(goal: request.goal, status: "busy", actions: [],
+                detail: "当前任务仍待继续、纠正或取消，未覆盖它。", turnID: request.turnID)
+        }
+        if lastReceipt?.status == "recovery_required" {
+            return lastReceipt!
+        }
+        if request.intent == .correct, let ownedExecution {
+            pendingContinuation = nil
+            interrupt()
+            _ = await ownedExecution.value
+        }
+        guard !Task.isCancelled, request.turnID == currentUserTurnID else {
+            return DesktopTaskReceipt(goal: request.goal, status: "paused", actions: [],
+                detail: "请求所属发言已过期，未执行。", turnID: request.turnID)
+        }
+        guard ownedExecution == nil, !isRunning,
+              (hasPersistentReservation || canReserveDesktop()), DesktopTaskAdmission.reserve(for: self) else {
+            return DesktopTaskReceipt(goal: request.goal, status: "busy", actions: [],
+                detail: "前一个任务尚未收尾，未执行新请求。", turnID: request.turnID)
+        }
+        if request.intent != .new, lastReceipt?.status == "cancelled" {
+            return lastReceipt!
+        }
+        let previousReservation = hasPersistentReservation
+        hasPersistentReservation = true
+        pausedForUserInput = false
+        let admittedGeneration = generation
+        return await withCheckedContinuation { continuation in
+            admissionWaiter = continuation
+            ownedExecution = Task { [self] in
+                let result: DesktopTaskReceipt
+                if generation != admittedGeneration || request.turnID != currentUserTurnID {
+                    result = lastReceipt ?? DesktopTaskReceipt(goal: request.goal, status: "paused", actions: [],
+                        detail: "接收期间出现新发言，没有下发操作。", turnID: request.turnID)
+                    publish(result)
+                    hasPersistentReservation = previousReservation
+                } else {
+                    result = await run(goal: request.goal, exactTarget: request.exactTarget,
+                        steps: request.steps, intent: request.intent,
+                        uncertainResolution: request.uncertainResolution, turnID: request.turnID,
+                        expectedResumeScene: request.expectedResumeScene)
+                }
+                ownedExecution = nil
+                // A progress query receives a snapshot immediately. Its
+                // continuation is reconsidered only after the old action has
+                // settled, using the same turn, task and revision checks.
+                if let pending = pendingContinuation {
+                    pendingContinuation = nil
+                    _ = await continueTask(taskID: pending.taskID, targetVersion: pending.targetVersion,
+                        turnID: pending.turnID, onlyAfterUserInput: pending.onlyAfterUserInput)
+                }
+                return result
+            }
+        }
+    }
+
+    func continueTask(taskID: String, targetVersion: Int, turnID: String,
+                      onlyAfterUserInput: Bool) async -> DesktopTaskReceipt? {
+        guard !Task.isCancelled, turnID == currentUserTurnID,
+              let current = lastReceipt, current.taskID == taskID, current.targetVersion == targetVersion,
+              !onlyAfterUserInput || pausedForUserInput else { return nil }
+        if ownedExecution != nil {
+            guard ["running", "pausing"].contains(current.status) else { return current }
+            pendingContinuation = PendingContinuation(taskID: taskID, targetVersion: targetVersion,
+                turnID: turnID, onlyAfterUserInput: onlyAfterUserInput)
+            return current
+        }
+        guard !Task.isCancelled, turnID == currentUserTurnID, let receipt = lastReceipt,
+              receipt.taskID == taskID, receipt.targetVersion == targetVersion,
+              receipt.status == "paused", uncertainEffects.isEmpty,
+              nextStepIndex < previousPlan.count else { return lastReceipt }
+        if onlyAfterUserInput, resumeScene == nil { return receipt }
+        return await submit(DesktopTaskSubmission(goal: receipt.goal, intent: .resume, turnID: turnID,
+            expectedResumeScene: onlyAfterUserInput ? resumeScene : nil))
+    }
+
+    func waitUntilSettled() async {
+        while let execution = ownedExecution { _ = await execution.value }
+    }
+
+    private func publish(_ originalReceipt: DesktopTaskReceipt) {
+        var receipt = originalReceipt
+        if let journal {
+            do { try journal.save(receipt) }
+            catch {
+                journalUnavailable = true
+                generation += 1
+                hasPersistentReservation = true
+                receipt.status = "storage_failed"
+                receipt.detail = "任务记录保存失败，后续操作已停止；已发生的部分需要核查。"
+            }
+        }
+        lastReceipt = receipt
+        let waiter = admissionWaiter
+        admissionWaiter = nil
+        waiter?.resume(returning: receipt)
+        onReceiptChanged?(receipt)
+    }
+
     func run(goal: String, namedTarget: String? = nil, exactTarget: DesktopTaskTarget? = nil,
              action: String? = nil, resumePrevious: Bool = false, maximumActions: Int = 6,
              steps: [DesktopActionStep]? = nil, intent: DesktopTaskIntent? = nil,
              uncertainResolution: DesktopTaskUncertainResolution? = nil,
-             turnID: String = UUID().uuidString) async -> DesktopTaskReceipt {
+             turnID: String = UUID().uuidString,
+             expectedResumeScene: DesktopTaskSceneIdentity? = nil) async -> DesktopTaskReceipt {
         guard !isRunning else {
             return DesktopTaskReceipt(goal: goal, status: "busy", actions: [], detail: "前一个操作正在停止，请稍后重试。", turnID: turnID)
         }
         isRunning = true
         generation += 1
         let runGeneration = generation
-        defer { isRunning = false }
+        activeRunGeneration = runGeneration
+        defer { isRunning = false; activeRunGeneration = nil }
 
         let previous = lastReceipt
         let effectiveIntent: DesktopTaskIntent = intent ?? (resumePrevious ? .resume : .new)
@@ -120,10 +340,11 @@ final class DesktopTaskCoordinator {
         let resumesSameTask = wantsResume && sameGoal && !previousPlan.isEmpty
         let isCorrection = intent == .correct || (wantsResume && !sameGoal)
         let priorActions = (wantsResume || isCorrection) ? Array(((previous?.priorActions ?? []) + (previous?.actions ?? [])).suffix(32)) : []
-        /// Only verified effects count as done. Feeding an unverified attempt
-        /// to the decision model as "already_done" is what made it move on to
-        /// a different candidate after an uncertain click.
+        /// Only independently verified effects enter the verified history;
+        /// user-confirmed and delivery-confirmed steps stay in the satisfied
+        /// history, which is the list the decision model reads as already-done.
         var priorVerifiedActions = (wantsResume || isCorrection) ? (previous?.verifiedActionHistory ?? []) : []
+        var priorSatisfiedActions = (wantsResume || isCorrection) ? (previous?.satisfiedActionHistory ?? []) : []
         let taskID = (resumesSameTask || isCorrection) ? previous?.taskID ?? UUID().uuidString : UUID().uuidString
         if uncertainEffectsTaskID != taskID {
             uncertainEffects = []
@@ -132,22 +353,41 @@ final class DesktopTaskCoordinator {
         let targetVersion = isCorrection ? (previous?.targetVersion ?? 0) + 1 : (resumesSameTask ? previous?.targetVersion ?? 1 : 1)
         var pinnedApp = resumesSameTask ? previous?.app : nil
         var records: [DesktopActionRecord] = []
+        var requiredScene = expectedResumeScene
 
         func checkCurrent() throws {
             try Task.checkCancellation()
-            guard runGeneration == generation else { throw CancellationError() }
+            guard runGeneration == generation, !journalUnavailable else { throw CancellationError() }
         }
         func finish(_ status: String, _ detail: String) -> DesktopTaskReceipt {
-            let receipt = DesktopTaskReceipt(goal: goal, status: status,
+            let finalStatus = cancelledTaskID == taskID ? "cancelled" : status
+            let receipt = DesktopTaskReceipt(goal: goal, status: finalStatus,
                 actions: records.filter { $0.delivery != .notSent }.map(\.summary), detail: detail,
                 app: pinnedApp, taskID: taskID, turnID: turnID, targetVersion: targetVersion,
                 priorActions: priorActions, currentActions: records,
-                verifiedActionHistory: Array((priorVerifiedActions + records.filter(\.verified).map(\.summary)).suffix(32)))
-            lastReceipt = receipt
+                verifiedActionHistory: Array((priorVerifiedActions + records.filter(\.verified).map(\.summary)).suffix(32)),
+                satisfiedActionHistory: Array((priorSatisfiedActions + records.filter(\.satisfied).map(\.summary)).suffix(32)),
+                completedStepCount: nextStepIndex, totalStepCount: previousPlan.count)
+            if ["completed", "cancelled"].contains(finalStatus)
+                || (finalStatus == "failed" && uncertainEffects.isEmpty) { hasPersistentReservation = false }
+            publish(receipt)
             DesktopVoiceTrace.event("task_finished", turnID: turnID,
-                fields: ["task_id": taskID, "status": status, "target_version": String(targetVersion),
+                fields: ["task_id": taskID, "status": lastReceipt?.status ?? finalStatus, "target_version": String(targetVersion),
                          "new_action_count": String(receipt.actions.count)])
-            return receipt
+            return lastReceipt ?? receipt
+        }
+
+        func reportProgress() {
+            guard ownedExecution != nil else { return }
+            let status = cancelledTaskID == taskID ? "cancelling"
+                : (generation != runGeneration ? "pausing" : "running")
+            publish(DesktopTaskReceipt(goal: goal, status: status,
+                actions: records.filter { $0.delivery != .notSent }.map(\.summary), detail: "执行状态，尚非完成声明。",
+                app: pinnedApp, taskID: taskID, turnID: turnID, targetVersion: targetVersion,
+                priorActions: priorActions, currentActions: records,
+                verifiedActionHistory: Array((priorVerifiedActions + records.filter(\.verified).map(\.summary)).suffix(32)),
+                satisfiedActionHistory: Array((priorSatisfiedActions + records.filter(\.satisfied).map(\.summary)).suffix(32)),
+                completedStepCount: nextStepIndex, totalStepCount: previousPlan.count))
         }
 
         // An invalid replacement request must not leave the old plan attached
@@ -155,6 +395,7 @@ final class DesktopTaskCoordinator {
         if !resumesSameTask {
             previousPlan = []
             nextStepIndex = 0
+            resumeScene = nil
         }
         do {
             guard intent != .resume || resumesSameTask else {
@@ -195,14 +436,25 @@ final class DesktopTaskCoordinator {
                 }
                 switch resolution {
                 case .confirmedSucceeded:
-                    // The user verified the attempt landed: promote its
-                    // evidence into verified history and count the step done.
-                    priorVerifiedActions.append(contentsOf: uncertainEffects
-                        .map { Self.attemptSummary(action: $0.step.action, label: $0.label, verified: true) })
+                    // The user confirms the attempt landed: that is
+                    // user-confirmed outcome evidence. It satisfies the step
+                    // and enters satisfied history with user-confirmed
+                    // wording, but it is never a system verification, so it
+                    // must not enter the verified history. A user confirming
+                    // success also settles delivery affirmatively.
+                    for effect in uncertainEffects {
+                        records.append(DesktopActionRecord(id: effect.attemptID,
+                            observationID: effect.observationID, app: effect.app,
+                            targetID: effect.targetID, label: effect.label, action: effect.step.action,
+                            decisionPacket: nil,
+                            completionPolicy: DesktopStepCompletionPolicy(step: effect.step),
+                            delivery: .sent, outcomeEvidence: .userConfirmed,
+                            detail: "用户确认该操作已经生效"))
+                    }
                     uncertainEffects = []
                     DesktopVoiceTrace.event("uncertain_resolved", turnID: turnID,
                         fields: ["task_id": taskID, "resolution": resolution.rawValue,
-                                 "promoted_to_verified": "true"])
+                                 "user_confirmed": "true", "promoted_to_verified": "false"])
                     if resumesSameTask {
                         nextStepIndex += 1
                         if nextStepIndex >= plan.count {
@@ -251,6 +503,7 @@ final class DesktopTaskCoordinator {
                 }
             }
             let pinnedTarget = pinnedRetryTarget ?? exactTarget
+            reportProgress()
             while nextStepIndex < plan.count {
                 try checkCurrent()
                 var step = plan[nextStepIndex]
@@ -259,6 +512,11 @@ final class DesktopTaskCoordinator {
                 }
                 var observation = step.action == .openApp ? try await observeContext() : try await observe()
                 try checkCurrent()
+                if let requiredScene, observation.sceneIdentity != requiredScene {
+                    return finish("paused", "窗口或页面上下文已变化，询问进度没有授权在新界面继续操作。")
+                }
+                requiredScene = nil
+                resumeScene = observation.sceneIdentity
                 if let pinnedApp, pinnedApp != observation.app { return finish("paused", "前台应用已改变，已暂停原任务。") }
                 pinnedApp = observation.app
                 var selectedTarget: DesktopTaskTarget?
@@ -285,7 +543,7 @@ final class DesktopTaskCoordinator {
                             imageDataURL: observation.imageDataURL)
                         let decision: DesktopTaskDecision
                         do {
-                            decision = try await decideWithStep(goal, step, narrowed, resumesSameTask ? priorVerifiedActions : [], false)
+                            decision = try await decideWithStep(goal, step, narrowed, resumesSameTask ? priorSatisfiedActions : [], false)
                         } catch {
                             try checkCurrent()
                             observation = try await observe()
@@ -296,7 +554,7 @@ final class DesktopTaskCoordinator {
                             narrowed = DesktopTaskObservation(app: observation.app, targets: recoveredCandidates, windowID: observation.windowID,
                                 id: observation.id, capturedAt: observation.capturedAt, contentVersion: observation.contentVersion,
                                 imageDataURL: observation.imageDataURL)
-                            decision = try await decideWithStep(goal, step, narrowed, resumesSameTask ? priorVerifiedActions : [], true)
+                            decision = try await decideWithStep(goal, step, narrowed, resumesSameTask ? priorSatisfiedActions : [], true)
                         }
                         try checkCurrent()
                         modelDecision = decision
@@ -343,48 +601,71 @@ final class DesktopTaskCoordinator {
                     scope: plan.count > 1 ? .workflow : .single,
                     modelDecision: modelDecision
                 )
-                records.append(DesktopActionRecord(id: observation.id, observationID: observation.id,
+                let attemptID = UUID().uuidString
+                observation.actionAttemptID = attemptID
+                records.append(DesktopActionRecord(id: attemptID, observationID: observation.id,
                     app: observation.app, targetID: selectedTarget?.id, label: label, action: step.action,
-                    decisionPacket: packet, delivery: .unknown, verified: false, detail: "已尝试下发，结果未确认"))
-                if selectedTarget != nil || step.action.needsTarget {
-                    uncertainEffects.append(UncertainEffect(app: observation.app, target: selectedTarget, step: step, label: label))
-                } else {
-                    uncertainEffects.append(UncertainEffect(app: observation.app, target: nil, step: step, label: label))
-                }
+                    decisionPacket: packet, completionPolicy: DesktopStepCompletionPolicy(step: step),
+                    delivery: .unknown, outcomeEvidence: .notObserved, detail: "已尝试下发，结果未确认"))
+                uncertainEffects.append(UncertainEffect(app: observation.app, target: selectedTarget,
+                    step: step, label: label, attemptID: attemptID, observationID: observation.id,
+                    targetID: selectedTarget?.id, delivery: .unknown))
                 DesktopVoiceTrace.event("action_attempt_started", turnID: turnID,
-                    fields: ["task_id": taskID, "trace_id": observation.id, "action": step.action.rawValue,
+                    fields: ["task_id": taskID, "trace_id": attemptID, "observation_id": observation.id, "action": step.action.rawValue,
                              "decision_source": packet.source.rawValue, "scope": packet.scope.rawValue,
                              "action_confidence": packet.confidence.action.map { String($0) } ?? "unavailable",
                              "target_confidence": packet.confidence.target.map { String($0) } ?? "unavailable"],
                     privateFields: ["target": label])
-                let result = try await executeStep(goal, observation, selectedTarget, step)
-                records[records.count - 1].delivery = result.completed ? .sent : result.delivery
-                records[records.count - 1].verified = result.completed
+                reportProgress()
+                try checkCurrent()
+                let result = try await DesktopTaskExecutionContext.$ownerID.withValue(executionOwnerID) {
+                    try await executeStep(goal, observation, selectedTarget, step)
+                }
+                // The executor owns the two facts; the coordinator never
+                // rewrites delivery or evidence from a completion flag.
+                records[records.count - 1].delivery = result.delivery
+                records[records.count - 1].outcomeEvidence = result.outcomeEvidence
                 records[records.count - 1].detail = result.detail
+                let evidence = records[records.count - 1]
+                if let effectIndex = uncertainEffects.lastIndex(where: { $0.attemptID == attemptID }) {
+                    uncertainEffects[effectIndex].delivery = result.delivery
+                }
                 DesktopVoiceTrace.event("action_evidence", turnID: turnID,
-                    fields: ["task_id": taskID, "trace_id": observation.id,
-                             "delivery": records[records.count - 1].delivery.rawValue,
-                             "verified": String(result.completed),
+                    fields: ["task_id": taskID, "trace_id": attemptID, "observation_id": observation.id,
+                             "delivery": evidence.delivery.rawValue,
+                             "verified": String(evidence.verified),
                              "failure_stage": result.failureStage ?? "none",
                              "reason_code": result.reasonCode ?? "none"])
-                if result.completed || result.delivery == .notSent, let selectedTarget {
+                // Cancellation stops future work, not factual bookkeeping.
+                // A satisfied step remains done even when interruption
+                // arrives before this invocation returns its receipt.
+                if evidence.satisfied || evidence.delivery == .notSent, let selectedTarget {
                     uncertainEffects.removeAll { $0.app == observation.app && $0.target.map { Self.sameTarget($0, selectedTarget) } == true }
                 }
-                if result.completed || result.delivery == .notSent {
+                if evidence.satisfied || evidence.delivery == .notSent {
                     uncertainEffects.removeAll { $0.app == observation.app && $0.target == nil && $0.step == step }
                 }
-                // Cancellation stops future work, not factual bookkeeping.
-                // A verified effect remains completed even when interruption
-                // arrives before this invocation returns its receipt.
-                if result.completed {
+                if evidence.satisfied {
                     if step.action == .openApp { pinnedApp = result.resultingApp }
+                    resumeScene = result.resultingScene ?? observation.sceneIdentity
                     nextStepIndex += 1
                 }
+                reportProgress()
+                if ownedExecution != nil {
+                    // Speech ends a response, not the already-observed fact.
+                    // There is nothing to pause after the last satisfied step.
+                    if evidence.satisfied, nextStepIndex == plan.count {
+                        return finish("completed", "任务步骤均已结束；各步完成依据已记录在操作历史中。")
+                    }
+                    if evidence.uncertainEffect {
+                        return finish("uncertain_effect", "操作结果未确认，已停止；不会自动重复。")
+                    }
+                }
                 try checkCurrent()
-                if result.delivery == .notSent { return finish("paused", result.detail) }
-                guard result.completed else { return finish("uncertain_effect", "操作结果未确认，已停止；页面变化不等于目标完成。") }
+                if evidence.delivery == .notSent { return finish("paused", result.detail) }
+                guard evidence.satisfied else { return finish("uncertain_effect", "操作结果未确认，已停止；页面变化不等于目标完成。") }
             }
-            return finish("completed", "本轮步骤均已通过独立结果检查。")
+            return finish("completed", "本轮步骤均已结束；各步完成依据已记录在操作历史中。")
         } catch is CancellationError {
             return finish("paused", "已中断；保留可能已经发生的操作，未下发步骤不会继续。")
         } catch {
@@ -396,12 +677,5 @@ final class DesktopTaskCoordinator {
         // IDs alone are not proof: a provider may reuse one after a refresh.
         LocalTargetContinuity.matches(label: target.label, source: target.source, box: target.box, display: target.display,
             previousLabel: previous.label, previousSource: previous.source, previousBox: previous.box, previousDisplay: previous.display)
-    }
-
-    /// The history wording for one attempt. A user-confirmed success is
-    /// promoted into verified history with the verified wording; an
-    /// unconfirmed attempt keeps the uncertain wording forever.
-    static func attemptSummary(action: DesktopActionKind, label: String, verified: Bool) -> String {
-        "\(action.rawValue)「\(label)」：\(verified ? "目标状态已验证" : "结果未确认")"
     }
 }

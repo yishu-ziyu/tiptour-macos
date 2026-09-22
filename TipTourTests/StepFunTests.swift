@@ -96,6 +96,18 @@ private func makeDescription(capturedAt: Date = Date()) -> StepFunScreenDescript
     }
 }
 
+@Test func toolContractSeparatesRightSideFromRightClick() {
+    let serialised = StepFunRealtimeToolDeclarations.all
+        .compactMap { try? JSONSerialization.data(withJSONObject: $0) }
+        .compactMap { String(data: $0, encoding: .utf8) }
+        .joined()
+
+    #expect(serialised.contains("右边"))
+    #expect(serialised.contains("右侧"))
+    #expect(serialised.contains("Never turn 右边 into right_click"))
+    #expect(serialised.contains("右键、右击"))
+}
+
 @Test func observationNumberRequiresTheExactObservationIdentity() {
     let description = makeDescription()
     #expect(description.entry(index: 2, observationID: description.observationID)?.label == "新建标签页")
@@ -177,4 +189,23 @@ private func makeDescription(capturedAt: Date = Date()) -> StepFunScreenDescript
     let steps = try arguments.validatedSteps()
     #expect(steps[0].action == .rightClick)
     #expect(!steps[0].allowsActionDecision)
+}
+
+@Test func rightSideLiteralCannotBecomeRightClick() throws {
+    let arguments = try StepFunActionArguments.decode(Data(
+        #"{"goal":"请点击右边的设置按钮","action":"right_click"}"#.utf8
+    ))
+    let steps = try arguments.validatedSteps()
+    #expect(steps[0].action == .click)
+    #expect(steps[0].region == .right)
+    #expect(!steps[0].allowsActionDecision)
+}
+
+@Test func explicitRightClickOnRightSideRemainsRightClick() throws {
+    let arguments = try StepFunActionArguments.decode(Data(
+        #"{"goal":"请右键点击右边的设置按钮","action":"right_click"}"#.utf8
+    ))
+    let steps = try arguments.validatedSteps()
+    #expect(steps[0].action == .rightClick)
+    #expect(steps[0].region == .right)
 }

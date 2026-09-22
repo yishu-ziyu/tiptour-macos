@@ -12,7 +12,10 @@ import Foundation
 @MainActor
 final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
     private let engine: TipTourEngine
-    private let visionClient: StepFunVisionClient
+    private var visionClient: StepFunVisionClient
+    let preservesTaskLifetime: Bool
+    private var activeSessionID: UUID?
+    var onTaskReceiptChanged: ((DesktopTaskReceipt) -> Void)?
     private var currentDescription: StepFunScreenDescription?
     private var describedTargets: [Int: DesktopTaskTarget] = [:]
     private var screenHistory: [String] = []
@@ -21,12 +24,13 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
     private var contentVersion = 0
     private var lastWindowContext = ""
     private var currentTurnID = UUID().uuidString
+    private let injectedCoordinator: DesktopTaskCoordinator?
     var onWindowContextChanged: ((String) -> Void)?
     private lazy var executor = DesktopTaskExecutor(engine: engine, currentContext: { [weak self] in
         self?.executionContext()
     })
 
-    private lazy var coordinator = DesktopTaskCoordinator(
+    private lazy var coordinator = injectedCoordinator ?? DesktopTaskCoordinator(
         observe: { [weak self] in
             guard let self else { throw CancellationError() }
             return try await self.observeForAction()
@@ -46,10 +50,49 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
         }
     )
 
-    init(engine: TipTourEngine, visionClient: StepFunVisionClient) {
+    init(engine: TipTourEngine, visionClient: StepFunVisionClient, preservesTaskLifetime: Bool = false,
+         coordinator: DesktopTaskCoordinator? = nil) {
         self.engine = engine
         self.visionClient = visionClient
+        self.preservesTaskLifetime = preservesTaskLifetime
+        self.injectedCoordinator = coordinator
+        if preservesTaskLifetime {
+            self.coordinator.canReserveDesktop = { [weak engine] in
+                engine?.hasActiveLegacyTask == false && !WorkflowRunner.shared.isBusy
+            }
+            self.coordinator.onReceiptChanged = { [weak self] receipt in self?.onTaskReceiptChanged?(receipt) }
+            if injectedCoordinator == nil { self.coordinator.configureJournal(.applicationDefault()) }
+        }
     }
+
+    func updateVisionClient(_ client: StepFunVisionClient) { visionClient = client }
+    fileprivate func isCurrentSession(_ sessionID: UUID) -> Bool { activeSessionID == sessionID }
+
+    func invalidateSessionBinding() {
+        activeSessionID = nil
+        coordinator.endUserTurn()
+    }
+
+    func makeSessionHandler() -> StepFunRealtimeToolHandling {
+        guard preservesTaskLifetime else { return self }
+        let sessionID = UUID()
+        activeSessionID = sessionID
+        coordinator.endUserTurn()
+        currentDescription = nil
+        describedTargets = [:]
+        currentTurnID = UUID().uuidString
+        return TaskSessionBinding(router: self, sessionID: sessionID)
+    }
+
+    var taskContext: String? {
+        guard preservesTaskLifetime, let receipt = coordinator.lastReceipt else { return nil }
+        let payload: [String: Any] = ["control_turn_id": currentTurnID,
+            "task": (try? JSONSerialization.jsonObject(with: Data(receipt.toolOutput.utf8))) ?? [:]]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    var currentTaskReceipt: DesktopTaskReceipt? { coordinator.lastReceipt }
 
     func startMonitoring() {
         windowMonitor?.cancel()
@@ -86,23 +129,81 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
     }
 
     func interrupt() {
+        if preservesTaskLifetime {
+            coordinator.pauseForDisconnection()
+            pausePendingDelivery()
+            return
+        }
         coordinator.interrupt()
         WorkflowRunner.shared.stop()
     }
 
-    func beginUserTurn(_ turnID: String) { currentTurnID = turnID }
+    func prepareForUserSpeech() {
+        guard preservesTaskLifetime else { return }
+        coordinator.pauseForUserInput()
+        pausePendingDelivery()
+    }
+
+    private func pausePendingDelivery() {
+        guard let attempt = coordinator.lastReceipt?.currentActions.last else { return }
+        WorkflowRunner.shared.pauseBeforeDelivery(traceID: attempt.id)
+    }
+
+    func beginUserTurn(_ turnID: String) {
+        currentTurnID = turnID
+        coordinator.beginUserTurn(turnID)
+    }
 
     func handleToolCall(name: String, argumentsJSON: String) async throws -> String {
         let arguments = try JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8)) as? [String: Any] ?? [:]
         switch name {
+        case "task_control":
+            guard preservesTaskLifetime else { return rejectedAction("任务控制入口尚未启用。") }
+            let control = try StepFunTaskControlArguments.decode(Data(argumentsJSON.utf8))
+            if control.action == .status {
+                return coordinator.lastReceipt?.toolOutput ?? rejectedAction("当前没有任务。")
+            }
+            guard let taskID = control.taskID, let version = control.targetVersion,
+                  let turnID = control.turnID, turnID == currentTurnID,
+                  let current = coordinator.lastReceipt,
+                  current.taskID == taskID, current.targetVersion == version else {
+                return rejectedAction("任务控制不属于当前发言，未执行。")
+            }
+            if control.action == .cancel {
+                guard let receipt = coordinator.cancelTask(taskID: taskID, targetVersion: version, turnID: turnID) else {
+                    return rejectedAction("任务身份或版本已变化，未取消其他任务。")
+                }
+                if let attempt = receipt.currentActions.last,
+                   WorkflowRunner.shared.activePlan?.traceID == attempt.id,
+                   let operationID = WorkflowRunner.shared.currentOperationID {
+                    WorkflowRunner.shared.stop(operationID: operationID)
+                }
+                return receipt.toolOutput
+            }
+            if let attempt = coordinator.lastReceipt?.currentActions.last,
+               WorkflowRunner.shared.activePlan?.traceID == attempt.id,
+               WorkflowRunner.shared.pausedReason == .userSpeaking,
+               let operationID = WorkflowRunner.shared.currentOperationID {
+                WorkflowRunner.shared.stop(operationID: operationID)
+            }
+            let receipt = await coordinator.continueTask(taskID: taskID, targetVersion: version,
+                turnID: turnID, onlyAfterUserInput: control.action == .statusAndContinue)
+            return receipt?.toolOutput ?? rejectedAction("当前任务不满足继续条件，保持暂停。")
         case "describe_screen":
             return await describeScreen(intent: arguments["intent"] as? String ?? "描述当前屏幕")
         case "act_on_screen":
             let actionArguments: StepFunActionArguments
             var requestedSteps: [DesktopActionStep]
+            let continuationOnly: Bool
             do {
                 actionArguments = try StepFunActionArguments.decode(Data(argumentsJSON.utf8))
-                requestedSteps = try actionArguments.validatedSteps()
+                continuationOnly = actionArguments.intent == .resume && actionArguments.steps == nil
+                    && actionArguments.action == nil && actionArguments.targetLabel == nil && actionArguments.index == nil
+                    && actionArguments.region == nil && actionArguments.anchorLabel == nil && actionArguments.relation == nil
+                    && actionArguments.text == nil && actionArguments.key == nil && actionArguments.application == nil
+                    && actionArguments.direction == nil && actionArguments.amount == nil && actionArguments.expectedLabel == nil
+                    && actionArguments.observationID == nil
+                requestedSteps = continuationOnly ? [] : try actionArguments.validatedSteps()
             } catch {
                 return rejectedAction("任务参数不完整或有冲突，没有执行。")
             }
@@ -125,8 +226,12 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
             guard !goal.isEmpty else { return rejectedAction("缺少完整操作目标，没有执行。") }
             currentDescription = nil
             describedTargets = [:]
-            let continuationOnly = actionArguments.intent == .resume && actionArguments.steps == nil
-                && actionArguments.action == nil && actionArguments.targetLabel == nil && actionArguments.index == nil
+            if preservesTaskLifetime {
+                return await coordinator.submit(DesktopTaskSubmission(goal: goal, exactTarget: exactTarget,
+                    steps: continuationOnly ? nil : requestedSteps,
+                    intent: actionArguments.intent ?? (actionArguments.resumePrevious == true ? .resume : .new),
+                    uncertainResolution: actionArguments.uncertainResolution, turnID: currentTurnID)).toolOutput
+            }
             let receipt = await coordinator.run(goal: goal, exactTarget: exactTarget,
                 resumePrevious: actionArguments.resumePrevious ?? false, steps: continuationOnly ? nil : requestedSteps,
                 intent: actionArguments.intent, uncertainResolution: actionArguments.uncertainResolution,
@@ -415,4 +520,26 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
               let boundsDictionary = windowInfo[kCGWindowBounds as String] as? [String: Any] else { return nil }
         return CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary)
     }
+}
+
+// A retired voice session may still call stop(). Its binding cannot pause or
+// control tasks belonging to the replacement session.
+@MainActor
+private final class TaskSessionBinding: StepFunRealtimeToolHandling {
+    private let router: StepFunRealtimeToolRouter
+    private let sessionID: UUID
+    init(router: StepFunRealtimeToolRouter, sessionID: UUID) {
+        self.router = router
+        self.sessionID = sessionID
+    }
+    var preservesTaskLifetime: Bool { true }
+    var taskContext: String? { isCurrent ? router.taskContext : nil }
+    private var isCurrent: Bool { router.isCurrentSession(sessionID) }
+    func handleToolCall(name: String, argumentsJSON: String) async throws -> String {
+        guard isCurrent else { return "语音连接已过期，未执行。" }
+        return try await router.handleToolCall(name: name, argumentsJSON: argumentsJSON)
+    }
+    func interrupt() { if isCurrent { router.interrupt() } }
+    func prepareForUserSpeech() { if isCurrent { router.prepareForUserSpeech() } }
+    func beginUserTurn(_ turnID: String) { if isCurrent { router.beginUserTurn(turnID) } }
 }

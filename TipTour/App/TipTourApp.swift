@@ -38,8 +38,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         if VoiceRouteProbe.handleLaunch(companionManager: companionManager) { return }
         #endif
-        print("🎯 TipTour: Starting...")
-        print("🎯 TipTour: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
+        print("🎯 Her: Starting...")
+        print("🎯 Her: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
 
         TipTourDefaults.registerDefaults()
 
@@ -87,9 +87,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         if loginItemService.status != .enabled {
             do {
                 try loginItemService.register()
-                print("🎯 TipTour: Registered as login item")
+                print("🎯 Her: Registered as login item")
             } catch {
-                print("⚠️ TipTour: Failed to register as login item: \(error)")
+                print("⚠️ Her: Failed to register as login item: \(error)")
             }
         }
     }
@@ -103,7 +103,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         let hasFeedURL = (infoDict?["SUFeedURL"] as? String)?.isEmpty == false
         let hasPublicKey = (infoDict?["SUPublicEDKey"] as? String)?.isEmpty == false
         guard hasFeedURL && hasPublicKey else {
-            print("⚠️ TipTour: Sparkle updater skipped — SUFeedURL or SUPublicEDKey not set in Info.plist (this is fine for local debug builds)")
+            print("⚠️ Her: Sparkle updater skipped — SUFeedURL or SUPublicEDKey not set in Info.plist (this is fine for local debug builds)")
             return
         }
 
@@ -116,9 +116,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             try updaterController.updater.start()
-            print("🎯 TipTour: Sparkle updater started")
+            print("🎯 Her: Sparkle updater started")
         } catch {
-            print("⚠️ TipTour: Sparkle updater failed to start: \(error)")
+            print("⚠️ Her: Sparkle updater failed to start: \(error)")
         }
     }
 }

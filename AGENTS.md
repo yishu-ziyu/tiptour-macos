@@ -1,8 +1,10 @@
-# TipTour — Agent Instructions
+# Her — Agent Instructions
 
 This file is the source of truth for coding agents; CLAUDE.md is a symlink.
 
 ## Product
+
+The shipped product identity is now **Her** (`com.yishuziyu.her`) and local development uses Personal Team `87DM76C54G` with Apple Development signing. The repository, source folder, Swift module and many internal type names still use the historical `TipTour` namespace during migration. Do not perform a cosmetic whole-codebase rename while product/runtime consolidation is still in progress.
 
 macOS 14.2+ menu bar-only SwiftUI/AppKit app (`LSUIElement=true`). Three provider modes ship together on `main` — `jev`, `gemini` (being retired) and `stepfun`:
 
@@ -10,7 +12,8 @@ macOS 14.2+ menu bar-only SwiftUI/AppKit app (`LSUIElement=true`). Three provide
 - **StepFun realtime voice**: Ctrl+Option runs a full-duplex voice session. `response.audio.delta` from that same Realtime session is the only playback source; interruptions clear queued audio and pending actions. The realtime model receives **no direct image input**. `describe_screen` passes the locally captured image and its bounded AX/OCR candidate list to the vision client, with one observation ID. Screenshots obey the existing permission/toggle. An index requires that same observation ID; visual prose alone is not a clickable target.
   `act_on_screen` defaults to **one action**. Workflows require an explicit list of at most six steps; each result must be independently verified before continuing. Exact names and location constraints restrict the candidate set before model selection; a missing named target gets one re-observation, not an unrelated substitute. Supported primitives are click/double-click/right-click, open_app, type, press_key, shortcut and scroll, all through the existing engine. Typing requires a named, already-focused field and complete text.
   A top-level pointer request may omit `action` only when it carries an explicit pointer constraint (`target_label`, `index`+`observation_id`, `region`, or `anchor_label`+`relation`); a bare goal is rejected as incomplete rather than defaulting to click. In that narrow case JEV chooses click/double-click/right-click. Explicit actions and every workflow-step action are locked and cannot be overridden by JEV.
-  `new`, `resume` and `correct` distinguish task intent. Current and historical actions are separate; verified progress is recorded even if interruption arrives before the receipt. Explicit resume cannot execute an unrelated or rejected plan. An action whose outcome is not independently verified puts the task into an explicit `uncertain_effect` state: it is not repeated, never enters the decision model's already-done history (verified actions only), and a plain resume or correction cannot switch to another candidate. The user resolves it explicitly with `uncertain_resolution`: `confirmed_succeeded` (promoted into verified history, step counts done), `confirmed_failed` (block lifts, attempt stays attempted-unverified), `retry_same` (same-goal resume, the recorded target is pinned so the retry cannot pick another candidate), or `replace_target` (with `intent=correct` and an explicit new target). Uncertain records are scoped to their task chain, so a brand-new instruction is never blocked by an older task's uncertainty.
+  Literal spatial wording remains code-owned even when the realtime model emits a conflicting mouse action. For top-level Chinese requests, `右边/右侧/右方` and `左边/左侧/左方` restore the corresponding horizontal region. If the model confuses `右边` with `right_click`, the action is corrected to ordinary click unless the preserved goal explicitly contains `右键`、`右击`、`上下文菜单` or an English right-click/context-menu equivalent. Never apply this correction to an explicit right-click request.
+  `new`, `resume` and `correct` distinguish task intent. Current and historical actions are separate; verified progress is recorded even if interruption arrives before the receipt. Explicit resume cannot execute an unrelated or rejected plan. An action whose outcome is not independently verified puts the task into an explicit `uncertain_effect` state: it is not repeated, never enters the decision model's already-done history (the satisfied history: only independently verified, delivery-confirmed and user-confirmed steps count, while user confirmation never enters the verified history), and a plain resume or correction cannot switch to another candidate. The user resolves it explicitly with `uncertain_resolution`: `confirmed_succeeded` (recorded as user_confirmed: the step counts done and enters the satisfied history, but never the verified history), `confirmed_failed` (block lifts, attempt stays attempted-unverified), `retry_same` (same-goal resume, the recorded target is pinned so the retry cannot pick another candidate), or `replace_target` (with `intent=correct` and an explicit new target). Uncertain records are scoped to their task chain, so a brand-new instruction is never blocked by an older task's uncertainty.
   Normal conversation plays Realtime audio as it arrives. Session voice is configured once in `session.update`; response.create never overrides it again. Once a response emits a real tool call, any queued/spilling tool-preamble audio from that response is suppressed; the result response is not created until the original response has actually ended. After the tool result is sent, the turn waits in an awaiting-followup-created phase instead of going idle. A barge-in in that window cannot tell the pending follow-up's `response.created` from the user's next response (measured: StepFun echoes neither `response.metadata` nor a client `event_id`, and a cancelled follow-up still emits created + done(incomplete) with no audio), so the session cancels the follow-up and performs one explicit session rebuild — retiring the socket the stale follow-up lives on instead of assuming which created is which. Probe: `swift run --package-path tools/stepprobe stepprobe followup-race`. Action speech is generated from the current receipt: the same Realtime session receives a one-response exact-reading instruction, and its audio is buffered until the returned transcript matches that receipt. A mismatch is displayed but not played. Screen questions retain four historical observations; window/input changes invalidate old reads. Voice telemetry records speech-stop→first-audio latency and whether the server-reported voice matches the requested session voice, without raw audio/text by default.
 - **JEV text**: Ctrl+K opens the command panel. TypeSafe's `jev-latest` classifies locally detected screen labels and locations. JEV selects click/double-click/right-click targets, not prose or pixels. It acts on the top-ranked target without minimum probability or absent-score cutoffs. Its bounded loop stops on an explicit none choice, task completion, malformed responses, cancellation, action rejection/pause/failure, or 12 actions, with a final observation after the last action.
 
@@ -37,6 +40,51 @@ No Claude/Hermes integration, separate Flash Lite matcher, image-generation serv
 - The localhost harness (`127.0.0.1:19474`) exposes the engine to developer clients. `/v1/agent-contract` is canonical. Preserve trace IDs, single-action workflow limits, and explicit deterministic `/v1/tasks` sequences.
 - Portable app instructions live in `TipTour/Skills/**/SKILL.md`; precedence is user overrides, project skills, then bundled skills. General documentation belongs outside the app target.
 
+## Experimental task continuity
+
+`--voice-task-continuity` opts into the application-retained StepFun task path.
+It is **off by default** until real-provider, real-desktop and microphone acceptance
+pass. It does not merge the other repositories or enable a new runtime/provider.
+
+- `CompanionManager` retains the task router independently of a voice session.
+  The existing `DesktopTaskCoordinator` owns execution, task/revision/attempt identity,
+  progress and terminal facts. Each voice session receives an identity-bound handler;
+  a retired handler cannot stop or control its replacement's task.
+- Speech first clears playback and pauses future desktop delivery. In-flight action
+  readback survives loss of the voice waiter. Progress queries return a snapshot without
+  waiting for readback; any deferred continuation is checked again after settlement.
+  New turns, cancellation, disconnection and uncertain effects invalidate that continuation.
+  Automatic continuation also checks the verified after-scene's app/window/content version;
+  explicit resume remains distinct from merely asking for progress.
+- `task_control` status is read-only. Continuing/cancelling binds task ID, target version
+  and current user-turn ID. Task snapshots are data, never fresh authorization. State
+  updates refresh the panel and model context without unsolicited speech; they do not
+  replay an old connection's `function_call_output` or create a second TTS route.
+- `DesktopTaskAdmission` coordinates this process's reachable task/engine/driver entries.
+  Busy requests are rejected before focus-changing perception or action delivery. A stopped
+  driver retains its execution occupancy until it returns. Task-owned settled attempts
+  retire their workflow while legacy UI pauses retain their own explicit resume controls.
+  `TipTourLongTaskCoordinator` is still a separate legacy task path with mutual
+  exclusion, not yet the fully unified task owner. This is not a cross-process lock.
+- `DesktopTaskJournal` records only recovery metadata in Application Support / bundle ID /
+  `TaskRecovery/task.json`: IDs, counts, action kinds, target digests and delivery/verification
+  state. It does not persist goals, typed text, screenshots, audio or credentials. Admission
+  and attempt metadata are written before dispatch; write/read failure blocks further work.
+  An unreadable journal is preserved and reported. Restart recovery requires inspection,
+  not automatic replay; this is a current-task recovery file, not full historical memory.
+
+`scripts/test-workflow-integration.py --derived-data <existing-checkout-DerivedData>`
+compiles actual app sources into an isolated headless test package against existing
+dependencies. Use `--filter 'WorkflowRunnerIntegrationTests|TaskRouterIntegrationTests|VoiceTaskSessionIntegrationTests'`
+for the production-source seams. It does not replace real UI/provider acceptance.
+
+The signed DEBUG app accepts `--voice-continuity-probe <progress.pcm> <cancel.pcm> <report.json>`.
+Inputs are public synthetic PCM16 / 24 kHz mono. It tests two provider sessions with the
+production session/router but an in-memory executor, and never opens the microphone,
+plays sound, starts monitors, drives the desktop or loads the real task journal. Keychain
+access remains non-interactive and fails without a credential fallback; the report includes
+only the OS failure code/message, not a key. See the current task document for evidence.
+
 ## Key files
 
 | File | Purpose |
@@ -51,14 +99,21 @@ No Claude/Hermes integration, separate Flash Lite matcher, image-generation serv
 | `TipTour/Jev/JevStepPanelView.swift` | Decision progress in the text panel |
 | `TipTour/Voice/GeminiLiveSession.swift` | Realtime session, microphone, screenshots and tool callbacks |
 | `TipTour/Voice/GeminiLiveClient.swift` | Gemini WebSocket protocol and tool declarations |
-| `TipTour/Voice/StepFunRealtimeClient.swift` | Ordered WebSocket events, response identity filtering and deduplicated calls (~640 lines) |
+| `TipTour/Voice/StepFunRealtimeClient.swift` | Ordered WebSocket events, response identity filtering, deduplicated calls and task-context data (~710 lines) |
 | `TipTour/Voice/StepFunRealtimeSession.swift` | Full-duplex session, receipt speech, cancellation and production-path synthetic probe (~1090 lines) |
 | `TipTour/Voice/StepFunRealtimeTools.swift` | Strict task/step parameters and observation-bound indices (~245 lines) |
-| `TipTour/Voice/StepFunRealtimeToolRouter.swift` | Shared scene identity, constrained routing and historical screen context (~440 lines) |
+| `TipTour/Voice/StepFunRealtimeToolRouter.swift` | Shared scene identity, constrained routing, task controls and session-bound access (~545 lines) |
 | `TipTour/Voice/StepFunVisionClient.swift` | Screen understanding, history-aware comparison and bounded general-model decisions (~295 lines) |
 | `TipTourTests/StepFunVisionClientTests.swift` | Vision request format and malformed screen-description regressions (~65 lines) |
-| `TipTour/Voice/DesktopTaskCoordinator.swift` | Goal revisions, explicit step budget, verified progress and uncertain-effect resolution (~370 lines) |
-| `TipTour/Voice/DesktopTaskContract.swift` | Typed actions, literal/spatial constraints and per-turn receipts/speech (~200 lines) |
+| `TipTour/Voice/DesktopTaskCoordinator.swift` | Task-owned execution, goal revisions, step budget, verified progress, safe continuation and uncertainty (~671 lines) |
+| `TipTour/Voice/DesktopTaskContract.swift` | Typed actions, literal/spatial constraints, task submissions and receipts/speech (~265 lines) |
+| `TipTour/Voice/DesktopTaskAdmission.swift` | Process-local task ownership and per-execution dispatch admission (~23 lines) |
+| `TipTour/Voice/DesktopTaskJournal.swift` | Private, atomic metadata-only recovery checkpoint; no automatic replay (~103 lines) |
+| `TipTour/Voice/VoiceTaskContinuityProbe.swift` | Signed-app, no-mic/no-desktop provider smoke with a fixture executor (~123 lines) |
+| `TipTourTests/DesktopTaskContinuityTests.swift` | Task identity, interruption, deferred continuation, journal and recovery behavior (~462 lines) |
+| `TipTourTests/WorkflowRunnerIntegrationTests.swift` | Actual engine/runner admission, delivery lifetime and terminal-status tests (~176 lines) |
+| `TipTourTests/TaskRouterIntegrationTests.swift` | Actual router binding, status controls and constrained resume tests (~125 lines) |
+| `TipTourTests/VoiceTaskSessionIntegrationTests.swift` | Production speech event pauses without cancelling the task (~36 lines) |
 | `TipTour/Voice/DesktopDecisionPacket.swift` | Shared structured action/target/where/confidence decision packet (~125 lines) |
 | `TipTour/Voice/DesktopTaskExecutor.swift` | Existing-engine adapter and independent before/after readback (~125 lines) |
 | `TipTour/Voice/DesktopApplicationResolver.swift` | Installed-app catalog, Spotlight-localized names and stable bundle-ID resolution (~180 lines) |
@@ -96,7 +151,7 @@ without launching or replacing the app.
 
 Open `tiptour-macos.xcodeproj`, select the `tiptour-macos` scheme, build/run in Xcode.
 Run `scripts/test-stepfun.sh` and `scripts/test-jev.sh` for the decision suites, which compile
-into temporary packages and never touch the installed app. This fork is set up for local machine signing; see `docs/local-development.md` for the signing identity, bundle identifier, Sparkle feed and remote conventions used here.
+into temporary packages and never touch the installed app. Her uses the local Personal Team signing identity; see `docs/local-development.md` for signing, bundle identifier, Sparkle feed and remote conventions used here.
 
 Run `scripts/test-stepfun-voice-lifecycle.sh` for isolated voice turn-lifecycle, task coordination, audio playback and vision-client tests; it compiles real sources without launching the app or opening the microphone. Vision requests use a local URLProtocol fixture.
 
@@ -109,6 +164,12 @@ Read the evidence status before enabling automated real-app trials or changing t
 **Do NOT run `xcodebuild` from the terminal** — it invalidates TCC permissions and the app will need to re-request screen recording/accessibility access. Pure Swift parsing/typechecking and isolated tests are permitted without replacing or launching the installed app. Run `scripts/test-jev.sh` and `scripts/test-stepfun.sh` for the two decision suites.
 
 Known non-blocking Swift 6 concurrency and deprecated `onChange` warnings must not be fixed as incidental cleanup.
+
+## Testing Rules
+
+- NEVER write unit tests after you write code.
+- Highly prefer E2E tests as the sole testing mechanism. Use them to verify complex features work. At the end of E2E tests, produce a verifiable and repeatable artifact.
+- If you must test a system in isolation, FIRST write all the ways it could fail, THEN write the code.
 
 ## Code Style & Conventions
 

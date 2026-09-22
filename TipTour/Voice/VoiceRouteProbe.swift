@@ -9,6 +9,17 @@ import Security
 final class VoiceRouteProbe {
     static func handleLaunch(companionManager: CompanionManager) -> Bool {
         let arguments = CommandLine.arguments
+        if let index = arguments.firstIndex(of: "--voice-continuity-probe"), arguments.count > index + 3 {
+            SecKeychainSetUserInteractionAllowed(false)
+            Task {
+                await VoiceTaskContinuityProbe.run(
+                    progressAudioURL: URL(fileURLWithPath: arguments[index + 1]),
+                    cancelAudioURL: URL(fileURLWithPath: arguments[index + 2]),
+                    outputURL: URL(fileURLWithPath: arguments[index + 3]))
+                NSApplication.shared.terminate(nil)
+            }
+            return true
+        }
         if let index = arguments.firstIndex(of: "--jev-fanout-probe"), arguments.count > index + 3 {
             SecKeychainSetUserInteractionAllowed(false)
             Task {
@@ -175,6 +186,7 @@ final class VoiceRouteProbe {
                 "microphone": "not_opened", "speaker": "not_played",
                 "completed": !result.timedOut && result.error == nil,
                 "error": result.error ?? "", "timed_out": result.timedOut,
+                "input_transcript": result.inputTranscript,
                 "calls": recordingTools.calls, "tool_results": recordingTools.results,
                 "rendered_texts": result.renderedTexts,
                 "realtime_audio_bytes": result.audio.count,

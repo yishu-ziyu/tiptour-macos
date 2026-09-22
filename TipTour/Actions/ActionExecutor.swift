@@ -16,6 +16,7 @@ enum ActionExecutorError: Error, LocalizedError {
     case invalidScrollDirection(String)
     case highlightedTextRangeUnavailable
     case actionDriverDisabled(String)
+    case desktopBusy
 
     var errorDescription: String? {
         switch self {
@@ -29,6 +30,8 @@ enum ActionExecutorError: Error, LocalizedError {
             return "The highlighted text range is no longer available."
         case .actionDriverDisabled(let driverName):
             return "\(driverName) action driver is disabled."
+        case .desktopBusy:
+            return "Another task owns the desktop, or the current task is paused."
         }
     }
 }
@@ -340,6 +343,8 @@ final class ActionExecutor {
     }
 
     private func ensureActionDriverEnabled() throws {
+        try Task.checkCancellation()
+        guard DesktopTaskAdmission.allowsCurrentTask else { throw ActionExecutorError.desktopBusy }
         guard isActionDriverEnabledProvider?() ?? true else {
             throw ActionExecutorError.actionDriverDisabled(actionDriverDisplayName)
         }
@@ -704,16 +709,23 @@ final class CuaActionDriver: TipTourActionDriver {
     }
 
     private func activateTargetApplicationIfNeeded(_ targetApplication: NSRunningApplication) async throws {
+        try Task.checkCancellation()
+        guard DesktopTaskAdmission.allowsCurrentTask else { throw ActionExecutorError.desktopBusy }
         if !targetApplication.isActive {
             targetApplication.activate()
             try await Task.sleep(nanoseconds: UInt64(postActivationSettleSeconds * 1_000_000_000))
         }
+        try Task.checkCancellation()
+        guard DesktopTaskAdmission.allowsCurrentTask else { throw ActionExecutorError.desktopBusy }
     }
 
     private func bringApplicationToForeground(_ targetApplication: NSRunningApplication) async throws {
+        try Task.checkCancellation()
+        guard DesktopTaskAdmission.allowsCurrentTask else { throw ActionExecutorError.desktopBusy }
         targetApplication.unhide()
         targetApplication.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         try await Task.sleep(nanoseconds: UInt64(postForegroundActivationSettleSeconds * 1_000_000_000))
+        guard DesktopTaskAdmission.allowsCurrentTask else { throw ActionExecutorError.desktopBusy }
         raiseMainWindowIfPossible(for: targetApplication)
         try await Task.sleep(nanoseconds: UInt64(postActivationSettleSeconds * 1_000_000_000))
     }
@@ -815,6 +827,8 @@ final class CuaActionDriver: TipTourActionDriver {
     private func typeTextUsingPhysicalKeys(_ text: String) async throws {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         for character in trimmedText {
+            try Task.checkCancellation()
+            guard DesktopTaskAdmission.allowsCurrentTask else { throw ActionExecutorError.desktopBusy }
             let keyName = String(character)
             try postKeyUsingQuartz(keyName)
             try await Task.sleep(nanoseconds: 35_000_000)

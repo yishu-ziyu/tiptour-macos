@@ -253,6 +253,7 @@ struct TipTourEngineWorkflowOutcome: Encodable {
     let reason: String?
     let message: String?
     let waitMs: Int
+    var delivery: DesktopActionDelivery = .unknown
 }
 
 struct TipTourEngineActionValidation: Encodable {
@@ -747,7 +748,11 @@ final class TipTourEngine {
         steps: [TipTourLongTaskStep],
         traceID: String? = nil
     ) -> TipTourLongTaskStartResponse {
-        longTaskCoordinator.startTask(
+        guard DesktopTaskAdmission.allowsCurrentTask else {
+            return TipTourLongTaskStartResponse(ok: false, reason: "desktop_task_busy",
+                message: "An application task owns the desktop or is paused.", task: nil)
+        }
+        return longTaskCoordinator.startTask(
             title: title,
             prompt: prompt,
             app: app,
@@ -759,6 +764,8 @@ final class TipTourEngine {
     func longTasks() -> TipTourLongTaskListResponse {
         longTaskCoordinator.listTasks()
     }
+
+    var hasActiveLegacyTask: Bool { longTaskCoordinator.hasActiveTask }
 
     func longTask(id: String) -> TipTourLongTaskStatusResponse {
         longTaskCoordinator.task(id: id)
@@ -1107,6 +1114,13 @@ final class TipTourEngine {
     }
 
     func runPointerAction(_ pointerActionRequest: PointerActionRequest) async -> TipTourEnginePlanNextActionResult {
+        guard DesktopTaskAdmission.allowsCurrentTask, !WorkflowRunner.shared.isBusy else {
+            return TipTourEnginePlanNextActionResult(ok: false,
+                traceID: pointerActionRequest.traceID ?? TipTourActionTrace.makeID(source: "busy"),
+                reason: "desktop_task_busy", message: "An application task owns the desktop or is paused.",
+                activeApp: nil, plannedStep: nil, submission: nil, workflowOutcome: nil,
+                validation: nil, attempts: [], repaired: false, targets: [])
+        }
         let traceID = pointerActionRequest.traceID ?? TipTourActionTrace.makeID(source: "action")
         let pointerActionRequest = pointerActionRequest.withTraceID(traceID)
         let actionStartedAt = Date()
@@ -1318,6 +1332,11 @@ final class TipTourEngine {
     }
 
     func submitSingleActionWorkflowPlan(_ plan: WorkflowPlan) -> TipTourEngineSubmissionResult {
+        guard DesktopTaskAdmission.allowsCurrentTask else {
+            return TipTourEngineSubmissionResult(ok: false, reason: "desktop_task_busy",
+                message: "An application task owns the desktop or is paused.", acceptedSteps: 0,
+                ignoredSteps: plan.steps.count, activeApp: plan.app)
+        }
         guard !Task.isCancelled else {
             return TipTourEngineSubmissionResult(ok: false, reason: "cancelled", message: "Stopped.",
                 acceptedSteps: 0, ignoredSteps: plan.steps.count, activeApp: plan.app)
@@ -1342,7 +1361,7 @@ final class TipTourEngine {
             return TipTourEngineSubmissionResult(
                 ok: false,
                 reason: "autopilot_disabled",
-                message: "TipTour Autopilot is off. Turn it on before external harnesses can execute actions.",
+                message: "Her Autopilot is off. Turn it on before external harnesses can execute actions.",
                 traceID: traceID,
                 acceptedSteps: 0,
                 ignoredSteps: plan.steps.count,
@@ -1371,20 +1390,25 @@ final class TipTourEngine {
             )
         }
 
-        activateRunningApplicationForWorkflowIfNeeded(plan.app)
-
-        if let activePlan = WorkflowRunner.shared.activePlan {
-            print("[Engine] superseding active plan \"\(activePlan.goal)\" with \"\(plan.goal)\"")
+        if WorkflowRunner.shared.isBusy {
             recordEngineEvent(
-                name: "workflow_plan_superseded",
-                status: "warning",
-                metadata: [
-                    TipTourActionTrace.metadataKey: traceID,
-                    "old_goal": activePlan.goal,
-                    "new_goal": plan.goal
-                ]
+                name: "workflow_plan",
+                status: "rejected",
+                message: "Another desktop action is already active.",
+                metadata: workflowPlanMetadata(plan).merging(
+                    ["reason": "workflow_busy"],
+                    uniquingKeysWith: { existing, _ in existing }
+                )
             )
-            WorkflowRunner.shared.stop()
+            return TipTourEngineSubmissionResult(
+                ok: false,
+                reason: "workflow_busy",
+                message: "Another desktop action is already active. Wait for it to finish or cancel it explicitly.",
+                traceID: traceID,
+                acceptedSteps: 0,
+                ignoredSteps: plan.steps.count,
+                activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
+            )
         }
 
         let normalizedSteps = normalizeWorkflowSteps(
@@ -1482,6 +1506,7 @@ final class TipTourEngine {
                 uniquingKeysWith: { existing, _ in existing }
             )
         )
+        activateRunningApplicationForWorkflowIfNeeded(plan.app)
         startWorkflowPlan(singleActionPlan)
 
         return TipTourEngineSubmissionResult(
@@ -1512,7 +1537,20 @@ final class TipTourEngine {
             return submission
         }
 
-        let workflowOutcome = await waitForWorkflowSettlement()
+        guard let operationID = WorkflowRunner.shared.currentOperationID else {
+            return TipTourEngineSubmissionResult(
+                ok: false,
+                reason: "workflow_start_missing",
+                message: "WorkflowRunner accepted the action but did not expose an active operation.",
+                traceID: traceID,
+                acceptedSteps: submission.acceptedSteps,
+                ignoredSteps: submission.ignoredSteps,
+                activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
+            )
+        }
+        var workflowOutcome = await waitForWorkflowSettlement(operationID: operationID)
+        workflowOutcome.delivery = WorkflowRunner.shared.delivery(for: operationID)
+        retireSettledTaskOperation(operationID)
         if shouldRefreshPerceptionAfterWorkflowPlan(tracedPlan) {
             await refreshLocalPerception("harness workflow-plan post-action")
         }
@@ -2202,6 +2240,7 @@ final class TipTourEngine {
     }
 
     private func activateRequestedApplicationForPerceptionIfNeeded(_ applicationNameOrBundleIdentifier: String?) async {
+        guard DesktopTaskAdmission.allowsCurrentTask, !WorkflowRunner.shared.isBusy else { return }
         guard let applicationNameOrBundleIdentifier = applicationNameOrBundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
               !applicationNameOrBundleIdentifier.isEmpty else {
             return
@@ -2469,9 +2508,20 @@ final class TipTourEngine {
             )
         )
 
-        let workflowOutcome: TipTourEngineWorkflowOutcome
+        var workflowOutcome: TipTourEngineWorkflowOutcome
         if submission.ok {
-            workflowOutcome = await waitForWorkflowSettlement()
+            if let operationID = WorkflowRunner.shared.currentOperationID {
+                workflowOutcome = await waitForWorkflowSettlement(operationID: operationID)
+                workflowOutcome.delivery = WorkflowRunner.shared.delivery(for: operationID)
+                retireSettledTaskOperation(operationID)
+            } else {
+                workflowOutcome = TipTourEngineWorkflowOutcome(
+                    status: "not_started",
+                    reason: "workflow_start_missing",
+                    message: "WorkflowRunner accepted the action but did not expose an active operation.",
+                    waitMs: 0
+                )
+            }
         } else {
             workflowOutcome = TipTourEngineWorkflowOutcome(
                 status: "not_started",
@@ -2541,15 +2591,60 @@ final class TipTourEngine {
         )
     }
 
-    private func waitForWorkflowSettlement() async -> TipTourEngineWorkflowOutcome {
+    private func retireSettledTaskOperation(_ operationID: UUID) {
+        // Task-owned workflows are single attempts. After their result is
+        // returned, the task coordinator decides whether another may start.
+        // Keep a still-running driver busy, and preserve legacy UI pauses.
+        guard DesktopTaskExecutionContext.ownerID != nil,
+              !WorkflowRunner.shared.isDelivering(operationID) else { return }
+        WorkflowRunner.shared.stop(operationID: operationID)
+    }
+
+    func waitForWorkflowSettlement(operationID: UUID) async -> TipTourEngineWorkflowOutcome {
         let startedAt = Date()
         let deadline = startedAt.addingTimeInterval(workflowSettlementTimeoutSeconds)
 
         while Date() < deadline {
             if Task.isCancelled {
-                WorkflowRunner.shared.stop()
-                return TipTourEngineWorkflowOutcome(status: "cancelled", reason: "cancelled",
-                    message: "Stopped.", waitMs: Self.elapsedMilliseconds(since: startedAt))
+                WorkflowRunner.shared.stop(operationID: operationID)
+                if !WorkflowRunner.shared.isDelivering(operationID) {
+                    return TipTourEngineWorkflowOutcome(status: "cancelled", reason: "cancelled",
+                        message: "Stopped.", waitMs: Self.elapsedMilliseconds(since: startedAt))
+                }
+            }
+            if WorkflowRunner.shared.isDelivering(operationID) {
+                await Task { try? await Task.sleep(nanoseconds: 100_000_000) }.value
+                continue
+            }
+            if WorkflowRunner.shared.currentOperationID != operationID {
+                if let settlement = WorkflowRunner.shared.settlement(for: operationID) {
+                    switch settlement.status {
+                    case .completed:
+                        return TipTourEngineWorkflowOutcome(
+                            status: "completed",
+                            reason: nil,
+                            message: "WorkflowRunner completed the single action.",
+                            waitMs: Self.elapsedMilliseconds(since: startedAt)
+                        )
+                    case .stopped:
+                        return TipTourEngineWorkflowOutcome(
+                            status: "stopped",
+                            reason: "workflow_stopped",
+                            message: "WorkflowRunner stopped before completing the action.",
+                            waitMs: Self.elapsedMilliseconds(since: startedAt)
+                        )
+                    case .skipped:
+                        return TipTourEngineWorkflowOutcome(status: "skipped", reason: "workflow_skipped",
+                            message: "The action was skipped, not completed.",
+                            waitMs: Self.elapsedMilliseconds(since: startedAt))
+                    }
+                }
+                return TipTourEngineWorkflowOutcome(
+                    status: "stopped",
+                    reason: "workflow_replaced_or_stopped",
+                    message: "The active workflow changed before this action completed.",
+                    waitMs: Self.elapsedMilliseconds(since: startedAt)
+                )
             }
             if let pausedReason = WorkflowRunner.shared.pausedReason {
                 return TipTourEngineWorkflowOutcome(
@@ -2565,15 +2660,6 @@ final class TipTourEngine {
                     status: "resolution_failed",
                     reason: "target_not_resolved",
                     message: "Could not resolve \"\(failedLabel)\" within WorkflowRunner's retry budget.",
-                    waitMs: Self.elapsedMilliseconds(since: startedAt)
-                )
-            }
-
-            if WorkflowRunner.shared.activePlan == nil {
-                return TipTourEngineWorkflowOutcome(
-                    status: "completed",
-                    reason: nil,
-                    message: "WorkflowRunner completed the single action.",
                     waitMs: Self.elapsedMilliseconds(since: startedAt)
                 )
             }
@@ -2874,6 +2960,10 @@ final class TipTourLongTaskCoordinator {
     private var runs: [String: TipTourLongTaskRun] = [:]
     private var runningTasks: [String: Task<Void, Never>] = [:]
     private var activeTaskID: String?
+    var hasActiveTask: Bool {
+        guard let activeTaskID, let run = runs[activeTaskID] else { return false }
+        return !run.status.isTerminal
+    }
     private var nextEventID = 1
     private let maximumEventsPerRun = 300
 
@@ -3027,7 +3117,10 @@ final class TipTourLongTaskCoordinator {
         }
 
         runningTasks[id]?.cancel()
-        WorkflowRunner.shared.stop()
+        if WorkflowRunner.shared.activePlan?.traceID == run.traceID,
+           let operationID = WorkflowRunner.shared.currentOperationID {
+            WorkflowRunner.shared.stop(operationID: operationID)
+        }
         finishTask(
             id: id,
             status: .cancelled,

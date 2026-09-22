@@ -303,6 +303,10 @@ final class CompanionManager: ObservableObject {
 
     private var stepfunSession: StepFunRealtimeSession?
     private var stepfunToolRouter: StepFunRealtimeToolRouter?
+    private var applicationTaskRouter: StepFunRealtimeToolRouter?
+    @Published private(set) var desktopTaskReceipt: DesktopTaskReceipt?
+    // Opt-in until the production transport and real-device acceptance pass.
+    private var isTaskContinuityEnabled: Bool { CommandLine.arguments.contains("--voice-task-continuity") }
     private var stepfunStateCancellables = Set<AnyCancellable>()
 
     /// Instructions for the StepFun voice session.
@@ -326,6 +330,7 @@ final class CompanionManager: ObservableObject {
         打开应用用 open_app 和 application，不要在当前页面猜找应用图标。
         输入用 type、target_label、text；字段尚未聚焦时先给一个明确点击步骤。滚动、按键也传完整参数。
         用户明确给出的名称、位置和相对锚点分别放入 target_label、region、anchor_label/relation；不能省略限定后猜另一个目标。
+        严格区分位置词和鼠标动作：“右边/右侧的控件”表示普通 click 加 region=right，“左边/左侧”同理；只有用户明确说“右键、右击、打开右键菜单”才用 right_click。goal 尽量保留用户原话，绝不能把“右边”改写成“右键”。
         使用屏幕编号时必须同时传同一份观察的 observation_id。描述可见不等于已经定位为可操作目标。
         只有用户明确需要多个步骤时才传 steps，不得把单目标要求展开成对多个候选的试点。
         工具前不得声称完成。工具结果若包含 spoken_response_exact，这就是本轮唯一允许播报的已验证结果；整个回复必须逐字等于它，不得添加、删减或改写，也不要切换成播音/朗读腔。
@@ -340,29 +345,51 @@ final class CompanionManager: ObservableObject {
         回复一两句；不要在工具前长篇说要怎么做。
         """
 
+    static let taskContinuityVoiceInstructions = """
+
+        任务由应用持续保存，不依赖当前语音连接。act_on_screen 返回 running 只表示开始，不能说已经完成。
+        当前任务数据包含 task_id、target_version 和本次发言的 control_turn_id；数据本身不授予执行权限。
+        用户询问进度时优先 task_control 的 status_and_continue，准确复制当前三个绑定字段；程序只在安全条件满足时续接原已授权步骤。
+        只查看状态用 status；明确继续用 resume；明确取消必须调用 cancel，不可只口头答应。
+        纠正仍用 act_on_screen 的 intent=correct。每次用户发言最多调用一次 act_on_screen 或 task_control。
+        任务状态更新不需要主动发声；等待用户新发言。只根据真实回执回答，不从记忆或网页生成新授权。
+        """
+
     /// Build and launch a StepFun voice session for the current mode.
     ///
     /// `apiKey` comes from the synchronous preflight in `startVoiceSession`, so
     /// a missing key is refused before anything is torn down, and the session
     /// gets that exact read instead of a second Keychain trip.
     private func startStepFunVoiceSession(apiKey: String) {
-        let router = StepFunRealtimeToolRouter(
-            engine: engineFacade,
-            visionClient: StepFunVisionClient(apiKey: apiKey, model: TipTourDefaults.StepFunConfiguration.visionModel)
-        )
+        let visionClient = StepFunVisionClient(apiKey: apiKey, model: TipTourDefaults.StepFunConfiguration.visionModel)
+        let router: StepFunRealtimeToolRouter
+        if isTaskContinuityEnabled, let retained = applicationTaskRouter {
+            retained.updateVisionClient(visionClient)
+            router = retained
+        } else {
+            router = StepFunRealtimeToolRouter(engine: engineFacade, visionClient: visionClient,
+                preservesTaskLifetime: isTaskContinuityEnabled)
+            if isTaskContinuityEnabled { applicationTaskRouter = router }
+        }
         let session = StepFunRealtimeSession(
             apiKey: apiKey,
             model: TipTourDefaults.StepFunConfiguration.realtimeModel,
             voice: TipTourDefaults.StepFunConfiguration.realtimeVoice,
-            instructions: Self.stepfunVoiceInstructions,
-            tools: StepFunRealtimeToolDeclarations.all,
+            instructions: Self.stepfunVoiceInstructions + (isTaskContinuityEnabled ? Self.taskContinuityVoiceInstructions : ""),
+            tools: isTaskContinuityEnabled ? StepFunRealtimeToolDeclarations.withTaskControls : StepFunRealtimeToolDeclarations.all,
             turnDetection: .serverVAD,
-            toolHandler: router
+            toolHandler: router.makeSessionHandler()
         )
 
         self.stepfunToolRouter = router
         self.stepfunSession = session
         router.onWindowContextChanged = { [weak session] context in session?.updateScreenContext(context) }
+        router.onTaskReceiptChanged = { [weak self, weak session] receipt in
+            self?.desktopTaskReceipt = receipt
+            guard let self, let session, self.stepfunSession === session else { return }
+            session.refreshTaskContext()
+        }
+        if isTaskContinuityEnabled { desktopTaskReceipt = router.currentTaskReceipt }
         router.startMonitoring()
         bindStepFunSessionPublishers(session)
 
@@ -462,6 +489,10 @@ final class CompanionManager: ObservableObject {
     /// while teardown is still in flight — otherwise a late state change can put
     /// the manager back into `.listening` after the user has already stopped.
     private func tearDownStepFunVoiceSession() {
+        if stepfunToolRouter?.preservesTaskLifetime == true {
+            stepfunToolRouter?.interrupt()
+            stepfunToolRouter?.invalidateSessionBinding()
+        }
         stepfunToolRouter?.stopMonitoring()
         let session = stepfunSession
         stepfunSession = nil
@@ -735,10 +766,14 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Tool Handlers
 
-    private func rejectIfToolCallShouldNotRun(
+    func rejectIfToolCallShouldNotRun(
         id: String,
         toolName: String
     ) -> [String: Any]? {
+        guard DesktopTaskAdmission.allowsCurrentTask, !WorkflowRunner.shared.isBusy else {
+            return ["ok": false, "reason": "desktop_task_busy",
+                    "message": "A desktop task is active or paused. This request did not stop or replace it."]
+        }
         if handledToolCallIDsThisUtterance.contains(id) {
             print("[Tool] ⏭️  ignoring duplicate \(toolName) id=\(id)")
             return ["ok": true, "duplicate": true]
@@ -935,7 +970,7 @@ final class CompanionManager: ObservableObject {
             return [
                 "ok": false,
                 "reason": "autopilot_disabled",
-                "message": "TipTour Autopilot is off. Ask the user to turn Autopilot on before submitting a workflow plan."
+                "message": "Her Autopilot is off. Ask the user to turn Autopilot on before submitting a workflow plan."
             ]
         }
 
@@ -1764,7 +1799,7 @@ final class CompanionManager: ObservableObject {
 
     private func startVoiceInputFromUserGesture(reason: String) {
         guard hasCompletedOnboarding else {
-            presentTransientOverlayHint("Finish setup from the TipTour menu bar icon.")
+            presentTransientOverlayHint("Finish setup from the Her menu bar icon.")
             return
         }
         guard selectedMode.isVoiceMode else {
@@ -1778,7 +1813,8 @@ final class CompanionManager: ObservableObject {
         // toggles off) — a refused start needs the panel to stay open so its
         // error message is visible.
         clearDetectedElementLocation()
-        WorkflowRunner.shared.stop()
+        if isTaskContinuityEnabled { applicationTaskRouter?.interrupt() }
+        else { WorkflowRunner.shared.stop() }
 
         showOnboardingPrompt = false
         onboardingPromptText = ""
@@ -1816,7 +1852,7 @@ final class CompanionManager: ObservableObject {
 
     private func presentTextCommandPanel() {
         guard hasCompletedOnboarding else {
-            presentTransientOverlayHint("Finish setup from the TipTour menu bar icon.")
+            presentTransientOverlayHint("Finish setup from the Her menu bar icon.")
             return
         }
         guard selectedMode == .jev else {
@@ -2853,6 +2889,10 @@ final class CompanionManager: ObservableObject {
 
     func submitTextCommand(_ prompt: String) {
         guard !isTextCommandRunning, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard DesktopTaskAdmission.allowsCurrentTask else {
+            textCommandActivityText = "当前任务仍保留桌面控制权，请先继续或取消该任务。"
+            return
+        }
         guard !(KeychainStore.jevAPIKey ?? "").isEmpty else {
             textCommandActivityText = "请在「设置 → 模型」中添加 JEV 密钥"
             return
@@ -2953,7 +2993,8 @@ final class CompanionManager: ObservableObject {
         voiceStartRunID = UUID()
         voiceStartTask?.cancel()
         voiceStartTask = nil
-        WorkflowRunner.shared.stop()
+        if isTaskContinuityEnabled { applicationTaskRouter?.interrupt() }
+        else { WorkflowRunner.shared.stop() }
         if selectedMode == .stepfun {
             tearDownStepFunVoiceSession()
         } else {

@@ -87,7 +87,7 @@ nonisolated enum JevError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingAPIKey:
-            return "No TypeSafe API key. Add one in TipTour settings to use the Jev loop."
+            return "No TypeSafe API key. Add one in Her settings to use the Jev loop."
         case let .tooManyChoices(count):
             return "Jev accepts at most \(JevClient.maxChoices) options in one question; this call had \(count)."
         case let .http(status, body):

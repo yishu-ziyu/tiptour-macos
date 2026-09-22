@@ -40,6 +40,14 @@ struct CompanionPanelView: View {
             VStack(alignment: .leading, spacing: 14) {
                 if isReady {
                     primaryMessageSection
+                    if let receipt = companionManager.desktopTaskReceipt {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(receipt.goal).font(.system(size: 11, weight: .medium)).lineLimit(2)
+                            Text(receipt.spokenSummary).font(.system(size: 11))
+                                .foregroundColor(DS.Colors.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                     readyControlSection
                 } else {
                     onboardingSection
