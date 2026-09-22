@@ -1,0 +1,835 @@
+"""Runner self-tests: everything that does not need the app, proven.
+
+Covers the fixture page's real behavior, probe argument plumbing, the evidence
+schema, every scenario judge (including the ones whose app probe does not exist
+yet), dry-run consistency and rerun hygiene, child-process discipline, and
+secret hygiene. Every test asserts observable results, never internal mechanics.
+A failure prints the raw evidence that disproved the expectation.
+"""
+from __future__ import annotations
+
+import json
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+from . import dry_run, evidence, paths
+from .app_identity import inspect_app_identity
+from .fixture_page import FixtureError, FixtureServer
+from .process_control import (
+    OwnedProcessRegistry,
+    OwnedProcess,
+    port_accepts_connections,
+    spawn_owned_process,
+    terminate_owned_process,
+)
+from .probe_runner import ProbeError, ProbeRequest, binary_supports_flag, build_probe_argv, run_probe
+from .scenario_judges import judge_scenario
+from .scenarios import load_scenarios
+from .synthetic_speech import (
+    PCM_SAMPLE_RATE_HZ,
+    SpeechSynthesisError,
+    synthesize_placeholder_for_self_tests,
+    synthesize_utterance,
+    validate_raw_pcm,
+)
+from .orchestration import RunOptions, run_acceptance
+
+
+class SelfTestFailure(AssertionError):
+    pass
+
+
+def _check(condition: bool, message: str) -> None:
+    if not condition:
+        raise SelfTestFailure(message)
+
+
+def _scenario_by_name(name: str):
+    matches = [scenario for scenario in load_scenarios() if scenario.name == name]
+    if not matches:
+        raise SelfTestFailure(f"Scenario {name!r} is not defined.")
+    return matches[0]
+
+
+# --------------------------------------------------------------- fixture page
+
+
+def test_fixture_lifecycle_and_state_semantics(work_dir: Path) -> list[str]:
+    registry = OwnedProcessRegistry()
+    fixture = FixtureServer(work_dir / "fixture-semantics", registry)
+    try:
+        start = fixture.start()
+        _check(isinstance(start.get("pid"), int), f"fixture did not start: {start}")
+        fixture.assert_controlled_page_marker()
+        state = fixture.reset()
+        _check(state.get("selected") is None and state.get("clicks") == 0
+               and state.get("events") == [] and state.get("menu_open") is False,
+               f"/state not clean after reset: {state}")
+
+        views_before = fixture.state().get("page_views")
+        fixture.fetch_page()
+        fixture.fetch_page()
+        views_after = fixture.state().get("page_views")
+        _check(views_after == (views_before or 0) + 2,
+               f"page_views did not count page loads: {views_before} -> {views_after}")
+
+        fixture.state()
+        fixture.state()
+        _check(fixture.state().get("page_views") == views_after,
+               "page_views must not count /state reads")
+
+        accepted = fixture._request("POST", "/select", {"selected": "right-setting"})
+        _check(accepted.get("selected") == "right-setting" and accepted.get("clicks") == 1
+               and accepted.get("events") == ["right-setting"],
+               f"right-setting select failed: {accepted}")
+
+        rejected_early = fixture._request("POST", "/select", {"selected": "scale"})
+        _check(rejected_early.get("selected") == "right-setting" and rejected_early.get("clicks") == 1,
+               f"scale must be rejected before the menu opens: {rejected_early}")
+
+        menu = fixture._request("POST", "/menu", {})
+        _check(menu.get("menu_open") is True and menu.get("events")[-1] == "open-menu",
+               f"menu open failed: {menu}")
+        scale = fixture._request("POST", "/select", {"selected": "scale"})
+        _check(scale.get("selected") == "scale" and scale.get("clicks") == 2
+               and scale.get("events") == ["right-setting", "open-menu", "scale"],
+               f"scale select after menu failed: {scale}")
+
+        left = fixture._request("POST", "/select", {"selected": "left-setting"})
+        _check(left.get("selected") == "left-setting" and left.get("clicks") == 3,
+               f"left-setting select failed: {left}")
+
+        invalid = fixture._request("POST", "/select", {"selected": "not-a-control"})
+        _check(invalid.get("selected") == "left-setting" and invalid.get("clicks") == 3,
+               f"unknown control must not change state: {invalid}")
+
+        reset_views = fixture.state().get("page_views")
+        again = fixture.reset()
+        _check(again.get("selected") is None and again.get("clicks") == 0
+               and again.get("events") == [] and again.get("menu_open") is False,
+               f"second reset failed: {again}")
+        _check(again.get("page_views") == reset_views,
+               "reset must not erase the page_views diagnostic")
+        return [f"fixture pid {start['pid']} behaviors verified: reset, page_views, "
+                f"select/menu ordering, rejection of scale before menu, invalid payload ignored"]
+    finally:
+        fixture.stop()
+
+
+def test_fixture_port_release_and_second_start(work_dir: Path) -> list[str]:
+    registry = OwnedProcessRegistry()
+    first = FixtureServer(work_dir / "fixture-first-run", registry)
+    second = FixtureServer(work_dir / "fixture-second-run", registry)
+    try:
+        first.start()
+        first.stop()
+        _check(not port_accepts_connections(paths.FIXTURE_HOST, paths.FIXTURE_PORT),
+               "fixture port still occupied after stop: a rerun would be polluted")
+        # The acceptance criterion requires the second run to start clean.
+        start = second.start()
+        _check(isinstance(start.get("pid"), int), "second fixture start failed")
+        state = second.state()
+        _check(state.get("clicks") == 0 and state.get("events") == [],
+               f"second fixture run starts polluted: {state}")
+        return [f"port {paths.FIXTURE_PORT} released and re-acquired by pid {start['pid']} "
+                "with clean /state"]
+    finally:
+        first.stop()
+        second.stop()
+
+
+def test_fixture_refuses_occupied_port_without_killing(work_dir: Path) -> list[str]:
+    blocking_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocking_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    blocking_socket.bind((paths.FIXTURE_HOST, paths.FIXTURE_PORT))
+    blocking_socket.listen(1)
+    registry = OwnedProcessRegistry()
+    fixture = FixtureServer(work_dir / "fixture-occupied", registry)
+    try:
+        try:
+            fixture.start()
+        except FixtureError as error:
+            _check("already occupied" in str(error),
+                   f"unexpected message for occupied port: {error}")
+        _check(not registry.running(), "runner spawned or kept a process it must not touch")
+        _check(fixture.owned is None,
+               "fixture claimed ownership of an unrelated listener")
+        return ["occupied port refused without spawning or killing anything"]
+    finally:
+        blocking_socket.close()
+        time.sleep(0.2)
+
+
+# ------------------------------------------------------------ synthetic speech
+
+
+def test_synthetic_pcm_pipeline(work_dir: Path) -> list[str]:
+    cache_dir = work_dir / "utterances"
+    text = "点击右边的设置按钮"
+    audio = synthesize_utterance(text, cache_dir)
+    _check(audio.is_real_speech is True, "system TTS output must be labeled real speech")
+    _check(audio.byte_count > 0, "synthesized PCM is empty")
+    validate_raw_pcm(audio.pcm_path.read_bytes())
+    _check(abs(audio.duration_seconds - audio.byte_count / 2 / PCM_SAMPLE_RATE_HZ) < 1e-6,
+           "duration metadata disagrees with byte count")
+    cached = synthesize_utterance(text, cache_dir)
+    _check(cached.cached is True and cached.pcm_path == audio.pcm_path,
+           "second synthesis did not reuse the cache")
+    _check(cached.byte_count == audio.byte_count, "cached audio differs in size")
+    try:
+        synthesize_utterance("   ", cache_dir)
+    except SpeechSynthesisError:
+        pass
+    else:
+        raise SelfTestFailure("empty utterance must be refused")
+    placeholder = synthesize_placeholder_for_self_tests(text, cache_dir)
+    _check(placeholder.is_real_speech is False,
+           "placeholder audio must be labeled as not real speech")
+    return [f"say+afconvert produced {audio.byte_count} bytes "
+            f"({audio.duration_seconds:.2f}s, voice {audio.voice}); cache hit on resynthesis; "
+            "placeholder labeled non-evidence"]
+
+
+# ------------------------------------------------------------ probe plumbing
+
+
+def test_probe_argument_plumbing() -> list[str]:
+    binary = Path("/Applications/Her.app/Contents/MacOS/Her")
+    pcm = Path("/tmp/utterance.pcm")
+    out_dir = Path("/tmp/attempt-dir")
+
+    argv = build_probe_argv(ProbeRequest(
+        mode="voice_task", app_binary=binary, working_out_dir=out_dir,
+        expected_bundle_identifier="com.apple.Safari", utterance_pcm_paths=[pcm]))
+    _check(argv == [str(binary), "--voice-task-probe", "com.apple.Safari", str(pcm), str(out_dir)],
+           f"voice_task argv wrong: {argv}")
+
+    argv = build_probe_argv(ProbeRequest(
+        mode="voice_continuity", app_binary=binary, working_out_dir=out_dir,
+        utterance_pcm_paths=[pcm, Path("/tmp/cancel.pcm")],
+        report_file_name="continuity-report.json"))
+    _check(argv == [str(binary), "--voice-continuity-probe", str(pcm),
+                    "/tmp/cancel.pcm", str(out_dir / "continuity-report.json")],
+           f"voice_continuity argv wrong: {argv}")
+
+    argv = build_probe_argv(ProbeRequest(
+        mode="desktop_task", app_binary=binary, working_out_dir=out_dir,
+        tool_arguments_json='{"goal":"x"}', report_file_name="task.json"))
+    _check(argv == [str(binary), "--desktop-task-probe", "com.apple.Safari", '{"goal":"x"}',
+                    str(out_dir / "task.json")],
+           f"desktop_task argv wrong: {argv}")
+
+    argv = build_probe_argv(ProbeRequest(
+        mode="voice_route", app_binary=binary, working_out_dir=out_dir,
+        utterance_pcm_paths=[pcm]))
+    _check(argv == [str(binary), "--voice-route-probe", str(pcm), str(out_dir)],
+           f"voice_route argv wrong: {argv}")
+
+    argv = build_probe_argv(ProbeRequest(
+        mode="jev_fanout", app_binary=binary, working_out_dir=out_dir,
+        goal_text="点击检查官网部署状态（3）", report_file_name="fanout.json"))
+    _check(argv == [str(binary), "--jev-fanout-probe", "com.apple.Safari",
+                    "点击检查官网部署状态（3）", str(out_dir / "fanout.json")],
+           f"jev_fanout argv wrong: {argv}")
+
+    argv = build_probe_argv(ProbeRequest(
+        mode="unknown", app_binary=binary, working_out_dir=out_dir,
+        utterance_pcm_paths=[pcm],
+        unknown_argv_template=["{app_binary}", "--unknown-delivery-probe",
+                               "{bundle_id}", "{pcm}", "{report}"]))
+    _check(argv == [str(binary), "--unknown-delivery-probe", "com.apple.Safari", str(pcm),
+                    str(out_dir / "report.json")],
+           f"unknown template substitution wrong: {argv}")
+
+    for bad_mode, kwargs in (
+        ("voice_task", dict(utterance_pcm_paths=[])),
+        ("voice_continuity", dict(utterance_pcm_paths=[pcm])),
+        ("desktop_task", dict()),
+        ("voice_route", dict(utterance_pcm_paths=[pcm, pcm])),
+        ("unknown", dict()),
+    ):
+        try:
+            build_probe_argv(ProbeRequest(mode=bad_mode, app_binary=binary,
+                                          working_out_dir=out_dir, **kwargs))
+        except ProbeError:
+            continue
+        raise SelfTestFailure(f"{bad_mode} accepted invalid arguments: {kwargs}")
+    return ["all five documented probe argvs and the unknown-template substitution are "
+            "exact; malformed requests are refused"]
+
+
+def test_binary_flag_detection(work_dir: Path) -> list[str]:
+    binary_with_flag = work_dir / "binary-with-flag"
+    binary_without_flag = work_dir / "binary-without-flag"
+    binary_with_flag.write_bytes(b"\x00fake-macho" + b"--unknown-delivery-probe" + b"\x00rest")
+    binary_without_flag.write_bytes(b"\x00fake-macho--voice-task-probe\x00rest")
+    _check(binary_supports_flag(binary_with_flag, "--unknown-delivery-probe"),
+           "flag present in binary was not detected")
+    _check(not binary_supports_flag(binary_without_flag, "--unknown-delivery-probe"),
+           "absent flag was reported as present")
+    _check(not binary_supports_flag(work_dir / "missing", "--any"),
+           "missing binary reported as supporting a flag")
+    return ["Mach-O flag detection distinguishes present/absent/missing correctly"]
+
+
+# ------------------------------------------------------------ evidence schema
+
+
+def _valid_dry_run_result() -> dict:
+    return {
+        "schema_version": 1, "work_order": paths.WORK_ORDER_ID, "commit": "abc123",
+        "branch": "test/her-e2e-runner", "app_bundle": "Her.app",
+        "bundle_id": paths.EXPECTED_BUNDLE_IDENTIFIER, "team_id": paths.EXPECTED_TEAM_IDENTIFIER,
+        "entrypoint": "python3 scripts/acceptance/her_voice_e2e.py --dry-run --out /tmp/x",
+        "provider_connection_attempted": False, "synthetic_audio": True,
+        "microphone_opened": False, "desktop_fixture_only": True, "mode": "dry_run",
+        "proof": False, "started_at": "now", "finished_at": "later",
+        "scenarios": [{
+            "name": "single_step_right_setting", "title": "A", "status": "passed",
+            "user_words": "点击右边的设置按钮", "model_tool_arguments": [],
+            "task_turn_attempt_ids": {}, "her_receipt": {}, "independent_state": {},
+            "final_speech": [], "failure_recovery": {}, "basis": ["chain agrees"],
+            "failure_reasons": [], "attempts": [],
+        }],
+        "passed": True, "exit_code": 0, "blocked_reason": None,
+    }
+
+
+def test_evidence_schema_validation() -> list[str]:
+    valid = _valid_dry_run_result()
+    _check(evidence.validate_result_schema(valid) == [],
+           f"valid document rejected: {evidence.validate_result_schema(valid)}")
+
+    broken_documents: list[tuple[str, dict]] = []
+    missing_key = dict(valid)
+    missing_key.pop("scenarios")
+    broken_documents.append(("missing scenarios", missing_key))
+
+    pass_without_basis = json.loads(json.dumps(valid))
+    pass_without_basis["scenarios"][0]["basis"] = []
+    broken_documents.append(("pass without basis", pass_without_basis))
+
+    fail_without_reason = json.loads(json.dumps(valid))
+    fail_without_reason["scenarios"][0]["status"] = "failed"
+    broken_documents.append(("fail without reason", fail_without_reason))
+
+    dry_run_claiming_proof = json.loads(json.dumps(valid))
+    dry_run_claiming_proof["proof"] = True
+    broken_documents.append(("dry run claiming proof", dry_run_claiming_proof))
+
+    unknown_mode = json.loads(json.dumps(valid))
+    unknown_mode["mode"] = "surprise"
+    broken_documents.append(("unknown mode", unknown_mode))
+
+    for label, document in broken_documents:
+        problems = evidence.validate_result_schema(document)
+        _check(problems, f"{label} was accepted by the schema validator")
+    return ["schema validator accepts the good document and rejects 5 broken shapes "
+            "(missing key, basis-less pass, reason-less fail, dry-run-as-proof, bad mode)"]
+
+
+def test_secret_scan_detects_canaries() -> list[str]:
+    canaries = [
+        "sk-AAAA1234BBBB5678CCCC",
+        "AKIAIOSFODNN7EXAMPLE",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "\"api_key\": \"abcdefghijklmnopqrstuvwx\"",
+    ]
+    for canary in canaries:
+        hits = evidence.scan_for_secret_patterns(f"prefix {canary} suffix")
+        _check(hits, f"secret canary slipped through: {canary}")
+    _check(evidence.scan_for_secret_patterns("clean text about clicks and settings") == [],
+           "clean evidence text was flagged")
+    return ["4 secret canary shapes are detected; clean evidence text is not flagged"]
+
+
+# ------------------------------------------------------------------- judges
+
+
+def _judge(scenario_name: str, probe_record: dict, report: dict | None,
+           state_before: dict, state_after: dict, require_language: bool = False):
+    scenario = _scenario_by_name(scenario_name)
+    return judge_scenario(scenario, probe_record, report, state_before, state_after,
+                          require_evidence_language=require_language)
+
+
+def _self_exited_record() -> dict:
+    return {"exit_record": {"pid": 4242, "self_exited": True, "returncode": 0,
+                            "timed_out": False}}
+
+
+def _chain(name: str, quality: str) -> dict:
+    scenario = _scenario_by_name(name)
+    chain = dry_run.load_dry_run_chain(scenario, quality)
+    return chain
+
+
+def test_judge_single_step_scenario(work_dir: Path) -> list[str]:
+    good = _chain("single_step_right_setting", dry_run.GOOD_CHAIN_SUFFIX)
+    verdict = _judge("single_step_right_setting", _self_exited_record(), good.report,
+                     good.state_before, good.state_after)
+    _check(verdict.passed, f"good chain rejected: {verdict.failure_reasons}")
+
+    bad = _chain("single_step_right_setting", "bad_double_click")
+    verdict = _judge("single_step_right_setting", _self_exited_record(), bad.report,
+                     bad.state_before, bad.state_after)
+    _check(not verdict.passed and any("click" in reason for reason in verdict.failure_reasons),
+           f"duplicate click not rejected: {verdict.failure_reasons}")
+
+    # Independent /state contradicting a completed receipt: the click never landed.
+    lying = json.loads(json.dumps(good.report))
+    lying["tool_results"][0] = json.dumps({
+        "goal": "点击右边的设置按钮", "status": "completed",
+        "detail": "任务步骤均已结束；各步完成依据已记录在操作历史中。",
+        "task_id": "t", "turn_id": "u", "current_actions": [{
+            "id": "a1", "label": "设置", "action": "click", "delivery": "sent",
+            "outcome_evidence": "not_observed", "completion_policy": "delivery_sufficient",
+            "completion_basis": None, "decision_packet": {"where": {"region": "right"}}}],
+    }, ensure_ascii=False)
+    verdict = _judge("single_step_right_setting", _self_exited_record(), lying,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed,
+           "completed receipt with completion_basis=None was accepted")
+
+    # A completed receipt whose speech claims verification it does not have.
+    overclaiming = json.loads(json.dumps(good.report))
+    overclaiming["rendered_texts"] = ["已完成并确认这 1 步操作。"]
+    verdict = _judge("single_step_right_setting", _self_exited_record(), overclaiming,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed, "overclaiming speech on an uncertain receipt was accepted")
+
+    # A timeout must never pass, whatever the report claims.
+    verdict = _judge("single_step_right_setting",
+                     {"pid": 1, "self_exited": False, "returncode": None, "timed_out": True},
+                     good.report, good.state_before, good.state_after)
+    _check(not verdict.passed, "a timed-out probe was accepted")
+
+    # A missing report must fail closed.
+    verdict = _judge("single_step_right_setting", _self_exited_record(), None,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed, "a missing report was accepted")
+
+    # A right_click contract must be rejected even with perfect /state.
+    right_click = json.loads(json.dumps(good.report))
+    right_click["tool_results"][0] = right_click["tool_results"][0].replace('"action":"click"', '"action":"right_click"')
+    verdict = _judge("single_step_right_setting", _self_exited_record(), right_click,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed, "right_click execution was accepted for a 右边 request")
+    return ["scenario A: honest uncertain receipt with corroborating /state passes; duplicate "
+            "click, lying receipt, overclaiming speech, timeout, missing report and "
+            "right_click are each rejected"]
+
+
+def test_judge_two_step_scenario(work_dir: Path) -> list[str]:
+    good = _chain("two_step_display_settings_scale", dry_run.GOOD_CHAIN_SUFFIX)
+    verdict = _judge("two_step_display_settings_scale", _self_exited_record(), good.report,
+                     good.state_before, good.state_after)
+    _check(verdict.passed, f"good two-step chain rejected: {verdict.failure_reasons}")
+
+    bad = _chain("two_step_display_settings_scale", "bad_open_app")
+    verdict = _judge("two_step_display_settings_scale", _self_exited_record(), bad.report,
+                     bad.state_before, bad.state_after)
+    _check(not verdict.passed and any("open_app" in reason for reason in verdict.failure_reasons),
+           f"the multi-step open_app bug signature was not rejected: {verdict.failure_reasons}")
+
+    # Correct tool arguments but the page shows the wrong ordered side effects.
+    wrong_order = json.loads(json.dumps(good.report))
+    wrong_order["tool_results"][0] = wrong_order["tool_results"][0].replace(
+        '"completed_step_count":2', '"completed_step_count":2')
+    verdict = _judge("two_step_display_settings_scale", _self_exited_record(), wrong_order,
+                     good.state_before,
+                     {"selected": "scale", "clicks": 1, "menu_open": True,
+                      "events": ["scale", "open-menu"], "page_views": 3})
+    _check(not verdict.passed, "reordered page side effects were accepted")
+
+    # A single top-level click is not the required two explicit steps.
+    single_step = json.loads(json.dumps(good.report))
+    single_step["calls"][0]["arguments"] = json.dumps(
+        {"goal": "点击打开显示设置，然后点击缩放选项。", "action": "click",
+         "target_label": "打开显示设置"}, ensure_ascii=False)
+    verdict = _judge("two_step_display_settings_scale", _self_exited_record(), single_step,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed, "a single top-level click was accepted as the two-step scenario")
+    return ["scenario C: two explicit steps with exact ordered /state passes; the open_app "
+            "bug signature, reordered side effects and a single-step submission are rejected"]
+
+
+def test_judge_continuity_scenario(work_dir: Path) -> list[str]:
+    good = _chain("continuity_progress_cancel", dry_run.GOOD_CHAIN_SUFFIX)
+    verdict = _judge("continuity_progress_cancel", _self_exited_record(), good.report,
+                     good.state_before, good.state_after)
+    _check(verdict.passed, f"good continuity chain rejected: {verdict.failure_reasons}")
+
+    bad = _chain("continuity_progress_cancel", "bad_reexecute")
+    verdict = _judge("continuity_progress_cancel", _self_exited_record(), bad.report,
+                     bad.state_before, bad.state_after)
+    _check(not verdict.passed and any("progress" in reason for reason in verdict.failure_reasons),
+           f"progress re-execution was not rejected: {verdict.failure_reasons}")
+
+    # The reconnect must not lose the task identity.
+    lost_task = json.loads(json.dumps(good.report))
+    lost_task["rounds"][1]["task_id"] = "different-task-id"
+    verdict = _judge("continuity_progress_cancel", _self_exited_record(), lost_task,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed, "a task identity change across reconnect was accepted")
+
+    # The progress speech must not be shipped as verified when gated.
+    mixed_language = json.loads(json.dumps(good.report))
+    mixed_language["rounds"][0]["rendered_texts"] = ["任务尚未完成，已确认 1/2 步。"]
+    advisory = _judge("continuity_progress_cancel", _self_exited_record(), mixed_language,
+                      good.state_before, good.state_after, require_language=False)
+    _check(advisory.passed and any("ADVISORY" in line for line in advisory.basis),
+           "advisory language mode did not record the wording observation")
+    gated = _judge("continuity_progress_cancel", _self_exited_record(), mixed_language,
+                   good.state_before, good.state_after, require_language=True)
+    _check(not gated.passed, "gated language mode accepted 已确认 wording for unverified steps")
+    return ["scenario continuity: stable identity + fresh turn + zero re-execution passes; "
+            "re-execution and lost identity are rejected; evidence-language gating works in "
+            "both advisory and required modes"]
+
+
+def test_judge_unknown_scenario(work_dir: Path) -> list[str]:
+    good = _chain("unknown_delivery_fault_recovery", dry_run.GOOD_CHAIN_SUFFIX)
+    verdict = _judge("unknown_delivery_fault_recovery", _self_exited_record(), good.report,
+                     good.state_before, good.state_after)
+    _check(verdict.passed, f"good fault chain rejected: {verdict.failure_reasons}")
+
+    bad = _chain("unknown_delivery_fault_recovery", "bad_reclick")
+    verdict = _judge("unknown_delivery_fault_recovery", _self_exited_record(), bad.report,
+                     bad.state_before, bad.state_after)
+    _check(not verdict.passed and any("clicks" in reason for reason in verdict.failure_reasons),
+           f"re-delivery of an unconfirmed attempt was not rejected: {verdict.failure_reasons}")
+
+    # Fake certainty after the fault: the receipt claims sent, /state proves one click.
+    fake_certain = json.loads(json.dumps(good.report))
+    fake_certain["receipt"]["current_actions"][0]["delivery"] = "sent"
+    verdict = _judge("unknown_delivery_fault_recovery", _self_exited_record(), fake_certain,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed,
+           "a receipt hiding the delivery-unknown state was accepted")
+    return ["scenario unknown: delivery=unknown with one click and honest speech passes; "
+            "re-click and a masked delivery state are rejected"]
+
+
+# -------------------------------------------------------------- hygiene checks
+
+
+def test_child_process_discipline(work_dir: Path) -> list[str]:
+    registry = OwnedProcessRegistry()
+    owned = spawn_owned_process(registry, "owned-sleep",
+                                ["sleep", "30"], log_path=work_dir / "owned.log")
+    decoy = subprocess.Popen(["sleep", "30"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        _check(owned.poll() is None, "owned child did not start")
+        _check(decoy.pid > 0, "decoy did not start")
+        record = terminate_owned_process(owned)
+        _check(record["terminated"] is True, f"owned child was not terminated: {record}")
+        time.sleep(0.2)
+        _check(decoy.poll() is None,
+               "a process the runner did not spawn was signalled")
+        # The registry tracks what the runner may stop; nothing else is registered.
+        _check([process.pid for process in registry.all()] == [owned.pid],
+               "registry contains a process the runner did not spawn")
+        return ["own child terminated by SIGTERM; the decoy process was never signalled"]
+    finally:
+        decoy.kill()
+        decoy.wait()
+
+
+def test_freshness_gate_blocks_stale_binary(work_dir: Path) -> list[str]:
+    identity = inspect_app_identity(paths.DEFAULT_DERIVED_DATA_APP)
+    machine_note = (f"DerivedData binary built {identity.binary_modified_at_iso}, newest "
+                    f"product source {identity.newest_product_source_path} at epoch "
+                    f"{identity.newest_product_source_modified_at_epoch}")
+    _check(identity.binary_is_fresh is False,
+           f"expected the machine's current DerivedData binary to be stale: {machine_note}")
+    _check(any("older than product sources" in reason for reason in identity.blocking_reasons),
+           f"stale binary did not produce a blocking freshness reason: {identity.blocking_reasons}")
+
+    # A synthetic fresh binary against the same sources must pass the freshness gate.
+    fake_app = work_dir / "Her.app"
+    (fake_app / "Contents/MacOS").mkdir(parents=True)
+    (fake_app / "Contents/Info.plist").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0"><dict>'
+        '<key>CFBundleIdentifier</key><string>com.yishuziyu.her</string>'
+        '<key>CFBundleExecutable</key><string>Her</string>'
+        '</dict></plist>', encoding="utf-8")
+    fresh_binary = fake_app / "Contents/MacOS/Her"
+    fresh_binary.write_bytes(b"#!/bin/sh\n")
+    fresh_binary.chmod(0o755)
+    newest_source_epoch = identity.newest_product_source_modified_at_epoch
+    import os
+    if newest_source_epoch:
+        # Touch well past the newest product source so only freshness differs.
+        os.utime(fresh_binary, (newest_source_epoch + 600, newest_source_epoch + 600))
+    fresh_identity = inspect_app_identity(fake_app)
+    _check(fresh_identity.binary_is_fresh is True,
+           "a fresh synthetic binary was judged stale")
+    _check(not any("older than product sources" in reason
+                   for reason in fresh_identity.blocking_reasons),
+           "freshness blocked a fresh binary")
+    # The synthetic bundle still fails identity (unsigned, wrong codesign) — as it must.
+    _check(fresh_identity.blocking_reasons,
+           "an unsigned synthetic bundle was not blocked")
+    return [f"stale DerivedData binary is BLOCKED ({machine_note}); "
+            "a fresh synthetic binary passes the freshness gate while still failing "
+            "signature identity"]
+
+
+# ---------------------------------------------------------------- dry-run runs
+
+
+def _run_dry_run(work_dir: Path, failure_injection: bool) -> tuple[int, dict, dict]:
+    out_dir = work_dir / ("dry-run-failures" if failure_injection else "dry-run-good")
+    options = RunOptions(
+        app_path_argument=None,
+        out_dir=out_dir,
+        mode="dry_run",
+        dry_run_failure_injection=failure_injection,
+    )
+    exit_code = run_acceptance(options)
+    result = evidence.read_json(out_dir / "result.json")
+    app_identity = evidence.read_json(out_dir / "app-identity.json")
+    return exit_code, result, app_identity
+
+
+def test_dry_run_full_pipeline_twice_consistent(work_dir: Path) -> list[str]:
+    first_code, first_result, _ = _run_dry_run(work_dir / "first", failure_injection=False)
+    # Pre-merge the unknown scenario is pending-integrator-run (work order 04's probe
+    # is not in the binary), so the honest exit code is non-zero with no failures.
+    _check(first_code == 1,
+           f"pre-merge good dry-run must exit non-zero while a scenario is pending: {first_code}")
+    _check(not any(scenario["status"] == "failed" for scenario in first_result["scenarios"]),
+           "the good dry-run has a failed scenario")
+    _check(first_result["summary"]["pending_integrator_run"] == ["unknown_delivery_fault_recovery"],
+           f"pending scenario list wrong: {first_result['summary']}")
+    _check(first_result["proof"] is False, "dry run claimed proof")
+    _check(first_result["mode"] == "dry_run", "dry run mislabeled")
+    _check(first_result["environment"]["fixture"]["port_released_after_stop"] is True,
+           "dry run left the fixture port occupied")
+    _check(first_result["environment"]["cleanup"]["owned_processes_remaining"] == 0,
+           "dry run left owned processes running")
+
+    second_dir = work_dir / "second"
+    second_options = RunOptions(app_path_argument=None, out_dir=second_dir, mode="dry_run")
+    _check(not port_accepts_connections(paths.FIXTURE_HOST, paths.FIXTURE_PORT),
+           "second run started while the port was still occupied by the first")
+    second_code = run_acceptance(second_options)
+    second_result = evidence.read_json(second_dir / "result.json")
+    _check(second_code == 1, "second dry run did not match the first run's exit code")
+    first_statuses = {scenario["name"]: scenario["status"] for scenario in first_result["scenarios"]}
+    second_statuses = {scenario["name"]: scenario["status"] for scenario in second_result["scenarios"]}
+    _check(first_statuses == second_statuses,
+           f"two dry runs disagreed: {first_statuses} vs {second_statuses}")
+    for scenario in first_result["scenarios"]:
+        _check(scenario["status"] in ("passed", "pending_integrator_run"),
+               f"unexpected dry-run verdict: {scenario['status']}")
+    return ["two consecutive dry runs agree, exit 0, port free between runs, no owned "
+            "processes left, and proof=False throughout"]
+
+
+def test_dry_run_failure_injection_is_detected(work_dir: Path) -> list[str]:
+    code, result, _ = _run_dry_run(work_dir, failure_injection=True)
+    _check(code == 1, "injected bad evidence did not produce a non-zero exit")
+    statuses = {scenario["name"]: scenario["status"] for scenario in result["scenarios"]}
+    for name in ("single_step_right_setting", "two_step_display_settings_scale",
+                 "continuity_progress_cancel"):
+        _check(statuses.get(name) == "failed",
+               f"injected failure for {name} was not detected: {statuses}")
+        scenario = next(item for item in result["scenarios"] if item["name"] == name)
+        _check(scenario["failure_reasons"], f"{name} failed without recorded reasons")
+    return ["every injected bad chain failed the run with recorded reasons and exit code 1"]
+
+
+def test_dry_run_artifacts_have_no_secrets(work_dir: Path) -> list[str]:
+    out_dir = work_dir / "secret-scan-run"
+    options = RunOptions(app_path_argument=None, out_dir=out_dir, mode="dry_run")
+    run_acceptance(options)
+    findings: list[str] = []
+    for path in sorted(out_dir.rglob("*")):
+        if path.is_file():
+            findings.extend(evidence.scan_file_for_secrets(path))
+    _check(findings == [], f"secret-shaped content in dry-run artifacts: {findings}")
+    _check((out_dir / "commands.txt").is_file() and (out_dir / "README.md").is_file(),
+           "commands.txt or README.md missing from the package")
+    return ["the full dry-run package scans clean of secret-shaped content and includes "
+            "commands.txt and README.md"]
+
+
+def test_scenario_definitions_are_consistent() -> list[str]:
+    scenarios = load_scenarios()
+    names = [scenario.name for scenario in scenarios]
+    for required in ("single_step_right_setting", "two_step_display_settings_scale",
+                     "continuity_progress_cancel", "unknown_delivery_fault_recovery"):
+        _check(required in names, f"required scenario {required!r} is missing")
+    for scenario in scenarios:
+        _check(all(utterance.strip() for utterance in scenario.utterances),
+               f"{scenario.name} has an empty utterance")
+        _check(scenario.probe_mode in ("voice_task", "voice_continuity", "unknown",
+                                       "desktop_task", "voice_route", "jev_fanout"),
+               f"{scenario.name} has unknown probe mode {scenario.probe_mode!r}")
+        if scenario.probe_mode == "voice_continuity":
+            _check(len(scenario.utterances) == 2,
+                   f"{scenario.name} needs exactly two utterances (progress, cancel)")
+        if scenario.probe_mode == "unknown":
+            _check(scenario.reproduction.get("one_command"),
+                   f"{scenario.name} must carry the integrator reproduction command")
+    return ["all four required scenarios are defined with consistent probe modes, "
+            "non-empty utterances and reproduction metadata"]
+
+
+def test_probe_execution_lifecycle(work_dir: Path) -> list[str]:
+    """Real spawn/report/cleanup plumbing with a fake probe binary (no app)."""
+    fake_report = {
+        "completed": True,
+        "calls": [{"name": "act_on_screen",
+                   "arguments": json.dumps({"goal": "点击右边的设置按钮",
+                                            "action": "click", "region": "right"},
+                                           ensure_ascii=False)}],
+        "tool_results": [], "rendered_texts": [],
+    }
+    fake_report_path = work_dir / "fake-report.json"
+    fake_report_path.write_text(json.dumps(fake_report, ensure_ascii=False), encoding="utf-8")
+
+    fake_binary = work_dir / "fake-her-probe"
+    fake_binary.write_text(
+        "#!/bin/bash\n"
+        "mkdir -p \"$4\"\n"
+        f"cp {fake_report_path} \"$4/realtime.json\"\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_binary.chmod(0o755)
+
+    registry = OwnedProcessRegistry()
+    request = ProbeRequest(
+        mode="voice_task", app_binary=fake_binary,
+        working_out_dir=work_dir / "probe-out",
+        utterance_pcm_paths=[work_dir / "utterance.pcm"],
+        report_file_name="realtime.json",
+    )
+    (work_dir / "utterance.pcm").write_bytes(b"\x00\x01" * 120)
+    result = run_probe(request, registry, timeout_seconds=30.0)
+    _check(result.exit_record["self_exited"] is True and result.exit_record["returncode"] == 0,
+           f"fake probe did not exit cleanly: {result.exit_record}")
+    _check(result.report is not None and result.report.get("completed") is True,
+           f"fake probe report was not loaded: {result.report_error}")
+    _check("realtime.json" in result.output_files, f"output files wrong: {result.output_files}")
+    _check(not registry.running(), "fake probe process was left running")
+    _check((result.child.log_path or Path("/nonexistent")).is_file(),
+           "probe log was not captured")
+
+    # A probe that exits cleanly but writes no report must fail closed.
+    silent_binary = work_dir / "silent-probe"
+    silent_binary.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    silent_binary.chmod(0o755)
+    silent_request = ProbeRequest(
+        mode="voice_task", app_binary=silent_binary,
+        working_out_dir=work_dir / "silent-out",
+        utterance_pcm_paths=[work_dir / "utterance.pcm"],
+        report_file_name="realtime.json",
+    )
+    silent_result = run_probe(silent_request, registry, timeout_seconds=30.0)
+    _check(silent_result.report is None and "did not write" in (silent_result.report_error or ""),
+           f"missing report was not detected: {silent_result.report_error}")
+
+    # A probe that never exits must be stopped by the runner (own child only).
+    hanging_binary = work_dir / "hanging-probe"
+    hanging_binary.write_text("#!/bin/bash\nsleep 60\n", encoding="utf-8")
+    hanging_binary.chmod(0o755)
+    hanging_request = ProbeRequest(
+        mode="voice_task", app_binary=hanging_binary,
+        working_out_dir=work_dir / "hanging-out",
+        utterance_pcm_paths=[work_dir / "utterance.pcm"],
+        report_file_name="realtime.json",
+    )
+    hanging_result = run_probe(hanging_request, registry, timeout_seconds=2.0)
+    _check(hanging_result.exit_record["timed_out"] is True,
+           f"hanging probe was not marked timed out: {hanging_result.exit_record}")
+    _check(hanging_result.exit_record.get("killed_after_grace") is True
+           or hanging_result.exit_record.get("terminated") is True,
+           f"hanging probe was not terminated: {hanging_result.exit_record}")
+    time.sleep(0.2)
+    _check(hanging_result.child.poll() is not None, "terminated probe child is still alive")
+    _check(not registry.running(), "processes left running after the probe tests")
+    return ["fake probe report loaded and cleaned up; silent probe failed closed; "
+            "hanging probe terminated by the runner with the timeout recorded"]
+
+
+# ------------------------------------------------------------------- runner
+
+
+_TESTS_WITHOUT_WORK_DIR = frozenset({
+    test_probe_argument_plumbing,
+    test_evidence_schema_validation,
+    test_secret_scan_detects_canaries,
+    test_scenario_definitions_are_consistent,
+})
+
+TESTS = (
+    ("scenario definitions are consistent", test_scenario_definitions_are_consistent),
+    ("fixture lifecycle and state semantics", test_fixture_lifecycle_and_state_semantics),
+    ("fixture port release and clean second start", test_fixture_port_release_and_second_start),
+    ("fixture refuses occupied port without killing", test_fixture_refuses_occupied_port_without_killing),
+    ("synthetic PCM pipeline", test_synthetic_pcm_pipeline),
+    ("probe argument plumbing", test_probe_argument_plumbing),
+    ("binary flag detection", test_binary_flag_detection),
+    ("probe execution lifecycle", test_probe_execution_lifecycle),
+    ("evidence schema validation", test_evidence_schema_validation),
+    ("secret scan canaries", test_secret_scan_detects_canaries),
+    ("judge: single-step right setting", test_judge_single_step_scenario),
+    ("judge: two-step display settings/scale", test_judge_two_step_scenario),
+    ("judge: continuity progress/cancel", test_judge_continuity_scenario),
+    ("judge: unknown delivery fault", test_judge_unknown_scenario),
+    ("child process discipline", test_child_process_discipline),
+    ("freshness gate blocks stale binary", test_freshness_gate_blocks_stale_binary),
+    ("dry run full pipeline twice consistent", test_dry_run_full_pipeline_twice_consistent),
+    ("dry run failure injection detected", test_dry_run_failure_injection_is_detected),
+    ("dry run artifacts have no secrets", test_dry_run_artifacts_have_no_secrets),
+)
+
+
+def run_all() -> int:
+    """Run every self-test; any failure exits non-zero with its raw evidence."""
+    print("Her E2E runner self-tests", flush=True)
+    print("=" * 72, flush=True)
+    passed = 0
+    failed = 0
+    with tempfile.TemporaryDirectory(prefix="her-acceptance-selftest-") as temporary:
+        work_root = Path(temporary) / "workspace"
+        work_root.mkdir()
+        for index, (label, test) in enumerate(TESTS):
+            test_name = f"{index + 1:02d}-{label.replace(' ', '-').replace(':', '').replace('/', '-')}"
+            work_dir = work_root / test_name
+            work_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                details = test() if test in _TESTS_WITHOUT_WORK_DIR else test(work_dir)
+            except SelfTestFailure as failure:
+                failed += 1
+                print(f"FAIL  {label}", flush=True)
+                print(f"      {failure}", flush=True)
+            except Exception as error:  # noqa: BLE001 - self-tests must never crash silently
+                failed += 1
+                print(f"ERROR {label}", flush=True)
+                print(f"      {type(error).__name__}: {error}", flush=True)
+            else:
+                passed += 1
+                print(f"PASS  {label}", flush=True)
+                for detail in details:
+                    print(f"      {detail}", flush=True)
+    print("=" * 72, flush=True)
+    print(f"self-tests: {passed} passed, {failed} failed", flush=True)
+    if failed:
+        print("Self-test failures are runner bugs: no acceptance evidence may be produced "
+              "until they are fixed.", flush=True)
+        return 1
+    print("App-dependent phases still require the signed DEBUG Her.app, Xcode rebuild, "
+          "and the user's Keychain key; they are marked pending-integrator-run in the "
+          "evidence package.", flush=True)
+    return 0

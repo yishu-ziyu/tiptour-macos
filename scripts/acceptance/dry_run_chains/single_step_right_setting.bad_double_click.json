@@ -1,0 +1,31 @@
+{
+  "quality": "bad",
+  "description": "Injected failure: the click was delivered twice (independent /state clicks=2, repeated right-setting events). The judge must refuse PASS: a re-click on the same control is a duplicate side effect, not a success.",
+  "argv": [
+    "<mock>Her.app/Contents/MacOS/Her",
+    "--voice-task-probe",
+    "com.apple.Safari",
+    "<utterance-pcm>",
+    "<attempt-dir>"
+  ],
+  "state_before": {"selected": null, "clicks": 0, "menu_open": false, "events": [], "page_views": 2},
+  "state_after": {"selected": "right-setting", "clicks": 2, "menu_open": false, "events": ["right-setting", "right-setting"], "page_views": 2},
+  "report": {
+    "route": "production_realtime_session",
+    "synthetic_input": true,
+    "microphone": "not_opened",
+    "speaker": "not_played",
+    "completed": true,
+    "error": "",
+    "timed_out": false,
+    "input_transcript": "点击右边的设置按钮",
+    "calls": [
+      {"name": "act_on_screen", "arguments": "{\"goal\":\"点击右边的设置按钮\",\"intent\":\"new\",\"action\":\"click\",\"target_label\":\"设置\",\"region\":\"right\"}"}
+    ],
+    "tool_results": [
+      "{\"goal\":\"点击右边的设置按钮\",\"status\":\"completed\",\"actions\":[\"click「设置」：动作已送达\"],\"detail\":\"任务步骤均已结束；各步完成依据已记录在操作历史中。\",\"app\":\"com.apple.Safari\",\"task_id\":\"11111111-2222-3333-4444-555555555555\",\"turn_id\":\"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\",\"target_version\":1,\"prior_actions\":[],\"current_actions\":[{\"id\":\"attempt-0001\",\"observationID\":\"obs-0001\",\"app\":\"com.apple.Safari\",\"targetID\":\"target-right-setting\",\"label\":\"设置\",\"action\":\"click\",\"decision_packet\":{\"action\":\"click\",\"where\":{\"region\":\"right\"},\"evidence\":[\"action_locked\",\"target_exact\",\"location_filtered_in_code\"]},\"completionPolicy\":\"delivery_sufficient\",\"delivery\":\"sent\",\"outcomeEvidence\":\"not_observed\",\"detail\":\"driver confirmed delivery\",\"completionBasis\":\"delivery_confirmed\",\"satisfied\":true,\"verified\":false}],\"verified_action_history\":[],\"satisfied_action_history\":[\"click「设置」：动作已送达\"],\"completed_step_count\":1,\"total_step_count\":1}"
+    ],
+    "rendered_texts": ["已点击「设置」。"],
+    "realtime_audio_bytes": 84000
+  }
+}

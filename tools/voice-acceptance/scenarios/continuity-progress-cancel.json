@@ -1,0 +1,29 @@
+{
+  "name": "continuity_progress_cancel",
+  "title": "Continuity：查询进度，重连后取消同一任务",
+  "description": "Two real-provider rounds through the production session/router with the in-memory fixture executor (no desktop side effects): a progress question, then a cancel after reconnect. The runner requires the same task identity to survive the reconnect, a fresh turn binding for the cancel, zero repeated desktop actions, and an honest final status.",
+  "user_words": "这个任务进行到哪一步了？ → 取消这个任务",
+  "utterances": [
+    "这个任务进行到哪一步了？",
+    "取消这个任务"
+  ],
+  "probe": {
+    "mode": "voice_continuity",
+    "report_file_name": "continuity-report.json",
+    "timeout_seconds": 300
+  },
+  "repeat": 1,
+  "expectations": {
+    "round_actions": ["status", "cancel"],
+    "require_same_task_id_across_rounds": true,
+    "require_new_turn_id_on_second_round": true,
+    "require_final_status": "cancelled",
+    "require_fixture_actions_at_most": 1,
+    "require_no_desktop_side_effects": true,
+    "progress_language": {
+      "mode": "advisory",
+      "forbidden_substrings": ["已确认 1/2", "已确认 2/2"],
+      "required_semantics_note": "Work order 02 requires progress speech to distinguish delivery from verification; the verbatim text is always recorded. Set --require-evidence-language to gate on it."
+    }
+  }
+}

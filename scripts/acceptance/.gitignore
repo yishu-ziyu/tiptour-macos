@@ -1,0 +1,4 @@
+# Runner bytecode caches are machine-local artifacts of running the self-tests
+# or dry-runs; they are never evidence and never committed.
+__pycache__/
+*.pyc
