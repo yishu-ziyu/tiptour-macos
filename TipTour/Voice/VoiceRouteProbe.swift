@@ -9,6 +9,36 @@ import Security
 final class VoiceRouteProbe {
     static func handleLaunch(companionManager: CompanionManager) -> Bool {
         let arguments = CommandLine.arguments
+        // Global DEBUG fault arming: combine with any probe or debug launch to
+        // make the next successful driver delivery lose its receipt. The gate
+        // itself lives beside the injection point and is off unless armed.
+        if arguments.contains("--drop-next-delivery-receipt") {
+            DesktopReceiptLossFault.armNextDelivery()
+        }
+        if let index = arguments.firstIndex(of: "--receipt-loss-probe"), arguments.count > index + 5 {
+            SecKeychainSetUserInteractionAllowed(false)
+            Task {
+                await DesktopUnknownRecoveryProbe.runReceiptLossScenario(
+                    companionManager: companionManager,
+                    targetApplicationBundleIdentifier: arguments[index + 1],
+                    fixtureStateBaseURL: arguments[index + 2],
+                    firstRoundToolArgumentsJSON: arguments[index + 3],
+                    continuationRoundToolArgumentsJSON: arguments[index + 4],
+                    outputURL: URL(fileURLWithPath: arguments[index + 5]))
+                NSApplication.shared.terminate(nil)
+            }
+            return true
+        }
+        if let index = arguments.firstIndex(of: "--journal-recovery-probe"), arguments.count > index + 2 {
+            SecKeychainSetUserInteractionAllowed(false)
+            Task {
+                await DesktopUnknownRecoveryProbe.runJournalRecoveryScenario(
+                    applicationSupportRootURL: URL(fileURLWithPath: arguments[index + 1]),
+                    outputURL: URL(fileURLWithPath: arguments[index + 2]))
+                NSApplication.shared.terminate(nil)
+            }
+            return true
+        }
         if let index = arguments.firstIndex(of: "--voice-continuity-probe"), arguments.count > index + 3 {
             SecKeychainSetUserInteractionAllowed(false)
             Task {
