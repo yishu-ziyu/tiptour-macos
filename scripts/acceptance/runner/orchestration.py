@@ -29,7 +29,7 @@ import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import browser_stage, dry_run, evidence, paths, run_mutex, scenarios as scenario_defs
+from . import browser_stage, dry_run, evidence, paths, provider_shapes, run_mutex, scenarios as scenario_defs
 from .app_identity import inspect_app_identity, resolve_app_path
 from .browser_stage import BrowserStageError, reload_controlled_page, stage_controlled_page
 from .fixture_page import FixtureError, FixtureServer
@@ -1184,6 +1184,11 @@ def _finish(context: RunContext, options: RunOptions, scenario_results: list[dic
     written = evidence.write_evidence_package(context.out_dir, result,
                                               context.app_identity_dict or {},
                                               commands, readme)
+    # Provider argument-shape monitor: only a real run has real provider
+    # arguments to profile, so dry-run is deliberately never scanned. The
+    # monitor never affects the verdict or the exit code.
+    if context.mode == "full" and (context.out_dir / "scenario-artifacts").is_dir():
+        provider_shapes.record_shapes(context.out_dir)
     secret_hits: list[str] = []
     for path in written:
         secret_hits.extend(evidence.scan_file_for_secrets(path))

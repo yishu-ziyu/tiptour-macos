@@ -138,3 +138,56 @@ No runner edits are required. If work order 04's probe takes different
 arguments than the placeholder template in
 `tools/voice-acceptance/scenarios/unknown-delivery-fault-recovery.json`, update
 that one `argv_template` (or pass `--unknown-probe-argv '<JSON>'`) and rerun.
+
+## Independent evidence reviewer (verify_evidence.py)
+
+A runner PASS is a claim, not a verdict. `verify_evidence.py` is the
+independent reviewer: it re-derives every acceptance criterion from an
+evidence package's JSON and nothing else — no product code, no app, no
+network, no runner imports — so the "did it pass" decision never rests on the
+package's own `passed` field. It reviews any work order's package, not just
+this runner's, and it works on a machine with none of the tooling the run
+needed.
+
+```bash
+python3 scripts/acceptance/verify_evidence.py out/acceptance/03-her-e2e-runner
+python3 scripts/acceptance/verify_evidence.py out/acceptance/03-her-e2e-runner/result.json
+python3 scripts/acceptance/verify_evidence.py <result.json or directory> --strict   # pending/blocked count as not passed
+python3 scripts/acceptance/verify_evidence.py --self-test                          # offline replay of testdata/
+```
+
+A directory is accepted directly (`result.json` inside it, or one `result.json`
+per work-order subdirectory). Every criterion is printed human-readable
+(`[PASS]/[FAIL]` with the exact `evidence:` JSON path it rests on) and then
+emitted as machine-readable JSON; `--json-out PATH` saves that JSON. Exit
+codes: `0` every criterion passed, `1` any criterion failed (acceptance not
+proven), `2` the input could not be read or parsed.
+
+What it re-derives, per scenario, from the six evidence layers:
+
+- **Schema** — `scenarios[]` present and non-empty; every scenario carries all
+  six layers plus its failure/recovery record. A claimed pass missing a layer
+  is a FAIL, never a PASS.
+- **Delivery vs. independent state** — every `delivery=sent` receipt action
+  must correspond to a non-empty new event sequence in the independent
+  `/state` readback (count correspondence, label match when the recorded
+  fields allow it).
+- **Overclaiming speech** — a final speech claiming 已确认/完成 requires the
+  matching system-verified basis in the receipt (an
+  `outcome_required`/`system_verified_outcome` action pair, or receipt-level
+  system-verification counters); otherwise FAIL. Rule source: work order 02's
+  `verify-report.py` — a confirmation may only be spoken for steps the system
+  independently verified.
+- **Uncertain receipts** — `status=uncertain_effect` requires uncertainty
+  wording in the final speech (不确定/未确认/已停下/尚未完成…).
+- **Effective plan** — raw model tool arguments must agree with the recorded
+  normalized/effective plan whenever both are present.
+- **Exit status** — `returncode_basis=derived:*` requires
+  `report_artifact_present`; a null or unavailable basis fails closed.
+- **Recorded vs. derived** — `passed=true` must match the independently
+  re-derived verdict, and a dry-run package must never be marked as proof.
+
+`testdata/` holds three offline samples the self-test replays:
+`good` (must review PASS), `missing-layer` and `overclaiming-speech` (must
+review FAIL). The self-test exercises the reviewer itself — like work order
+02's `--mock-self-test`, it says nothing about any product.

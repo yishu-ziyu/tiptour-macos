@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "quality": "missing-layer",
+  "description": "Reviewer testdata: an overclaiming package that records status=passed and passed=true while the her_receipt evidence layer is absent entirely. A verdict is never allowed to rest on a missing layer, so the schema check must FAIL (exit code 1) even though the product's own fields claim success. Not product evidence — it only exercises the reviewer.",
+  "work_order": "INFRA-3",
+  "commit": "0000000000000000000000000000000000000000",
+  "branch": "feat/her-acceptance-infrastructure",
+  "app_bundle": "Her.app",
+  "bundle_id": "com.yishuziyu.her",
+  "team_id": "87DM76C54G",
+  "entrypoint": "python3 scripts/acceptance/verify_evidence.py --self-test",
+  "provider_connection_attempted": true,
+  "synthetic_audio": true,
+  "microphone_opened": false,
+  "desktop_fixture_only": true,
+  "mode": "full",
+  "proof": true,
+  "passed": true,
+  "exit_code": 0,
+  "scenarios": [
+    {
+      "name": "single_step_right_setting",
+      "title": "One-step spatial click",
+      "status": "passed",
+      "user_words": "点击右边的设置按钮",
+      "model_tool_arguments": [
+        {
+          "name": "act_on_screen",
+          "arguments": "{\"goal\":\"点击右边的设置按钮\",\"intent\":\"new\",\"action\":\"click\",\"target_label\":\"设置\",\"region\":\"right\"}",
+          "normalized_arguments": "{\"goal\":\"点击右边的设置按钮\",\"intent\":\"new\",\"action\":\"click\",\"target_label\":\"设置\",\"region\":\"right\"}"
+        }
+      ],
+      "task_turn_attempt_ids": {
+        "task_id": "11111111-2222-3333-4444-555555555555",
+        "turn_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "target_version": 1,
+        "action_attempt_ids": ["attempt-0001"],
+        "observation_ids": ["obs-0001"]
+      },
+      "independent_state": {
+        "before": {"selected": null, "clicks": 0, "menu_open": false, "events": [], "page_views": 2},
+        "after": {"selected": "right-setting", "clicks": 1, "menu_open": false, "events": ["right-setting"], "page_views": 2},
+        "new_events": ["right-setting"]
+      },
+      "final_speech": ["已点击「设置」。"],
+      "failure_recovery": {
+        "fault_injected": false,
+        "recovery_evidence": null,
+        "note": "No fault was injected; nothing to recover."
+      },
+      "basis": [
+        "The recorded basis claims a completed receipt, but no receipt object is present in this package to re-derive that claim from."
+      ],
+      "failure_reasons": [],
+      "attempts": [
+        {
+          "utterance": {"text": "点击右边的设置按钮", "synthetic": true, "metadata_only": true},
+          "probe": {"argv": ["<mock>Her.app/Contents/MacOS/Her", "--voice-task-probe", "com.apple.Safari", "<utterance-pcm>", "<attempt-dir>"]},
+          "independent_state": {"before": {"selected": null, "clicks": 0, "events": []}, "after": {"selected": "right-setting", "clicks": 1, "events": ["right-setting"]}},
+          "process_exit": {"pid": 4243, "self_exited": true, "returncode": 0, "timed_out": false},
+          "cleanup": {"owned_processes_remaining": 0},
+          "mock": false
+        }
+      ]
+    }
+  ]
+}

@@ -1179,6 +1179,241 @@ def test_preflight_gate_blocks_and_continues(work_dir: Path) -> list[str]:
             "preconditions continue; a report-less supported preflight fails closed"]
 
 
+# --------------------------------------------------------- machine preflight
+
+
+def test_machine_preflight_port_occupancy(work_dir: Path) -> list[str]:
+    """Port occupancy is decided by a connect attempt that disturbs nothing.
+
+    A real listener on an ephemeral port proves the occupied branch reports the
+    port (and leaves the listener alive and listening), and closing it proves
+    the same probe then reports the port free. This is why a run can be BLOCKED
+    on a held port without the preflight ever killing a leftover process.
+    """
+    from . import machine_preflight
+
+    # Port 0 lets the kernel hand out a free port: the test cannot collide with
+    # anything, and nothing has to be started to fake an occupancy.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind((paths.FIXTURE_HOST, 0))
+    listener.listen(8)
+    probe_port = listener.getsockname()[1]
+    try:
+        occupied = machine_preflight.check_port(
+            "probe-port", paths.FIXTURE_HOST, probe_port, "the test's own listener")
+        _check(occupied["ok"] is False, f"an occupied port was reported ok: {occupied}")
+        _check(occupied["evidence"]["port_accepts_connections"] is True,
+               f"the occupancy probe did not observe the listener: {occupied}")
+        _check(str(probe_port) in occupied["detail"],
+               f"the occupied detail must name the port: {occupied}")
+        # The probe connected and closed its own socket; the listener survives.
+        _check(port_accepts_connections(paths.FIXTURE_HOST, probe_port),
+               "the occupancy probe disturbed the foreign listener it found")
+        _check(listener.fileno() != -1, "the existing listener was closed by the probe")
+    finally:
+        listener.close()
+        time.sleep(0.2)
+    free = machine_preflight.check_port(
+        "probe-port", paths.FIXTURE_HOST, probe_port, "the test's own listener")
+    _check(free["ok"] is True, f"a released port was reported occupied: {free}")
+    _check(free["evidence"]["port_accepts_connections"] is False,
+           f"the free probe disagreed: {free}")
+    return [f"port {probe_port}: occupied reported and the listener untouched; "
+            "released port reported free - a connect-only occupancy probe"]
+
+
+def test_machine_preflight_frontmost_identity_forms(work_dir: Path) -> list[str]:
+    """Both `lsappinfo front` shapes must resolve to one proven identity.
+
+    One build lists the bundle id outright; this machine's shape prints only an
+    ASN ending in a trailing colon, which must be resolved with the read-only
+    `lsappinfo info <ASN>` - never inferred from the ASN text. browser_stage owns
+    that machinery and machine_preflight consumes it, so this drives the real
+    path with scripted `lsappinfo` output and checks the judgment the preflight
+    builds on top: expected module ready, foreign module a concrete missing
+    item, unresolvable ASN a fail-closed missing item (no guess).
+    """
+    from . import browser_stage, machine_preflight
+
+    expected = "com.apple.Safari"
+    asn = "ASN:0x0-0x26be6bc:"
+    # browser_stage cleans the trailing colon before it asks for the identity.
+    resolved_asn = "ASN:0x0-0x26be6bc"
+    def _capture(stdout: str = "", returncode: int = 0, stderr: str = "") -> dict:
+        return {"argv": [], "returncode": returncode, "stdout": stdout,
+                "stderr": stderr, "timed_out": False, "error": None}
+
+    def _scripted(two_commands) -> dict:
+        real_run_capture = browser_stage.run_capture
+        browser_stage.run_capture = two_commands
+        try:
+            return machine_preflight.check_frontmost_app(expected)
+        finally:
+            browser_stage.run_capture = real_run_capture
+
+    # Shape 1: the listing names the bundle id directly.
+    bundle_direct = _scripted(
+        lambda argv, timeout_seconds: _capture("com.apple.Safari ASN:0x0-0x26ba0c:")
+        if argv[-1] == "front" else _capture(stderr="unused info call", returncode=1))
+    _check(bundle_direct["ok"] is True, f"a direct bundle listing was rejected: {bundle_direct}")
+    _check(bundle_direct["evidence"]["observed_bundle_id"] == expected,
+           f"the direct listing did not identify the bundle: {bundle_direct}")
+
+    # Shape 2: an ASN with the trailing colon, resolved through lsappinfo info.
+    def _asn_commands(argv: list[str], timeout_seconds: float) -> dict:
+        if argv[-1] == "front":
+            return _capture(asn)
+        if argv[1] == "info" and argv[2] == resolved_asn:
+            return _capture('bundleID="com.apple.Safari"')
+        return _capture(stderr="unexpected lsappinfo call", returncode=1)
+
+    asn_form = _scripted(_asn_commands)
+    _check(asn_form["ok"] is True, f"the ASN shape did not resolve to the bundle: {asn_form}")
+    _check(asn_form["evidence"]["observed_bundle_id"] == expected,
+           f"the ASN shape resolved to the wrong identity: {asn_form}")
+    asn_observed = [observation for observation in asn_form["evidence"]["frontmost_observations"]
+                    if observation.get("frontmost_asn")]
+    _check(asn_observed and asn_observed[0]["frontmost_asn"] == resolved_asn,
+           f"the resolved observation must record the ASN it resolved: {asn_form}")
+    _check('bundleID="com.apple.Safari"' in asn_observed[0]["lsappinfo_info_stdout"],
+           f"the lsappinfo info output is missing from the evidence: {asn_form}")
+
+    # A foreign identity is a concrete missing item, not a warning.
+    mismatch = _scripted(
+        lambda argv, timeout_seconds: _capture(asn) if argv[-1] == "front"
+        else _capture('bundleID="com.apple.finder"'))
+    _check(mismatch["ok"] is False, f"a foreign frontmost app was accepted: {mismatch}")
+    _check(mismatch["evidence"]["observed_bundle_id"] == "com.apple.finder"
+           and "com.apple.finder" in mismatch["detail"],
+           f"the mismatch must name the observed identity: {mismatch}")
+
+    # An ASN that refuses to resolve fails closed: no identity is invented.
+    unresolved = _scripted(
+        lambda argv, timeout_seconds: _capture(asn) if argv[-1] == "front"
+        else _capture(stderr="kill message from the shell", returncode=3))
+    _check(unresolved["ok"] is False, f"an unresolved ASN passed: {unresolved}")
+    _check(unresolved["evidence"]["observed_bundle_id"] == "",
+           f"an unresolved ASN must not carry an invented identity: {unresolved}")
+    _check(unresolved["detail"].startswith("frontmost identity could not be established"),
+           f"the failure must say the identity could not be established: {unresolved}")
+    return ["frontmost identity: a direct bundle listing and the trailing-colon ASN "
+            "form (resolved via lsappinfo info <ASN>) are both judged against the "
+            "expected module; a foreign identity is a named missing item and an "
+            "unresolvable ASN fails closed without an invented identity"]
+
+
+def test_machine_preflight_binary_freshness_judgment(work_dir: Path) -> list[str]:
+    """Freshness is decided by mtime comparison, never by a claim.
+
+    Two synthetic bundles differ only in the binary's mtime relative to the
+    newest product source (the same glob collection app_identity audits): one
+    older is not_ready with the stale detail, one newer is ready for this check.
+    The comparison itself stays app_identity's, so this proves only the
+    preflight's mapping from that judgment to its verdict.
+    """
+    from . import machine_preflight
+
+    def _bundle(tag: str, offset_seconds: float, newest_epoch: float | None) -> Path:
+        app = work_dir / f"Her-{tag}.app"
+        (app / "Contents/MacOS").mkdir(parents=True)
+        (app / "Contents/Info.plist").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+            '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0"><dict>'
+            '<key>CFBundleIdentifier</key><string>com.yishuziyu.her</string>'
+            '<key>CFBundleExecutable</key><string>Her</string>'
+            '</dict></plist>', encoding="utf-8")
+        binary = app / "Contents/MacOS/Her"
+        binary.write_bytes(b"#!/bin/sh\n")
+        binary.chmod(0o755)
+        if newest_epoch:
+            stamp = newest_epoch + offset_seconds
+        else:
+            stamp = 0.0
+        os.utime(binary, (stamp, stamp))
+        return app
+
+    stale = machine_preflight.check_binary_freshness(_bundle("stale", -3600.0, None))
+    newest_epoch = stale["evidence"]["newest_product_source_mtime_epoch"]
+    _check(newest_epoch is not None and stale["evidence"]["product_sources_checked"] > 0,
+           f"the freshness check did not locate product sources: {stale}")
+    _check(stale["ok"] is False, f"a stale binary was accepted: {stale}")
+    _check(stale["evidence"]["binary_is_fresh"] is False and "stale" in stale["detail"],
+           f"the stale detail is missing: {stale}")
+
+    fresh = machine_preflight.check_binary_freshness(_bundle("fresh", 600.0, newest_epoch))
+    _check(fresh["ok"] is True, f"a fresh binary was refused: {fresh}")
+    _check(fresh["evidence"]["binary_is_fresh"] is True,
+           f"freshness evidence disagrees: {fresh}")
+
+    # A missing bundle cannot be judged either; the check fails closed.
+    missing = machine_preflight.check_binary_freshness(work_dir / "Her-absent.app")
+    _check(missing["ok"] is False, f"a missing app passed the freshness check: {missing}")
+    _check("missing" in missing["detail"] or "does not exist" in missing["detail"],
+           f"the missing-app detail must say so: {missing}")
+    return [f"a binary older than the newest product source (epoch {newest_epoch}) is "
+            "not_ready with a stale detail; the same bundle 600s newer is ready; a "
+            "missing bundle fails closed - all via app_identity's comparison"]
+
+
+def test_machine_preflight_user_her_process_record(work_dir: Path) -> list[str]:
+    """The user Her record is a record: taken, parsed, and never signalled.
+
+    The preflight lists processes with `ps -Ao pid=,lstart=,command=` and keeps
+    every line whose command names the Her Mach-O, carrying pid, binary and
+    launch start. A successful listing is the passing case even when a Her is
+    running (that instance must survive the run), and a listing that cannot be
+    taken fails closed because no such record could protect it.
+    """
+    from . import machine_preflight
+
+    listing = (
+        "    1 Fri Sep 18 13:52:06 2026     /sbin/launchd\n"
+        "10531 Tue Sep 22 09:15:03 2026     /Users/me/Library/Developer/Xcode/DerivedData/"
+        "tiptour-macos-gtcdcfrkrqlavldfoxxsyfksnyrq/Build/Products/Debug/Her.app/Contents/MacOS/Her\n"
+        "  337 Fri Sep 18 13:54:29 2026     /usr/libexec/logd\n"
+        "10534 Tue Sep 22 09:15:11 2026     grep Her.app/Contents/MacOS/Her --color\n"
+        "10540 Wed Sep 23 10:02:11 2026     /Volumes/Storage/Her.app/Contents/MacOS/Her\n"
+    )
+    entries = machine_preflight.parse_ps_listing(listing, machine_preflight.HER_BINARY_SUBSTRING)
+    _check([entry["pid"] for entry in entries] == [10531, 10534, 10540],
+           f"the listing parse kept the wrong pids: {entries}")
+    _check(entries[0]["started_at"] == "Tue Sep 22 09:15:03 2026"
+           and entries[0]["binary"].endswith("Her.app/Contents/MacOS/Her"),
+           f"the recorded entry lost its launch time or binary: {entries[0]}")
+    _check("grep" in entries[1]["command"],
+           f"a command line that merely names the pattern was dropped: {entries[1]}")
+
+    real_capture = machine_preflight._capture_text
+    machine_preflight._capture_text = (
+        lambda argv, timeout_seconds: {"argv": [], "returncode": 1, "stdout": "",
+                                       "stderr": "ps: permission denied",
+                                       "timed_out": False, "error": None})
+    try:
+        failed = machine_preflight.check_user_her_processes()
+    finally:
+        machine_preflight._capture_text = real_capture
+    _check(failed["ok"] is False,
+           f"a listing that could not be taken was accepted: {failed}")
+    _check("record" in failed["detail"],
+           f"the failed listing must say the user Her record could not be produced: {failed}")
+
+    recorded = machine_preflight.check_user_her_processes()
+    _check(recorded["ok"] is True,
+           f"a successful listing must pass even with a Her running: {recorded}")
+    _check(isinstance(recorded["evidence"]["processes"], list),
+           f"the record must carry the parsed entries: {recorded}")
+    # Recorded only: a running Her survives this check by construction - the
+    # preflight's whole vocabulary here is ps, lstart and command strings.
+    _check("recorded" in recorded["detail"] or "no user Her process" in recorded["detail"],
+           f"the live record must say what it found: {recorded}")
+    return ["ps listing parse keeps pid/binary/launch-start for every Her-named command "
+            "(including a bystander that only names the path); a failed listing fails "
+            "closed; a successful one passes and records, never signals"]
+
+
 # --------------------------------------------------------- run preconditions
 
 
@@ -1487,6 +1722,172 @@ def test_run_mutex_serializes_concurrent_runs(work_dir: Path) -> list[str]:
             f"a report naming pid {os.getpid()} while starting no fixture, and a "
             f"SIGINTed run exits {SIGINT_EXIT_CODE} with the mutex released"]
 
+# -------------------------------------------- provider argument shape monitor
+
+
+def _write_json_file(path: Path, payload) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _probe_report(calls: list[dict]) -> dict:
+    return {
+        "route": "production_realtime_session",
+        "completed": True, "error": "", "timed_out": False,
+        "input_transcript": "点击右边的设置按钮",
+        "calls": calls,
+        "tool_results": [], "rendered_texts": [],
+        "realtime_audio_bytes": 1000,
+    }
+
+
+def _act_on_screen(arguments) -> dict:
+    return {"name": "act_on_screen", "arguments": arguments}
+
+
+def test_provider_shape_monitor_detects_drift(work_dir: Path) -> list[str]:
+    from . import provider_shapes
+
+    drift_run = work_dir / "drift-run"
+    _write_json_file(
+        drift_run / "scenario-artifacts" / "single_step_right_setting" / "run-1" / "realtime.json",
+        _probe_report([
+            # The 01R shape: the click returned both top-level and inside steps.
+            _act_on_screen(json.dumps({"goal": "点击右边的设置按钮", "intent": "new",
+                                       "action": "click", "target_label": "设置",
+                                       "region": "right",
+                                       "steps": [{"action": "click", "target_label": "设置",
+                                                  "region": "right"}]}, ensure_ascii=False)),
+            # A label slot narrating a result instead of naming a control.
+            _act_on_screen(json.dumps({"goal": "打开显示设置", "action": "click",
+                                       "target_label": "页面已打开显示设置"}, ensure_ascii=False)),
+            # A click with no target_label: a required contract field is gone.
+            _act_on_screen(json.dumps({"goal": "点击右边的设置按钮", "action": "click",
+                                       "region": "right"}, ensure_ascii=False)),
+            # Top level and steps disagree: the redundancy became a conflict.
+            _act_on_screen(json.dumps({"goal": "打开显示设置", "action": "click",
+                                       "target_label": "显示设置",
+                                       "steps": [{"action": "open_app",
+                                                  "application": "com.apple.Safari"}]},
+                                      ensure_ascii=False)),
+            # Arguments that are not a JSON object at all.
+            _act_on_screen("not-json"),
+        ]))
+
+    shapes = provider_shapes.record_shapes(drift_run)
+    _check(shapes["calls_total"] == 5,
+           f"5 recorded calls expected: {shapes['calls_total']}")
+    _check(shapes["tool_names"] == {"act_on_screen": 5},
+           f"tool name distribution wrong: {shapes['tool_names']}")
+    _check(shapes["mixed_action_and_steps"]["count"] == 2,
+           f"the redundant action+steps shape was missed: {shapes['mixed_action_and_steps']}")
+    _check(shapes["steps_count_distribution"] == {"1": 2, "none": 2},
+           f"steps-count distribution wrong: {shapes['steps_count_distribution']}")
+    _check(shapes["result_phrase_labels"]["count"] == 1,
+           f"the result-phrase label was missed: {shapes['result_phrase_labels']}")
+    _check(set(shapes["result_phrase_labels"]["words_seen"]) >= {"页面已", "已打开"},
+           f"unobservable words not surfaced: {shapes['result_phrase_labels']}")
+    _check(shapes["missing_fields"]["count"] == 1,
+           f"the target_label-less click was missed: {shapes['missing_fields']}")
+    _check(shapes["conflicts"]["count"] == 1,
+           f"the conflicting top-level/steps call was missed: {shapes['conflicts']}")
+    _check(shapes["unparsable_arguments"] == 1,
+           f"the unparsable arguments were missed: {shapes['unparsable_arguments']}")
+    _check(len(shapes["drift_flags"]) == 5,
+           f"every drift class must raise a flag: {shapes['drift_flags']}")
+    _check(any("action+steps" in flag for flag in shapes["drift_flags"]),
+           f"the 01R drift flag must name the shape: {shapes['drift_flags']}")
+    shapes_file = drift_run / "shapes.json"
+    _check(shapes_file.is_file(), f"record_shapes wrote no shapes.json: {shapes_file}")
+    on_disk = json.loads(shapes_file.read_text(encoding="utf-8"))
+    _check(on_disk["acceptance"] is False,
+           "shapes.json must declare it is not acceptance evidence")
+    _check("contract-drift" in on_disk["purpose"],
+           f"shapes.json must state its drift-monitoring purpose: {on_disk['purpose']}")
+
+    # A well-formed single-shape report must raise no drift flag.
+    clean_run = work_dir / "clean-run"
+    _write_json_file(
+        clean_run / "scenario-artifacts" / "single_step_right_setting" / "run-1" / "realtime.json",
+        _probe_report([
+            _act_on_screen(json.dumps({"goal": "点击右边的设置按钮", "intent": "new",
+                                       "action": "click", "target_label": "设置",
+                                       "region": "right"}, ensure_ascii=False)),
+        ]))
+    clean = provider_shapes.record_shapes(clean_run)
+    _check(clean["calls_total"] == 1 and clean["drift_flags"] == [],
+           f"a contract-shaped call was flagged as drift: {clean['drift_flags']}")
+    _check(clean["steps_count_distribution"] == {"none": 1},
+           f"a call without steps must count as none: {clean['steps_count_distribution']}")
+
+    # A run with no probe reports profiles to zero calls and never crashes.
+    empty = provider_shapes.record_shapes(work_dir / "empty-run")
+    _check(empty["calls_total"] == 0 and empty["drift_flags"] == [],
+           f"an empty run must profile clean: {empty}")
+    return ["the monitor detects mixed action+steps (01R shape), result-phrase labels, "
+            "missing contract fields, conflicting redundancy and unparsable arguments, "
+            "counts the steps distribution, leaves contract-shaped calls unflagged, "
+            "and writes a non-acceptance shapes.json"]
+
+
+def test_cassette_replay_is_contract_labeled(work_dir: Path) -> list[str]:
+    from . import provider_shapes
+
+    source = (paths.repository_root()
+              / "scripts/acceptance/cassettes/example-action-plus-steps.json")
+    _check(source.is_file(), f"the example cassette is missing: {source}")
+    # The replay writes <cassette>.replay.json next to the cassette, so the copy
+    # under test lives in the self-test work dir: the repository stays clean.
+    cassette = work_dir / "example-action-plus-steps.json"
+
+    def _fresh_cassette() -> dict:
+        return json.loads(source.read_text(encoding="utf-8"))
+
+    cassette.write_bytes(source.read_bytes())
+    result = provider_shapes.replay_cassette(cassette)
+    _check(result["acceptance"] is False,
+           "a cassette replay must never claim acceptance evidence")
+    _check(result["purpose"] == "contract-regression",
+           f"a cassette replay must be purpose-labeled: {result['purpose']!r}")
+    _check(result["matched"] is True,
+           f"the example cassette regressed against the judges: {result['verdict']}")
+    _check(result["verdict"]["status"] == "passed",
+           f"the 01R shape must still judge as the intended click: {result['verdict']}")
+    _check(any("delivery-sufficient" in line for line in result["verdict"]["basis"]),
+           f"the passing basis must cite its corroborated completion: {result['verdict']['basis']}")
+    _check(result["shape_profile"]["mixed_action_and_steps"]["count"] == 1,
+           "the replay must profile the cassette's raw arguments shape")
+
+    replay_file = work_dir / "example-action-plus-steps.json.replay.json"
+    _check(replay_file.is_file(), "the replay wrote no <cassette>.replay.json")
+    on_disk = json.loads(replay_file.read_text(encoding="utf-8"))
+    _check(on_disk["acceptance"] is False and on_disk["purpose"] == "contract-regression",
+           "the on-disk replay artifact must carry the anti-impersonation header")
+
+    # A wrong expectation is a regression, and a state that no longer
+    # corroborates the receipt (the double-click normalization failure) must
+    # make the judges fail: the replay re-judges, it does not rubber-stamp.
+    conflicting = _fresh_cassette()
+    conflicting["state_after"]["clicks"] = 2
+    conflicting["state_after"]["events"] = ["right-setting", "right-setting"]
+    conflicting["expect"] = {"verdict": "failed", "failure_contains": "clicks changed by 2"}
+    _write_json_file(cassette, conflicting)
+    double = provider_shapes.replay_cassette(cassette, write=False)
+    _check(double["matched"] is True,
+           f"a double-clicking state must fail the judges: {double['verdict']}")
+
+    mislabeled = _fresh_cassette()
+    mislabeled["expect"]["verdict"] = "failed"
+    _write_json_file(cassette, mislabeled)
+    mismatch = provider_shapes.replay_cassette(cassette, write=False)
+    _check(mismatch["matched"] is False and mismatch["regression"] is True,
+           "a cassette whose expectation no longer holds must report a regression")
+    return ["the example action+steps cassette replays to a passing judge verdict, "
+            "every replay artifact is stamped acceptance=false / purpose=contract-regression "
+            "by the replay tool itself, a double-clicking state fails the judges, and a "
+            "stale expectation is reported as a regression"]
+
+
 # ------------------------------------------------------------------- runner
 
 
@@ -1507,6 +1908,13 @@ TESTS = (
     ("binary flag detection", test_binary_flag_detection),
     ("probe execution lifecycle", test_probe_execution_lifecycle),
     ("preflight gate blocks and continues", test_preflight_gate_blocks_and_continues),
+    ("machine preflight: port occupancy", test_machine_preflight_port_occupancy),
+    ("machine preflight: frontmost identity forms",
+     test_machine_preflight_frontmost_identity_forms),
+    ("machine preflight: binary freshness judgment",
+     test_machine_preflight_binary_freshness_judgment),
+    ("machine preflight: user Her process record",
+     test_machine_preflight_user_her_process_record),
     ("frontmost gate blocks before any call", test_frontmost_gate_blocks_before_any_call),
     ("run mutex serializes concurrent runs", test_run_mutex_serializes_concurrent_runs),
     ("evidence schema validation", test_evidence_schema_validation),
@@ -1523,6 +1931,8 @@ TESTS = (
     ("interrupted run still writes a report", test_interrupted_run_still_writes_report),
     ("dry run failure injection detected", test_dry_run_failure_injection_is_detected),
     ("dry run artifacts have no secrets", test_dry_run_artifacts_have_no_secrets),
+    ("provider shape monitor detects drift", test_provider_shape_monitor_detects_drift),
+    ("cassette replay is labeled contract regression", test_cassette_replay_is_contract_labeled),
 )
 
 
