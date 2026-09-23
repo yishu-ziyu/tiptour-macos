@@ -8,6 +8,8 @@ A failure prints the raw evidence that disproved the expectation.
 """
 from __future__ import annotations
 
+import datetime as _datetime
+import datetime as _datetime
 import json
 import os
 import signal
@@ -17,9 +19,10 @@ import sys
 import tempfile
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from . import conversation_driver, dry_run, evidence, orchestration, paths, run_mutex
+from . import conversation_driver, dry_run, evidence, orchestration, paths, run_mutex, runner_faults
 from .app_identity import inspect_app_identity
 from .fixture_page import FixtureError, FixtureServer
 from .process_control import (
@@ -2148,11 +2151,246 @@ _TESTS_WITHOUT_WORK_DIR = frozenset({
     test_scenario_definitions_are_consistent,
 })
 
+
+def test_manual_runner_records_guided_steps(work_dir: Path) -> list[str]:
+    """The guided manual runner records the human's claim and the machine's proof.
+
+    Driven with a fake protocol whose http_state points at a throwaway loopback
+    server and whose keychain_item names a service that does not exist, so the
+    expected `security` exit code is 44 (errSecItemNotFound). The script is run
+    as a subprocess with piped stdin, which is exactly the documented
+    invocation, and the record it writes is what gets judged here.
+    """
+    class _StateHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_GET(self):
+            body = json.dumps({"selected": "left-setting", "clicks": 2,
+                               "menu_open": False, "events": ["left-setting"],
+                               "page_views": 7}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = HTTPServer(("127.0.0.1", 0), _StateHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    marker = work_dir / "manual-marker.txt"
+    marker.write_text("tipTour acceptance marker\n", encoding="utf-8")
+    try:
+        base_url = f"http://127.0.0.1:{server.server_address[1]}"
+        protocol = {
+            "scenario": "self-test: settings save, refusal read, restore",
+            "steps": [
+                {"id": "state-as-left-setting",
+                 "instruction": "Self-test step one: nothing to do in the UI.",
+                 "verify": {"kind": "http_state",
+                            "params": {"base_url": base_url, "path": "/state"}}},
+                {"id": "keychain-absent",
+                 "instruction": "Self-test step two: nothing to do in the UI.",
+                 "verify": {"kind": "keychain_item",
+                            "expect": "fail",
+                            "params": {"service": "her.acceptance.selftest.missing.service",
+                                       "account": "nobody"}}},
+                {"id": "optional-marker", "optional": True,
+                 "instruction": "Self-test step three: skipped through the prompt.",
+                 "verify": {"kind": "file_exists",
+                            "params": {"path": str(marker), "marker": "acceptance marker"}}},
+            ],
+        }
+        protocol_path = work_dir / "protocol.json"
+        protocol_path.write_text(json.dumps(protocol, ensure_ascii=False, indent=1),
+                                 encoding="utf-8")
+        out_dir = work_dir / "manual-out"
+        script = paths.repository_root() / "scripts/acceptance/manual_runner.py"
+        _check(script.is_file(), f"manual runner script is missing: {script}")
+        completed = subprocess.run(
+            [sys.executable, str(script), str(protocol_path), str(out_dir)],
+            input="\n\nskip\n", capture_output=True, text=True, check=False, timeout=120,
+        )
+        _check(completed.returncode == 0,
+               f"manual runner exited {completed.returncode}\nstdout:\n{completed.stdout}\n"
+               f"stderr:\n{completed.stderr}")
+        record_dirs = sorted(out_dir.glob("manual-*"))
+        _check(len(record_dirs) == 1, f"expected exactly one manual-<ts> record dir: {record_dirs}")
+        record_path = record_dirs[0] / "record.json"
+        _check(record_path.is_file(), f"no record.json under {record_dirs[0]}")
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        _check(record["steps_total"] == 3, f"steps_total: {record['steps_total']}")
+        _check(record["ui_actions_performed"] == [],
+               "the record must carry an explicitly empty ui_actions_performed list")
+        _check(record["interactive_session"] is False,
+               "piped stdin must be recorded as a non-interactive session, not as a TTY")
+
+        http_step, keychain_step, optional_step = record["steps"]
+        _check(http_step["confirmed_by_user"] is True,
+               f"step 1 confirmation: {http_step}")
+        _check(http_step["verification"]["kind"] == "http_state",
+               f"step 1 verification kind: {http_step['verification']}")
+        _check(http_step["verification"]["ok"] is True,
+               f"step 1 verification did not pass: {http_step['verification']}")
+        _check(http_step["verification"]["body"]["selected"] == "left-setting",
+               f"step 1 verification body: {http_step['verification']['body']}")
+
+        _check(keychain_step["confirmed_by_user"] is True, f"step 2 confirmation: {keychain_step}")
+        keychain = keychain_step["verification"]
+        _check(keychain["kind"] == "keychain_item", f"step 2 verification kind: {keychain}")
+        _check(keychain["exit_code"] == 44,
+               f"a missing generic-password item must exit 44, got {keychain['exit_code']}")
+        _check(keychain["classification"] == "item_not_found",
+               f"step 2 classification: {keychain}")
+        _check(keychain["ok"] is False, f"step 2 must be judged as not present: {keychain}")
+        _check(keychain["expected"] == "fail" and keychain["matched"] is True,
+               f"step 2 is a negative check, so 'missing' must be the matched outcome: {keychain}")
+
+        _check(optional_step["skipped_by_user"] is True, f"step 3 must be skippable: {optional_step}")
+        _check(optional_step["confirmed_by_user"] is False, f"step 3: {optional_step}")
+        _check(optional_step["verification"] is None,
+               "a skipped step must not be machine-verified")
+
+        summary = record["summary"]
+        _check(summary["confirmed_by_user"] == 2, f"summary: {summary}")
+        _check(summary["skipped_by_user"] == 1, f"summary: {summary}")
+        _check(summary["verifications_passed"] == 2, f"summary: {summary}")
+        _check(summary["verifications_failed"] == 0, f"summary: {summary}")
+        _check(summary["required_failed"] == 0, f"summary: {summary}")
+
+        raw = record_path.read_text(encoding="utf-8")
+        # The record keeps the exit code and a classification, never the
+        # `security` stdout that carries the secret, and never stderr text.
+        for leak in ('"stdout"', '"stderr"', "BEGIN PRIVATE", "SecKeychainSearchCopyNext"):
+            _check(leak not in raw,
+                   f"the manual record must never carry command output or secrets ({leak!r})")
+        return ["the guided runner recorded one confirmed http_state (body echoed), one "
+                "confirmed keychain_item negative check that does not exist (exit 44, "
+                "classified item_not_found, matched) and one skipped optional step; no "
+                "command stdout, no ui_actions_performed, exit code 0"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_runner_fault_primitives_are_owned_only(work_dir: Path) -> list[str]:
+    """Runner-side faults fire - and only ever on a child this runner owns."""
+    registry = OwnedProcessRegistry()
+
+    # 1. A registered child is killed by the fault; the runner's own teardown
+    #    record is the outcome.
+    owned = spawn_owned_process(registry, "fixture-page-self-test",
+                                ["sleep", "30"], log_path=work_dir / "fixture-self-test.log")
+    kill = runner_faults.kill_fixture_after(registry, 0.3)
+    _check(kill["kind"] == "fixture_kill_after", f"fault kind: {kill}")
+    _check(kill["armed"] is True, f"the registered child must be killable: {kill}")
+    _check(kill["target_pid_or_url"] == owned.pid, f"fault target: {kill}")
+    _check(kill["armed_at"], f"fault record needs armed_at: {kill}")
+    deadline = time.monotonic() + 5.0
+    while owned.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    _check(owned.poll() is not None, "the registry-owned child survived kill_fixture_after")
+    _check(kill["outcome"] is not None and kill["outcome"]["terminated"] is True,
+           f"fault outcome: {kill['outcome']}")
+    _check(isinstance(kill["outcome"]["returncode"], int), f"fault outcome: {kill['outcome']}")
+
+    # 2. A process the runner did not register is refused, never signalled.
+    decoy = subprocess.Popen(["sleep", "30"], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+    try:
+        refused = runner_faults.kill_fixture_after(decoy, 0.3)
+        _check(refused["armed"] is False, f"an unregistered process must not be armed: {refused}")
+        _check(bool(refused.get("refusal")), f"a refusal needs a reason: {refused}")
+        time.sleep(0.8)
+        _check(decoy.poll() is None, "a process the runner does not own was signalled")
+        bare_pid = runner_faults.kill_fixture_after(owned.pid, 0.3)
+        _check(bare_pid["armed"] is False and bool(bare_pid.get("refusal")),
+               f"a bare PID must be refused: {bare_pid}")
+    finally:
+        decoy.kill()
+        decoy.wait()
+
+    # 3. The real fixture: a stale /state readback, then a mid-run kill.
+    fixture = FixtureServer(work_dir, registry)
+    try:
+        fixture.start()
+        delay = runner_faults.delay_state_after(fixture, 1.5)
+        _check(delay["kind"] == "state_delay_after", f"fault kind: {delay}")
+        _check(delay["armed"] is True, f"the state delay must be armed: {delay}")
+        _check(delay["target_pid_or_url"] == fixture.owned.pid, f"fault target: {delay}")
+        baseline = dict(delay["stale_snapshot"])
+
+        # The live server advances while the readback channel is held stale.
+        fixture._request("POST", "/select", {"selected": "task-2"})
+        stale = fixture.state()
+        _check(stale.get("selected") in (None, baseline.get("selected")),
+               f"the hooked readback must serve the armed snapshot: {stale}")
+        _check(delay["stale_reads"] >= 1, f"stale reads not counted: {delay}")
+
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and fixture.state().get("selected") != "task-2":
+            time.sleep(0.05)
+        live = fixture.state()
+        _check(live.get("selected") == "task-2",
+               f"the readback must recover to the live /state: {live}")
+        _check(delay["live_state_after_expiry"] is not None
+               and delay["live_state_after_expiry"].get("selected") == "task-2",
+               f"the fault record must capture the live state after expiry: {delay}")
+        _check("selected" in delay["diverged_from_live"],
+               f"the record must name the diverging keys: {delay['diverged_from_live']}")
+
+        restored = runner_faults.restore_state_delay(fixture, delay)
+        _check(restored["restored"] is True, f"restore: {restored}")
+        _check(delay["disarmed"] is True, f"disarm flag: {delay}")
+
+        kill_fixture = runner_faults.kill_fixture_after(fixture, 0.3)
+        _check(kill_fixture["armed"] is True and kill_fixture["target_pid_or_url"] == fixture.owned.pid,
+               f"the run's fixture must be killable: {kill_fixture}")
+        deadline = time.monotonic() + 8.0
+        while fixture.owned.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        _check(fixture.owned.poll() is not None, "the fixture survived kill_fixture_after")
+    finally:
+        fixture.stop()
+
+    # 4. The foreground primitive is defined but never fires on its own.
+    plan = runner_faults.navigate_page_away()
+    _check(plan["kind"] == "page_navigate_away" and plan["armed"] is False,
+           f"navigate_page_away must stay inert without confirmation: {plan}")
+    _check(bool(plan.get("refusal")), f"the plan must say why it refused: {plan}")
+    catalogue = runner_faults.describe_primitives()
+    _check([item["kind"] for item in catalogue] ==
+           ["fixture_kill_after", "state_delay_after", "page_navigate_away"],
+           f"primitive catalogue: {[item['kind'] for item in catalogue]}")
+    _check(all(item["auto_callable_by_scenario"] is False
+               for item in catalogue if item["kind"] == "page_navigate_away"),
+           "the foreground primitive must be marked as not scenario-callable")
+    return ["kill_fixture_after terminated a registered child and recorded the teardown "
+            "outcome, refused an unregistered process and a bare PID without signalling "
+            "either, delay_state_after served the armed snapshot until expiry and then "
+            "recovered to the live /state with the diverging keys named, and "
+            "navigate_page_away stays inert until a named human authorizes it"]
+
+
+_TESTS_WITHOUT_WORK_DIR = frozenset({
+    test_probe_argument_plumbing,
+    test_evidence_schema_validation,
+    test_secret_scan_detects_canaries,
+    test_scenario_definitions_are_consistent,
+})
+
 TESTS = (
     ("scenario definitions are consistent", test_scenario_definitions_are_consistent),
     ("fixture lifecycle and state semantics", test_fixture_lifecycle_and_state_semantics),
     ("fixture port release and clean second start", test_fixture_port_release_and_second_start),
     ("fixture refuses occupied port without killing", test_fixture_refuses_occupied_port_without_killing),
+    # These two run before the dry-run group: that group's interrupted-run case
+    # has been observed to leave a fixture child listening on 19475 (reproduced
+    # on unmodified HEAD), and a later fixture test would then fail for an
+    # environment reason rather than a runner one.
+    ("guided manual runner records claims and machine proof",
+     test_manual_runner_records_guided_steps),
+    ("runner fault primitives only touch owned processes",
+     test_runner_fault_primitives_are_owned_only),
     ("synthetic PCM pipeline", test_synthetic_pcm_pipeline),
     ("probe argument plumbing", test_probe_argument_plumbing),
     ("binary flag detection", test_binary_flag_detection),
@@ -2192,12 +2430,23 @@ def run_all() -> int:
     """Run every self-test; any failure exits non-zero with its raw evidence."""
     print("Her E2E runner self-tests", flush=True)
     print("=" * 72, flush=True)
+    only = os.environ.get("HER_SELFTEST_ONLY", "").strip()
+    if only:
+        tokens = [token.strip() for token in only.split(",") if token.strip()]
+        selected = [entry for entry in TESTS if any(token in entry[0] for token in tokens)]
+        if not selected:
+            print(f"HER_SELFTEST_ONLY={only!r} matched no self-test", flush=True)
+            return 2
+        print(f"HER_SELFTEST_ONLY={only!r}: running {len(selected)} of {len(TESTS)} self-tests",
+              flush=True)
+    else:
+        selected = list(TESTS)
     passed = 0
     failed = 0
     with tempfile.TemporaryDirectory(prefix="her-acceptance-selftest-") as temporary:
         work_root = Path(temporary) / "workspace"
         work_root.mkdir()
-        for index, (label, test) in enumerate(TESTS):
+        for index, (label, test) in enumerate(selected):
             test_name = f"{index + 1:02d}-{label.replace(' ', '-').replace(':', '').replace('/', '-')}"
             work_dir = work_root / test_name
             work_dir.mkdir(parents=True, exist_ok=True)
