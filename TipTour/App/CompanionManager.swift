@@ -1307,6 +1307,13 @@ final class CompanionManager: ObservableObject {
         // as a no-op argument-free in every other launch and does not exist in
         // a Release build.
         KeychainStore.applyAcceptanceLaunchArguments(CommandLine.arguments)
+        // Same argument family, same block — no second mechanism: name the seam
+        // this run is using (isolated service + accounts still owed a one-shot
+        // read refusal) so the acceptance log carries the injection source next
+        // to the real OSStatus the UI reports. An argument-free launch prints
+        // "denialArmedFor=none", which is the proof that nothing fires unless
+        // the explicit DEBUG flag was passed.
+        print("🔑 DEBUG keychain acceptance seam: \(KeychainStore.acceptanceSeamSummary)")
         #endif
         refreshProviderKeyStatus()
         refreshAllPermissions()

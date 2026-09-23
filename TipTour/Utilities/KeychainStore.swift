@@ -188,7 +188,7 @@ enum KeychainStore {
     /// The service every item lives under: the app's own bundle identifier.
     /// A DEBUG build can substitute an isolated acceptance service so a
     /// diagnostic run can never read, overwrite or delete the user's real keys
-    /// (see `configureAcceptanceService`).
+    /// (see the DEBUG-only acceptance seam at the end of this file).
     private static var serviceName: String {
         #if DEBUG
         // Debug acceptance runs are the only reason this is ever non-nil, and
@@ -205,9 +205,11 @@ enum KeychainStore {
     /// `stepfunAPIKey` / `jevAPIKey` items.
     nonisolated(unsafe) private static var acceptanceServiceOverride: String?
 
-    /// While non-nil, every provider-key lookup reports this status instead of
-    /// whatever macOS said, which is how the DEBUG acceptance path reaches the
-    /// "macOS refused to read a key that is saved" state.
+    /// Accounts whose NEXT actual read is owed a simulated
+    /// `errSecInteractionNotAllowed` (-25308). Empty unless a DEBUG acceptance
+    /// run armed one, and an account leaves the set the moment its refusal
+    /// fires — one injection per arming, never a sticky state, so the read
+    /// after it is a real one that can succeed and prove the recovery path.
     ///
     /// The status itself is a real Security framework constant
     /// (`errSecInteractionNotAllowed`), so the product's state mapping and its
@@ -216,7 +218,12 @@ enum KeychainStore {
     /// machine: a legacy ACL / trusted-application list and an ad-hoc code
     /// signature both fail to restrict a generic-password read, so no terminal
     /// command can produce this state without the signed app.
-    nonisolated(unsafe) private static var acceptanceDeniedReadStatus: OSStatus?
+    ///
+    /// Only `readItem` ever consults this set. An attributes/presence query
+    /// requests no `kSecReturnData`, decrypts nothing and opens no prompt, so
+    /// it is not a read and must keep succeeding — that is what lets the
+    /// settings cards keep proving "saved" while the read is refused.
+    nonisolated(unsafe) private static var armedReadDenials: Set<String> = []
 #endif
 
     /// Cache keys carry the service they came from, so switching services can
@@ -289,12 +296,16 @@ enum KeychainStore {
     /// changes what the user is told to do.
     static func readItem(forKey key: String, allowInteraction: Bool = true) -> (value: String?, state: KeychainItemState) {
         #if DEBUG
-        // DEBUG acceptance only: while a refusal is armed, no lookup may answer
-        // from the in-process cache either — the simulated state is "this
-        // process cannot obtain the value at all", and a remembered value would
-        // quietly defeat it. See `acceptanceDeniedReadStatus`.
-        if let denied = acceptanceDeniedReadStatus {
-            return (nil, KeychainItemState.state(for: denied))
+        // DEBUG acceptance only: an armed account's NEXT actual read fails as
+        // if macOS had refused this process, and the arm is consumed by firing
+        // it — one injection per arming, so the read after it is a real one
+        // that may succeed and prove the recovery path.
+        //
+        // The check sits above the in-process cache on purpose: the simulated
+        // state is "this process cannot obtain the value at all", and a
+        // remembered value would quietly defeat it. See `armedReadDenials`.
+        if armedReadDenials.remove(key) != nil {
+            return (nil, .readDenied(errSecInteractionNotAllowed))
         }
         #endif
         // A remembered value is one this process already obtained, so it still
@@ -344,10 +355,14 @@ enum KeychainStore {
     /// has not read the secret and must not be told the key is usable. The one
     /// exception is the in-process cache, whose value was read (or written)
     /// here, so a cached item really is `.available`.
+    ///
+    /// A DEBUG read-denial arm is deliberately *not* consulted here (unlike
+    /// `readItem`): this query is an attributes-only probe, not a read, so an
+    /// armed refusal must not change its answer. That is what keeps the
+    /// acceptance loop honest — while the next read is refused, opening the
+    /// settings cards still proves the item is saved without ever claiming it
+    /// is readable.
     static func presence(forKey key: String) -> KeychainItemState {
-        #if DEBUG
-        if let denied = acceptanceDeniedReadStatus { return KeychainItemState.state(for: denied) }
-        #endif
         // The process already holds this value, so presence can honestly claim
         // readability here — no Keychain trip, no prompt, no second decrypt.
         if unlockedValues.object(forKey: cacheKey(key)) != nil { return .available }
@@ -384,15 +399,16 @@ enum KeychainStore {
     /// Cache a successfully written value, so starting the next voice turn does
     /// not decrypt the same item (or ask for access) again.
     ///
-    /// Skipped while a DEBUG acceptance refusal is armed: the cache is what lets
-    /// a later lookup succeed without a Keychain trip, and the simulated state
-    /// is "this process cannot obtain the value at all" — a remembered value
-    /// would quietly defeat it.
+    /// Skipped while a DEBUG acceptance refusal is armed for that key: the cache
+    /// is what lets a later lookup succeed without a Keychain trip, and the
+    /// simulated state is "this process cannot obtain the value at all" — a
+    /// remembered value would quietly defeat it, and a presence probe served
+    /// from memory would answer `.available` while the read is refused.
     private static func remember(_ value: String, forKey key: String) {
         #if DEBUG
         // Do not remember a value written while a refusal is armed: a later
         // lookup has to keep reporting it, not serve it from memory.
-        guard acceptanceDeniedReadStatus == nil else { return }
+        guard !armedReadDenials.contains(key) else { return }
         #endif
         unlockedValues.setObject(value as NSString, forKey: cacheKey(key))
     }
@@ -423,18 +439,61 @@ enum KeychainStore {
 
 #if DEBUG
 extension KeychainStore {
-    /// Point every provider-key access at an isolated service, and optionally
-    /// make every lookup report a status as if macOS had refused it.
+    /// The launch argument that arms a one-shot read denial. Kept as a constant
+    /// so the flag and its `=<account>` form can never drift apart.
+    private static let denialFlag = "--keychain-acceptance-deny-next-read"
+
+    /// The accounts every provider key lives under, taken from the one place
+    /// that names them (`TipTourMode.keyName`), so arming can never cover a
+    /// different set of items than the app actually reads.
+    static var acceptanceKeyNames: [String] { TipTourMode.allCases.map(\.keyName) }
+
+    /// Point every provider-key access at an isolated service.
     ///
     /// Call once, before any key is touched: it also drops the in-process
     /// cache, because cached values belong to whichever configuration was
     /// active when they were read or written.
-    static func configureAcceptanceService(_ service: String?, deniedReadStatus: OSStatus? = nil) {
+    static func configureAcceptanceService(_ service: String?) {
         acceptanceServiceOverride = service
-        acceptanceDeniedReadStatus = deniedReadStatus
         // Cached values belong to whichever configuration was active when they
         // were read or written.
         unlockedValues.removeAllObjects()
+    }
+
+    /// Arm the NEXT actual read of `key` to fail with
+    /// `errSecInteractionNotAllowed` (-25308) — the real Security constant for
+    /// "macOS refused this interaction", so the product's state mapping and its
+    /// user-facing copy run against a genuine value.
+    ///
+    /// One-shot by design: `readItem` consumes the arm as it fires, so the very
+    /// next read is a real one that can succeed and prove the recovery path.
+    /// Attributes-only presence queries are never affected, so "the item is
+    /// saved" stays provable while the read is refused, and nothing here can
+    /// fire in a build compiled without `DEBUG`.
+    static func armNextReadDenial(forKey key: String) {
+        armedReadDenials.insert(key)
+        // Drop a value this process already remembers for that account: the
+        // simulated state is "this process cannot obtain the value at all", so
+        // a cached value would quietly defeat it, and a presence probe answered
+        // from memory would claim `.available` while the read is refused.
+        // Clearing it here also makes the arm order-independent — arming before
+        // the save (the launch-argument flow) or after it behaves the same.
+        unlockedValues.removeObject(forKey: cacheKey(key))
+    }
+
+    /// Whether an armed refusal is still owed for `key`.
+    static func isReadDenialArmed(forKey key: String) -> Bool {
+        armedReadDenials.contains(key)
+    }
+
+    /// One line naming the seam this process is running with: the service every
+    /// lookup goes to, whether it is the isolated acceptance service, and the
+    /// accounts still owed a refusal. The acceptance log needs the injection
+    /// source printed next to the real OSStatus the UI shows; nothing here can
+    /// name a stored value.
+    static var acceptanceSeamSummary: String {
+        let armed = armedReadDenials.sorted().joined(separator: ",")
+        return "service=\(serviceName) isolated=\(acceptanceServiceOverride != nil) denialArmedFor=\(armed.isEmpty ? "none" : armed)"
     }
 
     /// Read the DEBUG acceptance flags out of the launch arguments.
@@ -442,25 +501,40 @@ extension KeychainStore {
     /// `--keychain-acceptance` isolates every provider-key access under
     /// `<bundle id>.debug-acceptance`, so no acceptance step can read, write or
     /// delete the user's real `stepfunAPIKey` / `jevAPIKey`.
-    /// `--keychain-acceptance-denied-read` implies it and makes every lookup
-    /// report `errSecInteractionNotAllowed`, which is the state a user hits
-    /// when macOS refuses to hand over a key that is saved.
+    /// `--keychain-acceptance-deny-next-read` implies it and arms the one-shot
+    /// read denial for every provider account; append `=<account>` (for example
+    /// `--keychain-acceptance-deny-next-read=jevAPIKey`) to refuse exactly one
+    /// provider's next read and leave the others readable.
     ///
-    /// Run the denied-read flag only with a key already saved under the
-    /// acceptance service: it refuses every lookup, including the presence
-    /// probe, so starting it with nothing stored would report a refusal there
-    /// is no item to refuse.
+    /// The denial is armed, not permanent: it fires on the NEXT actual read of
+    /// an armed account, consumes itself, and never touches an attributes or
+    /// presence query — the settings cards must keep proving the item is saved
+    /// while that read is refused.
+    ///
+    /// Run the denial flag only with a key already saved under the acceptance
+    /// service: a refusal proves an item is there precisely because macOS
+    /// refuses to hand it over, so arming it with nothing stored would report a
+    /// refusal there is no item to refuse.
     ///
     /// Neither flag exists in a Release build.
     static func applyAcceptanceLaunchArguments(_ arguments: [String]) {
         let isolated = arguments.contains("--keychain-acceptance")
-            || arguments.contains("--keychain-acceptance-denied-read")
+            || arguments.contains { $0 == denialFlag || $0.hasPrefix(denialFlag + "=") }
         guard isolated else { return }
-        let deniedRead: OSStatus? = arguments.contains("--keychain-acceptance-denied-read")
-            ? errSecInteractionNotAllowed : nil
-        let service = (Bundle.main.bundleIdentifier ?? "com.milindsoni.tiptour") + ".debug-acceptance"
-        configureAcceptanceService(service, deniedReadStatus: deniedRead)
-        print("🔑 DEBUG keychain acceptance: service=\(service) simulatedReadStatus=\(deniedRead.map { String($0) } ?? "none")")
+        configureAcceptanceService((Bundle.main.bundleIdentifier ?? "com.milindsoni.tiptour") + ".debug-acceptance")
+
+        var armed: [String] = []
+        if let requested = arguments.first(where: { $0.hasPrefix(denialFlag + "=") }) {
+            // `=account` refuses one provider's read; a bare `=` falls back to
+            // every account rather than silently arming nothing.
+            let account = String(requested.dropFirst(denialFlag.count + 1))
+            armed = account.isEmpty ? acceptanceKeyNames : [account]
+        } else if arguments.contains(denialFlag) {
+            armed = acceptanceKeyNames
+        }
+        armed.forEach(armNextReadDenial)
+
+        print("🔑 DEBUG keychain acceptance: \(acceptanceSeamSummary) simulatedReadStatus=\(armed.isEmpty ? "none" : String(errSecInteractionNotAllowed))")
     }
 }
 #endif
