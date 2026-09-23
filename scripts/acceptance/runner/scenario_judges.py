@@ -6,6 +6,21 @@ the independent /state readback, the final speech and the process/cleanup facts
 agree. Exit code 0, a `completed` tool return, confident model prose, or any
 page change alone are never sufficient. Each judge returns human-readable
 `basis` strings quoting the exact evidence so a reviewer can re-check the call.
+
+Two rules are stricter than "the receipt said so", and both are deliberate:
+
+* For the click scenarios (A, C) a PASS additionally requires a receipt that
+  actually completed — `status=completed`, `delivery=sent`, a completion basis
+  the step's policy licenses, and speech that does not claim verification the
+  receipt lacks. `delivery=unknown` / `uncertain_effect` may be recorded as an
+  honest FAILED attempt with its basis; it can never be the PASS. Scenario U
+  (unknown-delivery fault recovery) keeps its uncertain contract, and so does
+  the continuity scenario.
+* A probe exit status is only accepted when the OS reported it or when its
+  recorded basis says so: a LaunchServices instance has no waitable status, so
+  `returncode=0` counts only with a `returncode_basis` that starts with
+  "derived:" and a present report artifact. A null returncode or an
+  "unavailable" basis fails closed.
 """
 from __future__ import annotations
 
@@ -15,6 +30,19 @@ from typing import Any
 
 UNCERTAINTY_WORDING = ("不确定", "未确认", "没有确认", "已停下", "停下了", "结果还不确定")
 COMPLETION_CLAIMS = ("已完成并确认", "已经完成", "已确认操作结果", "全部完成")
+
+# What a completed click may legitimately conclude (work order 03R item 8).
+# `delivery_sufficient` licenses `delivery_confirmed`: on a direct page-control
+# click, confirmed delivery plus the independent /state readback is the whole
+# claim. `outcome_required` licenses `system_verified_outcome`. Anything else —
+# delivery=unknown, no basis, a basis the policy does not license — is not
+# corroborated evidence and can never support a PASS.
+CORROBORATED_COMPLETION = {
+    ("delivery_sufficient", "delivery_confirmed"):
+        "delivery-sufficient step completed on confirmed delivery",
+    ("outcome_required", "system_verified_outcome"):
+        "outcome-required step completed on a system-verified outcome",
+}
 
 STATUS_PASSED = "passed"
 STATUS_FAILED = "failed"
@@ -111,6 +139,85 @@ def _receipt_sent_actions(receipt: dict) -> list[dict]:
             if isinstance(action, dict) and action.get("delivery") in ("sent", "unknown")]
 
 
+def _delivered_clicks(receipt: dict) -> list[dict]:
+    """Clicks the driver actually delivered: `sent`, never `unknown`.
+
+    Scenario A's PASS is about a click that really happened, so `unknown` is
+    deliberately excluded here rather than forgiven later.
+    """
+    return [action for action in _receipt_sent_actions(receipt)
+            if action.get("action") == "click" and action.get("delivery") == "sent"]
+
+
+def _action_completion_field(action: dict, snake_case: str, camel_case: str) -> Any:
+    """A completion fact read by name, never guessed.
+
+    The product's receipt spells these fields snake_case today, while the
+    runner's older recorded chains carry the camelCase spelling. Reading both
+    spellings of the *same* field keeps a chain's casing from inventing a
+    completion fact — or from hiding the one it claims — and a field that is
+    absent under both spellings stays absent.
+    """
+    for key in (snake_case, camel_case):
+        if key in action:
+            return action.get(key)
+    return None
+
+
+def _completion_corroboration(action: dict) -> tuple[bool, str]:
+    """Whether one delivered step's completion claim is corroborated evidence."""
+    delivery = action.get("delivery")
+    if delivery != "sent":
+        return False, (f"delivery={delivery!r}; only delivery=sent can support a "
+                       "completed step (delivery=unknown never can)")
+    policy = _action_completion_field(action, "completion_policy", "completionPolicy")
+    basis = _action_completion_field(action, "completion_basis", "completionBasis")
+    text = CORROBORATED_COMPLETION.get((policy, basis))
+    if text is None:
+        return False, (f"completion_policy={policy!r} with completion_basis={basis!r} "
+                       "is not a corroborated pair")
+    return True, text
+
+
+def _uncertain_receipt_failure(verdict: Verdict, receipt: dict, speech: list[str],
+                               expectations: dict, scenario_label: str) -> None:
+    """Record a delivery=unknown / uncertain receipt as an honest FAILED attempt.
+
+    Work order 03R item 8: such a receipt may be written down as a safe failure
+    with its own basis, but it can never be the PASS of a click scenario — the
+    success criterion is that a plain click is no longer uncertain.
+    """
+    status = receipt.get("status")
+    verdict.failure_reasons.append(
+        f"Her receipt status {status!r} is an uncertain outcome (detail: "
+        f"{receipt.get('detail')!r}); scenario {scenario_label} must not accept "
+        "unknown/uncertain as its PASS, so this attempt is recorded as FAILED."
+    )
+    joined_speech = " ".join(speech)
+    if expectations.get("require_uncertainty_wording_when_unverified", True):
+        if not any(word in joined_speech for word in UNCERTAINTY_WORDING):
+            verdict.failure_reasons.append(
+                f"uncertain_effect receipt but the final speech does not state the "
+                f"uncertainty: {joined_speech!r}"
+            )
+        else:
+            verdict.basis.append(
+                "uncertain_effect receipt with matching honest speech; "
+                "independent /state proves the side effect without the app "
+                "overclaiming — recorded as a FAILED attempt, never as a PASS."
+            )
+
+
+def _overclaiming_speech(verdict: Verdict, speech: list[str], expectations: dict) -> None:
+    """A PASS may not speak of verification the receipt does not have."""
+    joined_speech = " ".join(speech)
+    for forbidden_claim in (expectations.get("forbidden_speech_claims_when_unverified") or []):
+        if forbidden_claim in joined_speech:
+            verdict.failure_reasons.append(
+                f"Final speech overclaims completion ({forbidden_claim!r}): {joined_speech!r}"
+            )
+
+
 def _decision_packet(action: dict) -> dict:
     packet = action.get("decision_packet")
     return packet if isinstance(packet, dict) else {}
@@ -148,9 +255,38 @@ def _base_attempt_checks(probe_record: dict, report: dict | None) -> tuple[list[
     elif not exit_record.get("self_exited"):
         failures.append("The probe process did not exit by itself.")
     elif exit_record.get("returncode") == 0:
-        basis.append(f"Probe process exited by itself with code 0 (pid {exit_record.get('pid')}).")
+        returncode_basis = exit_record.get("returncode_basis")
+        if returncode_basis:
+            # The LaunchServices instance is not our child, so the kernel reports
+            # it no exit status: a recorded 0 is only ever the derived value, and
+            # it stays honest only while the probe's own artifact proves the
+            # instance ran. Anything else (null returncode, an unavailable basis,
+            # a derived basis without the artifact) fails closed.
+            if (str(returncode_basis).startswith("derived:")
+                    and exit_record.get("report_artifact_present")):
+                basis.append(
+                    f"The identified instance terminated without a runner signal and the "
+                    f"probe's report artifact is present, so the recorded exit status is the "
+                    f"documented derived value (pid {exit_record.get('pid')}): "
+                    f"{returncode_basis}"
+                )
+            else:
+                failures.append(
+                    f"The recorded exit status is not an observable one: "
+                    f"returncode={exit_record.get('returncode')!r}, "
+                    f"returncode_basis={returncode_basis!r}, "
+                    f"report_artifact_present={exit_record.get('report_artifact_present')!r}. "
+                    "A status the OS did not report is never treated as success."
+                )
+        else:
+            basis.append(
+                f"Probe process exited by itself with code 0 (pid {exit_record.get('pid')})."
+            )
     else:
-        failures.append(f"Probe exited with code {exit_record.get('returncode')}.")
+        failures.append(
+            f"No usable probe exit status: returncode={exit_record.get('returncode')!r}, "
+            f"returncode_basis={exit_record.get('returncode_basis')!r}."
+        )
     if report is None:
         failures.append("The probe wrote no parseable report.")
         return basis, failures
@@ -211,10 +347,11 @@ def judge_single_step_right_setting(
         return verdict
 
     sent_actions = _receipt_sent_actions(receipt)
-    clicks = [action for action in sent_actions if action.get("action") == "click"]
+    clicks = _delivered_clicks(receipt)
     if not clicks:
         verdict.failure_reasons.append(
-            f"The receipt shows no delivered click action: "
+            f"The receipt shows no delivered click action (a PASS requires "
+            f"delivery=sent; delivery=unknown can never satisfy this scenario): "
             f"{json.dumps(receipt.get('current_actions'), ensure_ascii=False)}"
         )
         return verdict
@@ -275,43 +412,23 @@ def judge_single_step_right_setting(
         )
         return verdict
 
-    if status == "completed":
-        last_action_basis = last_click.get("completion_basis")
-        policy = last_click.get("completion_policy")
-        delivery = last_click.get("delivery")
-        if last_action_basis == "system_verified_outcome":
-            verdict.basis.append(
-                "Receipt claims completion with system-verified outcome evidence; "
-                "independent /state corroborates the click landed on the right-hand control."
-            )
-        elif last_action_basis == "delivery_confirmed" and policy == "delivery_sufficient":
-            verdict.basis.append(
-                "Receipt claims completion on a delivery-sufficient direct click; "
-                "independent /state shows exactly one click on the right-hand control."
-            )
-        else:
-            verdict.failure_reasons.append(
-                f"Receipt claims completed with completion_basis={last_action_basis!r}, "
-                f"policy={policy!r}, delivery={delivery!r}; that is not corroborated evidence."
-            )
+    _overclaiming_speech(verdict, speech, expectations)
+
+    if status != "completed":
+        _uncertain_receipt_failure(verdict, receipt, speech, expectations, "A")
+        return verdict
+
+    corroborated, corroboration = _completion_corroboration(last_click)
+    if corroborated:
+        verdict.basis.append(
+            f"Receipt claims completion on a {corroboration}; independent /state "
+            "corroborates exactly one click on the right-hand control."
+        )
     else:
-        joined_speech = " ".join(speech)
-        if expectations.get("require_uncertainty_wording_when_unverified", True):
-            if not any(word in joined_speech for word in UNCERTAINTY_WORDING):
-                verdict.failure_reasons.append(
-                    f"uncertain_effect receipt but the final speech does not state the "
-                    f"uncertainty: {joined_speech!r}"
-                )
-            else:
-                verdict.basis.append(
-                    "uncertain_effect receipt with matching honest speech; "
-                    "independent /state proves the side effect without the app overclaiming."
-                )
-        for forbidden_claim in (expectations.get("forbidden_speech_claims_when_unverified") or []):
-            if forbidden_claim in joined_speech:
-                verdict.failure_reasons.append(
-                    f"Final speech overclaims completion ({forbidden_claim!r}): {joined_speech!r}"
-                )
+        verdict.failure_reasons.append(
+            f"Receipt claims completed but its step facts are not corroborated: "
+            f"{corroboration}."
+        )
 
     verdict.basis.append(
         f"Task identity: task_id={receipt.get('task_id')}, turn_id={receipt.get('turn_id')}, "
@@ -329,9 +446,10 @@ def judge_single_step_right_setting(
         verdict.status = STATUS_PASSED
         verdict.basis.append(
             "All six evidence layers agree: user words, raw tool arguments (click with "
-            "region=right, no open_app), Her receipt, independent /state "
-            "(selected=right-setting, exactly one new event), final speech, and a "
-            "self-exiting probe with no leftovers."
+            "region=right, no open_app), Her receipt (completed with delivery=sent and a "
+            "corroborated completion_basis), independent /state "
+            "(selected=right-setting, exactly one new event), non-overclaiming final speech, "
+            "and a self-exiting probe with no leftovers."
         )
     return verdict
 
@@ -441,27 +559,32 @@ def judge_two_step_display_settings_scale(
             f"{sorted(accepted)} (detail: {receipt.get('detail')!r})."
         )
         return verdict
+
+    _overclaiming_speech(verdict, speech, expectations)
+
     if status != "completed":
-        joined_speech = " ".join(speech)
-        if expectations.get("require_uncertainty_wording_when_unverified", True):
-            if not any(word in joined_speech for word in UNCERTAINTY_WORDING):
-                verdict.failure_reasons.append(
-                    f"uncertain_effect receipt but the final speech does not state the "
-                    f"uncertainty: {joined_speech!r}"
-                )
-        for forbidden_claim in (expectations.get("forbidden_speech_claims_when_unverified") or []):
-            if forbidden_claim in joined_speech:
-                verdict.failure_reasons.append(
-                    f"Final speech overclaims completion ({forbidden_claim!r}): {joined_speech!r}"
-                )
+        _uncertain_receipt_failure(verdict, receipt, speech, expectations, "C")
+        return verdict
+
+    # Work order 03R item 8: every step of the two-step sequence must satisfy its
+    # own policy with a completion basis that policy licenses.
+    for index, action in enumerate(sent_actions):
+        corroborated, corroboration = _completion_corroboration(action)
+        step = f"Step {index + 1} ({action.get('label')!r})"
+        if not corroborated:
+            verdict.failure_reasons.append(
+                f"{step} does not carry corroborated completion evidence: {corroboration}."
+            )
+        else:
+            verdict.basis.append(f"{step} {corroboration}.")
 
     verdict.basis.append(
         "Step facts: "
         + " | ".join(
             f"step {index + 1} label={action.get('label')!r} delivery={action.get('delivery')!r} "
-            f"outcome_evidence={action.get('outcome_evidence')!r} "
-            f"completion_policy={action.get('completion_policy')!r} "
-            f"completion_basis={action.get('completion_basis')!r}"
+            f"outcome_evidence={_action_completion_field(action, 'outcome_evidence', 'outcomeEvidence')!r} "
+            f"completion_policy={_action_completion_field(action, 'completion_policy', 'completionPolicy')!r} "
+            f"completion_basis={_action_completion_field(action, 'completion_basis', 'completionBasis')!r}"
             for index, action in enumerate(sent_actions)
         )
     )
@@ -476,9 +599,10 @@ def judge_two_step_display_settings_scale(
         verdict.status = STATUS_PASSED
         verdict.basis.append(
             "All six evidence layers agree: user words, raw tool arguments (two click "
-            "steps, no open_app), Her receipt with two delivered actions, independent "
-            "/state events exactly [open-menu, scale] with selected=scale, final speech, "
-            "and a self-exiting probe with no leftovers."
+            "steps, no open_app), Her receipt completed with delivery=sent on both steps "
+            "and each step's policy-licensed completion basis, independent "
+            "/state events exactly [open-menu, scale] with selected=scale, non-overclaiming "
+            "final speech, and a self-exiting probe with no leftovers."
         )
     return verdict
 

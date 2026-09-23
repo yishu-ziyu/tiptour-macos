@@ -39,7 +39,7 @@ class AppIdentity:
     binary_is_fresh: bool = False
     product_sources_checked: int = 0
     keychain: list[dict] = field(default_factory=list)
-    keychain_accessible: bool = False
+    keychain_item_present: bool = False
     user_her_processes: list[dict] = field(default_factory=list)
     blocking_reasons: list[str] = field(default_factory=list)
 
@@ -70,9 +70,9 @@ class AppIdentity:
             "newest_product_source_modified_at_epoch": self.newest_product_source_modified_at_epoch,
             "binary_is_fresh": self.binary_is_fresh,
             "product_sources_checked": self.product_sources_checked,
-            # Presence and OS status only. Secrets are never read, printed or stored.
+            # Presence and CLI exit code only. Secrets are never read, printed or stored.
             "keychain": self.keychain,
-            "keychain_accessible": self.keychain_accessible,
+            "keychain_item_present": self.keychain_item_present,
             # Recorded, never killed: the runner must not stop a user's Her.
             "user_her_processes": self.user_her_processes,
             "blocking_reasons": self.blocking_reasons,
@@ -107,10 +107,12 @@ def _inspect_codesign(app_path: Path) -> tuple[str, str, bool, str]:
 
 
 def _check_keychain_item(service: str, account: str) -> dict:
-    """Presence/accessibility only: stdout is discarded, never stored.
+    """Presence only: stdout is discarded, never stored.
 
     A generic-password lookup without -g/-w does not decrypt the secret, so no
-    Keychain prompt is opened and no secret can reach this record.
+    Keychain prompt is opened and no secret can reach this record. Success only
+    proves the item's attributes exist (exit code 0), never that it is
+    decryptable or that any real access was granted.
     """
     lookup = run_capture(
         ["security", "find-generic-password", "-s", service, "-a", account],
@@ -118,10 +120,12 @@ def _check_keychain_item(service: str, account: str) -> dict:
     )
     # Deliberately drop stdout/stderr: attributes only, never the secret.
     status_code = lookup.get("returncode")
+    # This is the `security` CLI process exit code (44 = errSecItemNotFound), NOT
+    # a native OSStatus from Keychain Services.
     return {
         "account": account,
         "present": status_code == 0,
-        "os_status_code": status_code,
+        "security_cli_exit_code": status_code,
         "timed_out": bool(lookup.get("timed_out")),
         "lookup_error": lookup.get("error"),
     }
@@ -241,13 +245,15 @@ def inspect_app_identity(app_path: Path) -> AppIdentity:
     stepfun_item = next(
         (item for item in identity.keychain if item["account"] == "stepfunAPIKey"), None
     )
-    identity.keychain_accessible = bool(stepfun_item and stepfun_item["present"])
-    if not identity.keychain_accessible:
+    identity.keychain_item_present = bool(stepfun_item and stepfun_item["present"])
+    if not identity.keychain_item_present:
         identity.blocking_reasons.append(
-            "The app's own StepFun Keychain item is not readable non-interactively "
-            f"(service {paths.KEYCHAIN_SERVICE_NAME!r}, account 'stepfunAPIKey'). "
-            "Open Her once, enter the StepFun key in Settings → Models, and rerun. "
-            "The runner never exports or prints keys."
+            "The app's own StepFun generic-password item is not present: an "
+            f"attributes-only lookup failed (service {paths.KEYCHAIN_SERVICE_NAME!r}, "
+            "account 'stepfunAPIKey') and its security_cli_exit_code is recorded in "
+            "keychain[]. Presence is not decryptability or access; no secret was "
+            "read. Open Her once, enter the StepFun key in Settings → Models, and "
+            "rerun. The runner never exports or prints keys."
         )
 
     # Recording only. A user's Her keeps running; the probe is a separate process.

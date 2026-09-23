@@ -9,14 +9,17 @@ A failure prints the raw evidence that disproved the expectation.
 from __future__ import annotations
 
 import json
+import os
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
-from . import dry_run, evidence, paths
+from . import dry_run, evidence, orchestration, paths, run_mutex
 from .app_identity import inspect_app_identity
 from .fixture_page import FixtureError, FixtureServer
 from .process_control import (
@@ -26,7 +29,15 @@ from .process_control import (
     spawn_owned_process,
     terminate_owned_process,
 )
-from .probe_runner import ProbeError, ProbeRequest, binary_supports_flag, build_probe_argv, run_probe
+from .probe_runner import (
+    PREFLIGHT_FLAG,
+    ProbeError,
+    ProbeRequest,
+    binary_supports_flag,
+    build_probe_argv,
+    run_preflight,
+    run_probe,
+)
 from .scenario_judges import judge_scenario
 from .scenarios import load_scenarios
 from .synthetic_speech import (
@@ -36,7 +47,18 @@ from .synthetic_speech import (
     synthesize_utterance,
     validate_raw_pcm,
 )
-from .orchestration import RunOptions, run_acceptance
+from .orchestration import (
+    RUN_MUTEX_BLOCKED_EXIT_CODE,
+    SIGINT_EXIT_CODE,
+    AbortState,
+    RunContext,
+    RunOptions,
+    _abort_exit_code,
+    _install_abort_signal_handlers,
+    _preflight_gate,
+    _restore_signal_handlers,
+    run_acceptance,
+)
 
 
 class SelfTestFailure(AssertionError):
@@ -373,6 +395,39 @@ def test_judge_single_step_scenario(work_dir: Path) -> list[str]:
     verdict = _judge("single_step_right_setting", _self_exited_record(), good.report,
                      good.state_before, good.state_after)
     _check(verdict.passed, f"good chain rejected: {verdict.failure_reasons}")
+    _check(any("delivery-sufficient" in line or "system-verified" in line
+               for line in verdict.basis),
+           f"a passing A chain must name its corroborated completion basis: {verdict.basis}")
+
+    # Work order 03R item 8: the same chain carrying an uncertain_effect receipt is
+    # an honest, safe FAILED attempt - never scenario A's PASS.
+    uncertain = json.loads(json.dumps(good.report))
+    uncertain_receipt = json.loads(uncertain["tool_results"][0])
+    uncertain_receipt["status"] = "uncertain_effect"
+    uncertain_receipt["completed_step_count"] = 0
+    uncertain_receipt["actions"] = ["click「设置」：结果未确认"]
+    uncertain_receipt["detail"] = "操作结果未确认，已停止；页面变化不等于目标完成。"
+    uncertain["tool_results"][0] = json.dumps(uncertain_receipt, ensure_ascii=False)
+    uncertain["rendered_texts"] = ["已向「设置」发送操作，但目标结果还没有确认，已停下。"]
+    verdict = _judge("single_step_right_setting", _self_exited_record(), uncertain,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed,
+           f"an uncertain_effect receipt was passed for scenario A: {verdict.basis}")
+    _check(any("uncertain_effect" in reason for reason in verdict.failure_reasons),
+           f"the refusal must name the uncertain receipt: {verdict.failure_reasons}")
+    _check(any("recorded as a FAILED attempt, never as a PASS" in line
+               for line in verdict.basis),
+           f"the honest failure must carry its own basis: {verdict.basis}")
+
+    # delivery=unknown is not a delivered click for this scenario either.
+    unknown = json.loads(json.dumps(good.report))
+    unknown_receipt = json.loads(unknown["tool_results"][0])
+    unknown_receipt["current_actions"][0]["delivery"] = "unknown"
+    unknown["tool_results"][0] = json.dumps(unknown_receipt, ensure_ascii=False)
+    verdict = _judge("single_step_right_setting", _self_exited_record(), unknown,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed,
+           f"delivery=unknown was passed for scenario A: {verdict.failure_reasons}")
 
     bad = _chain("single_step_right_setting", "bad_double_click")
     verdict = _judge("single_step_right_setting", _self_exited_record(), bad.report,
@@ -419,9 +474,10 @@ def test_judge_single_step_scenario(work_dir: Path) -> list[str]:
     verdict = _judge("single_step_right_setting", _self_exited_record(), right_click,
                      good.state_before, good.state_after)
     _check(not verdict.passed, "right_click execution was accepted for a 右边 request")
-    return ["scenario A: honest uncertain receipt with corroborating /state passes; duplicate "
-            "click, lying receipt, overclaiming speech, timeout, missing report and "
-            "right_click are each rejected"]
+    return ["scenario A: a completed receipt with delivery=sent and a corroborated "
+            "completion basis passes; an uncertain_effect or delivery=unknown receipt, "
+            "duplicate click, lying receipt, overclaiming speech, timeout, missing report "
+            "and right_click are each rejected"]
 
 
 def test_judge_two_step_scenario(work_dir: Path) -> list[str]:
@@ -454,8 +510,60 @@ def test_judge_two_step_scenario(work_dir: Path) -> list[str]:
     verdict = _judge("two_step_display_settings_scale", _self_exited_record(), single_step,
                      good.state_before, good.state_after)
     _check(not verdict.passed, "a single top-level click was accepted as the two-step scenario")
-    return ["scenario C: two explicit steps with exact ordered /state passes; the open_app "
-            "bug signature, reordered side effects and a single-step submission are rejected"]
+
+    # Work order 03R item 8: an uncertain receipt is this scenario's honest failure,
+    # never its PASS, and every step must satisfy its own policy.
+    uncertain = json.loads(json.dumps(good.report))
+    uncertain_receipt = json.loads(uncertain["tool_results"][0])
+    uncertain_receipt["status"] = "uncertain_effect"
+    uncertain_receipt["completed_step_count"] = 0
+    uncertain["tool_results"][0] = json.dumps(uncertain_receipt, ensure_ascii=False)
+    uncertain["rendered_texts"] = ["已向「打开显示设置」发送操作，但结果还没有确认，已停下。"]
+    verdict = _judge("two_step_display_settings_scale", _self_exited_record(), uncertain,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed,
+           f"an uncertain_effect receipt was passed for scenario C: {verdict.basis}")
+    _check(any("uncertain_effect" in reason for reason in verdict.failure_reasons),
+           f"the refusal must name the uncertain receipt: {verdict.failure_reasons}")
+
+    # A step whose completion basis its policy does not license must fail the
+    # scenario, even though both actions were delivered.
+    unlicensed = json.loads(json.dumps(good.report))
+    unlicensed_receipt = json.loads(unlicensed["tool_results"][0])
+    unlicensed_receipt["current_actions"][1]["completion_basis"] = None
+    unlicensed["tool_results"][0] = json.dumps(unlicensed_receipt, ensure_ascii=False)
+    verdict = _judge("two_step_display_settings_scale", _self_exited_record(), unlicensed,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed and any("corroborated" in reason
+                                      for reason in verdict.failure_reasons),
+           f"an unlicensed completion basis was accepted for scenario C: "
+           f"{verdict.failure_reasons}")
+
+    # A delivery=unknown step is not a delivered step for this scenario.
+    unknown_delivery = json.loads(json.dumps(good.report))
+    unknown_receipt_c = json.loads(unknown_delivery["tool_results"][0])
+    unknown_receipt_c["current_actions"][0]["delivery"] = "unknown"
+    unknown_delivery["tool_results"][0] = json.dumps(unknown_receipt_c, ensure_ascii=False)
+    verdict = _judge("two_step_display_settings_scale", _self_exited_record(), unknown_delivery,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed and any("delivery=unknown" in reason
+                                      for reason in verdict.failure_reasons),
+           f"delivery=unknown was accepted for scenario C: {verdict.failure_reasons}")
+
+    # Overclaiming speech is refused on a completed receipt too.
+    overclaiming = json.loads(json.dumps(good.report))
+    overclaiming["rendered_texts"] = ["已完成并确认这 2 步操作。"]
+    verdict = _judge("two_step_display_settings_scale", _self_exited_record(), overclaiming,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed,
+           f"overclaiming speech on a completed two-step receipt was accepted: "
+           f"{verdict.basis}")
+
+    return ["scenario C: two explicit steps, both delivered with delivery=sent and each "
+            "step's policy-licensed completion basis, with exact ordered /state passes; "
+            "the open_app bug signature, reordered side effects, a single-step submission, "
+            "an uncertain receipt, an unlicensed basis, delivery=unknown and overclaiming "
+            "speech are each rejected"]
 
 
 def test_judge_continuity_scenario(work_dir: Path) -> list[str]:
@@ -513,6 +621,85 @@ def test_judge_unknown_scenario(work_dir: Path) -> list[str]:
            "a receipt hiding the delivery-unknown state was accepted")
     return ["scenario unknown: delivery=unknown with one click and honest speech passes; "
             "re-click and a masked delivery state are rejected"]
+
+
+def test_exit_status_honesty_for_launched_instances(work_dir: Path) -> list[str]:
+    """The exit-code judgment: only a status the OS reported (or a documented
+    derived value with its artifact behind it) may carry a verdict.
+
+    A LaunchServices instance is not the runner's child, so the kernel reports it
+    no exit status. `returncode: 0` therefore counts only together with a
+    `returncode_basis` that starts with "derived:" and a present report artifact;
+    a null returncode or an "unavailable" basis fails closed.
+    """
+    from . import launch_services
+
+    good = _chain("single_step_right_setting", dry_run.GOOD_CHAIN_SUFFIX)
+
+    def _record(**overrides) -> dict:
+        record = {"pid": 9001, "self_exited": True, "returncode": 0, "timed_out": False}
+        record.update(overrides)
+        return {"exit_record": record}
+
+    derived = _record(report_artifact_present=True,
+                      returncode_basis=launch_services.RETURNCODE_DERIVED_BASIS)
+    verdict = _judge("single_step_right_setting", derived, good.report,
+                     good.state_before, good.state_after)
+    _check(verdict.passed,
+           f"a derived basis with the report artifact present was refused: "
+           f"{verdict.failure_reasons}")
+    _check(any("derived" in line for line in verdict.basis),
+           f"the derived basis must be quoted in the verdict: {verdict.basis}")
+
+    # ... and never without the artifact that proves the instance ran.
+    no_artifact = _record(report_artifact_present=False,
+                          returncode_basis=launch_services.RETURNCODE_DERIVED_BASIS)
+    verdict = _judge("single_step_right_setting", no_artifact, good.report,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed and any("report_artifact_present" in reason
+                                      for reason in verdict.failure_reasons),
+           f"a derived basis without the artifact was accepted: {verdict.failure_reasons}")
+
+    # The documented unavailable basis is an honest "no status", never a success.
+    unavailable = _record(report_artifact_present=False,
+                          returncode_basis=launch_services.RETURNCODE_UNAVAILABLE_BASIS)
+    verdict = _judge("single_step_right_setting", unavailable, good.report,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed and any("unavailable" in reason
+                                      for reason in verdict.failure_reasons),
+           f"the unavailable basis was accepted as success: {verdict.failure_reasons}")
+
+    # A null returncode stays null, whatever basis is recorded next to it.
+    null_status = _record(returncode=None, report_artifact_present=True,
+                          returncode_basis=launch_services.RETURNCODE_DERIVED_BASIS)
+    verdict = _judge("single_step_right_setting", null_status, good.report,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed,
+           f"a null returncode was accepted: {verdict.failure_reasons}")
+
+    # A forked child the runner parented keeps its real, kernel-reported code.
+    forked = _record(pid=4242)
+    verdict = _judge("single_step_right_setting", forked, good.report,
+                     good.state_before, good.state_after)
+    _check(verdict.passed,
+           f"a real exit code 0 was refused: {verdict.failure_reasons}")
+    nonzero = _record(returncode=3)
+    verdict = _judge("single_step_right_setting", nonzero, good.report,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed, "a non-zero exit code was accepted")
+
+    # The rule lives in the shared attempt checks, so every judge inherits it.
+    for name in ("two_step_display_settings_scale", "continuity_progress_cancel",
+                 "unknown_delivery_fault_recovery"):
+        payload = _chain(name, dry_run.GOOD_CHAIN_SUFFIX)
+        verdict = _judge(name, derived, payload.report, payload.state_before,
+                         payload.state_after)
+        _check(verdict.passed,
+               f"{name} refused the derived exit status: {verdict.failure_reasons}")
+    return ["exit status: a forked child's real code 0 passes and a non-zero code fails; a "
+            "LaunchServices instance passes only on returncode=0 with a derived basis and "
+            "a present report artifact; a null returncode and the unavailable basis fail "
+            "closed, in every judge"]
 
 
 # -------------------------------------------------------------- hygiene checks
@@ -585,6 +772,32 @@ def test_freshness_gate_blocks_stale_binary(work_dir: Path) -> list[str]:
 # ---------------------------------------------------------------- dry-run runs
 
 
+def _machine_app_binary() -> Path:
+    """The Mach-O this machine's DerivedData product actually contains."""
+    identity = inspect_app_identity(paths.DEFAULT_DERIVED_DATA_APP)
+    executable = identity.bundle_executable or paths.EXPECTED_BUNDLE_EXECUTABLE
+    return paths.DEFAULT_DERIVED_DATA_APP / "Contents/MacOS" / executable
+
+
+def _pending_scenario_names(app_binary: Path | None = None) -> list[str]:
+    """Scenarios whose capability flag the given binary does not contain.
+
+    The same rule the runner uses: a scenario is pending-integrator-run exactly
+    when the work order that owns its probe is not merged into the built binary
+    (its flag is absent). The expected dry-run exit code is therefore derived
+    from the binary's real capability, not from an assumption about which work
+    orders have merged here.
+    """
+    binary = app_binary if app_binary is not None else _machine_app_binary()
+    pending: list[str] = []
+    for scenario in load_scenarios():
+        capability_flag = scenario.capability_flag
+        if scenario.probe_mode == "unknown" and capability_flag:
+            if not binary_supports_flag(binary, capability_flag):
+                pending.append(scenario.name)
+    return pending
+
+
 def _run_dry_run(work_dir: Path, failure_injection: bool) -> tuple[int, dict, dict]:
     out_dir = work_dir / ("dry-run-failures" if failure_injection else "dry-run-good")
     options = RunOptions(
@@ -601,14 +814,33 @@ def _run_dry_run(work_dir: Path, failure_injection: bool) -> tuple[int, dict, di
 
 def test_dry_run_full_pipeline_twice_consistent(work_dir: Path) -> list[str]:
     first_code, first_result, _ = _run_dry_run(work_dir / "first", failure_injection=False)
-    # Pre-merge the unknown scenario is pending-integrator-run (work order 04's probe
-    # is not in the binary), so the honest exit code is non-zero with no failures.
-    _check(first_code == 1,
-           f"pre-merge good dry-run must exit non-zero while a scenario is pending: {first_code}")
+    # The exit code depends on what this binary can actually do: a scenario whose
+    # owning work order has not merged is pending-integrator-run, so the honest
+    # exit is non-zero; when every scenario's capability is present, the same
+    # pipeline has nothing left to be honest about except a clean 0.
+    # The rule itself, proven against synthetic binaries so the assertion keeps
+    # its meaning on either machine: a capability the binary lacks is pending
+    # (non-zero exit is honest), a capability it has is not (zero is honest).
+    capable = work_dir / "binary-with-receipt-loss-probe"
+    capable.write_bytes(b"\x00fake-macho" + b"--receipt-loss-probe" + b"\x00rest")
+    incapable = work_dir / "binary-without-receipt-loss-probe"
+    incapable.write_bytes(b"\x00fake-macho--voice-task-probe\x00rest")
+    _check(_pending_scenario_names(capable) == [],
+           f"a binary that contains the probe must leave nothing pending: "
+           f"{_pending_scenario_names(capable)}")
+    _check(_pending_scenario_names(incapable) == ["unknown_delivery_fault_recovery"],
+           f"a binary without the probe must leave the scenario pending: "
+           f"{_pending_scenario_names(incapable)}")
+
+    pending = _pending_scenario_names()
+    expected_code = 1 if pending else 0
+    capability_note = (f"pending scenarios in this binary: {pending or 'none'}")
+    _check(first_code == expected_code,
+           f"good dry-run must exit {expected_code} ({capability_note}), got {first_code}")
     _check(not any(scenario["status"] == "failed" for scenario in first_result["scenarios"]),
            "the good dry-run has a failed scenario")
-    _check(first_result["summary"]["pending_integrator_run"] == ["unknown_delivery_fault_recovery"],
-           f"pending scenario list wrong: {first_result['summary']}")
+    _check(first_result["summary"]["pending_integrator_run"] == pending,
+           f"pending scenario list wrong: {first_result['summary']} vs {pending}")
     _check(first_result["proof"] is False, "dry run claimed proof")
     _check(first_result["mode"] == "dry_run", "dry run mislabeled")
     _check(first_result["environment"]["fixture"]["port_released_after_stop"] is True,
@@ -622,7 +854,7 @@ def test_dry_run_full_pipeline_twice_consistent(work_dir: Path) -> list[str]:
            "second run started while the port was still occupied by the first")
     second_code = run_acceptance(second_options)
     second_result = evidence.read_json(second_dir / "result.json")
-    _check(second_code == 1, "second dry run did not match the first run's exit code")
+    _check(second_code == expected_code, "second dry run did not match the first run's exit code")
     first_statuses = {scenario["name"]: scenario["status"] for scenario in first_result["scenarios"]}
     second_statuses = {scenario["name"]: scenario["status"] for scenario in second_result["scenarios"]}
     _check(first_statuses == second_statuses,
@@ -630,8 +862,8 @@ def test_dry_run_full_pipeline_twice_consistent(work_dir: Path) -> list[str]:
     for scenario in first_result["scenarios"]:
         _check(scenario["status"] in ("passed", "pending_integrator_run"),
                f"unexpected dry-run verdict: {scenario['status']}")
-    return ["two consecutive dry runs agree, exit 0, port free between runs, no owned "
-            "processes left, and proof=False throughout"]
+    return [f"two consecutive dry runs agree, exit {expected_code} ({capability_note}), "
+            "port free between runs, no owned processes left, and proof=False throughout"]
 
 
 def test_dry_run_failure_injection_is_detected(work_dir: Path) -> list[str]:
@@ -645,6 +877,109 @@ def test_dry_run_failure_injection_is_detected(work_dir: Path) -> list[str]:
         scenario = next(item for item in result["scenarios"] if item["name"] == name)
         _check(scenario["failure_reasons"], f"{name} failed without recorded reasons")
     return ["every injected bad chain failed the run with recorded reasons and exit code 1"]
+
+
+def test_interrupted_run_still_writes_report(work_dir: Path) -> list[str]:
+    """An interrupted run must still produce a readable, non-PASS report.
+
+    Part 1 proves the signal handler's contract (a signal only sets the abort
+    flag and never raises, so the run can settle what is in flight), part 2
+    proves the exit codes, part 3 interrupts the real dry-run pipeline with a
+    real SIGINT and reads the package back from disk. No app, provider or
+    desktop is involved, and the user's Her is never signalled.
+    """
+    # 1. The handler contract: set the flag, never raise.
+    state = AbortState()
+    installed = _install_abort_signal_handlers(state)
+    try:
+        signal.raise_signal(signal.SIGINT)
+        _check(state.requested and state.signal_name == "SIGINT",
+               f"SIGINT did not set the abort flag: {state}")
+        _check(_abort_exit_code(state) == SIGINT_EXIT_CODE,
+               f"SIGINT must exit {SIGINT_EXIT_CODE}: {_abort_exit_code(state)}")
+        _check(_abort_exit_code(AbortState.for_signal(signal.SIGTERM)) != 0,
+               "SIGTERM must exit non-zero")
+        _check(_abort_exit_code(AbortState()) != 0, "an abort without a signal must exit non-zero")
+    finally:
+        _restore_signal_handlers(installed)
+
+    # 2. An abort requested before the scenarios still writes the whole package.
+    pre_run_dir = work_dir / "abort-before-scenarios"
+    pre_code = run_acceptance(
+        RunOptions(app_path_argument=None, out_dir=pre_run_dir, mode="dry_run"),
+        abort=AbortState.for_signal(signal.SIGINT),
+    )
+    pre_result = evidence.read_json(pre_run_dir / "result.json")
+    _check(pre_code == SIGINT_EXIT_CODE, f"aborted run exited {pre_code}, expected {SIGINT_EXIT_CODE}")
+    _check(pre_result["passed"] is False, "an aborted run was recorded as passed")
+    _check(pre_result["environment"]["abort"]["signal_name"] == "SIGINT",
+           f"the report does not record the interrupt: "
+           f"{pre_result['environment'].get('abort')}")
+    _check(all(scenario["abort"]["status"] == "not_run" for scenario in pre_result["scenarios"]),
+           f"every scenario must be not_run: "
+           f"{[s['abort']['status'] for s in pre_result['scenarios']]}")
+    _check(pre_result["environment"]["fixture"]["not_started"] is True,
+           "a run aborted before the fixture must say the fixture never started")
+
+    # 3. A real SIGINT in the middle of the pipeline: the in-flight attempt is
+    #    settled, the loop starts no new work, and the report is still written.
+    out_dir = work_dir / "sigint-mid-run"
+    artifacts = out_dir / "scenario-artifacts"
+    delivered = threading.Event()
+
+    def _interrupt() -> None:
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            if any(artifacts.glob("*/run-1")):
+                os.kill(os.getpid(), signal.SIGINT)
+                delivered.set()
+                return
+            time.sleep(0.01)
+
+    interrupter = threading.Thread(target=_interrupt, daemon=True)
+    interrupter.start()
+    exit_code = run_acceptance(RunOptions(app_path_argument=None, out_dir=out_dir,
+                                          mode="dry_run"))
+    interrupter.join(timeout=5.0)
+    _check(delivered.is_set(), "the synthetic SIGINT was never delivered")
+
+    _check((out_dir / "result.json").is_file(), "an interrupted run wrote no result.json")
+    result = evidence.read_json(out_dir / "result.json")
+    _check(exit_code == SIGINT_EXIT_CODE,
+           f"SIGINT must exit {SIGINT_EXIT_CODE}, got {exit_code}")
+    _check(result["exit_code"] == SIGINT_EXIT_CODE,
+           f"result.json recorded exit_code={result['exit_code']}")
+    _check(result["passed"] is False, "an interrupted run was recorded as passed")
+    _check(result["proof"] is False, "an interrupted run claimed proof")
+    _check(result["environment"]["abort"]["signal_name"] == "SIGINT",
+           f"the report does not record the interrupt: {result['environment'].get('abort')}")
+    aborted = [scenario for scenario in result["scenarios"] if scenario.get("aborted")]
+    _check(aborted, "no scenario recorded the interruption")
+    _check(all(scenario["status"] != "passed" for scenario in aborted),
+           f"an aborted scenario was recorded as passed: {[s['status'] for s in aborted]}")
+    _check(all(scenario["status"] == "failed" for scenario in aborted),
+           f"an aborted scenario must be a non-PASS failed status: "
+           f"{[s['status'] for s in aborted]}")
+    _check(all(scenario["abort"]["status"] in ("aborted", "not_run")
+               and scenario["failure_reasons"] for scenario in aborted),
+           f"aborted scenarios must name aborted/not_run with a reason: "
+           f"{[s['abort']['status'] for s in aborted]}")
+    _check(result["environment"]["cleanup"]["owned_processes_remaining"] == 0,
+           "an interrupted run left owned processes running")
+    _check(result["environment"]["fixture"]["port_released_after_stop"] is True,
+           "an interrupted run left the fixture port occupied")
+    _check(evidence.validate_result_schema(result) == [],
+           f"the interrupted package failed the evidence schema: "
+           f"{evidence.validate_result_schema(result)}")
+    for scenario in aborted:
+        for artifact in scenario["abort"]["attempt_artifacts"]:
+            path = Path(artifact)
+            _check(path.is_file(), f"settled attempt is not on disk: {artifact}")
+            evidence.read_json(path)  # complete JSON: the per-attempt write is atomic
+    return [f"SIGINT handler sets a flag and never raises; exit {SIGINT_EXIT_CODE} for SIGINT "
+            "and non-zero for any other abort; an interrupted dry run still wrote result.json "
+            "with passed=false, every scenario recorded as aborted/not_run with a reason, and "
+            "the attempts it had already settled on disk one by one"]
 
 
 def test_dry_run_artifacts_have_no_secrets(work_dir: Path) -> list[str]:
@@ -762,6 +1097,396 @@ def test_probe_execution_lifecycle(work_dir: Path) -> list[str]:
             "hanging probe terminated by the runner with the timeout recorded"]
 
 
+# ------------------------------------------------------------ preflight gate
+
+
+def test_preflight_gate_blocks_and_continues(work_dir: Path) -> list[str]:
+    """The in-app --preflight gate decision, proven with fake binaries.
+
+    No real app, provider, desktop or permission prompt is involved: this is a
+    runner unit test of the BLOCK-vs-continue rule only.
+    """
+    registry = OwnedProcessRegistry()
+
+    def _fake_preflight_app(name: str, payload: dict | None) -> Path:
+        # The `--preflight` string is embedded (a comment) so binary_supports_flag
+        # detects it exactly as it would in the real DEBUG Mach-O. When a payload
+        # is supplied the script copies it to $2 (the runner-passed report path).
+        binary = work_dir / name
+        if payload is None:
+            script = "#!/bin/bash\n# handles --preflight <output>\nexit 0\n"
+        else:
+            payload_path = work_dir / f"{name}.payload.json"
+            payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            script = ("#!/bin/bash\n"
+                      "# handles --preflight <output>\n"
+                      f'cp "{payload_path}" "$2"\n'
+                      "exit 0\n")
+        binary.write_text(script, encoding="utf-8")
+        binary.chmod(0o755)
+        return binary
+
+    failing = {
+        "bundle_identifier": "com.yishuziyu.her", "accessibility_trusted": False,
+        "frontmost_bundle_id": "com.apple.finder",
+        "required_checks": {"accessibility": False},
+        "blocked_reasons": ["accessibility_not_trusted"],
+    }
+    passing = {
+        "bundle_identifier": "com.yishuziyu.her", "accessibility_trusted": True,
+        "frontmost_bundle_id": "com.apple.finder",
+        "required_checks": {"accessibility": True},
+        "blocked_reasons": [],
+    }
+
+    # 1. Older build without the flag: never a verdict; continue with supported=False.
+    older = work_dir / "older-her"
+    older.write_bytes(b"\x00fake-macho without the preflight flag\n")
+    older.chmod(0o755)
+    evidence, reasons = _preflight_gate(older, registry, work_dir / "pf-older")
+    _check(evidence == {"supported": False},
+           f"older build must record exactly supported=false: {evidence}")
+    _check(reasons == [], f"older build must not block: {reasons}")
+
+    # 2. Supported, preconditions failed: BLOCK, carrying the app's exact reason
+    #    and the whole preflight JSON.
+    blocked_app = _fake_preflight_app("blocked-her", failing)
+    _check(binary_supports_flag(blocked_app, PREFLIGHT_FLAG), "fake --preflight not detected")
+    evidence, reasons = _preflight_gate(blocked_app, registry, work_dir / "pf-blocked")
+    _check(evidence.get("supported") is True, f"supported app mislabeled: {evidence}")
+    _check(evidence.get("clear") is False, f"failed preflight must not be clear: {evidence}")
+    _check("accessibility_not_trusted" in reasons,
+           f"the app's exact blocked reason was not surfaced: {reasons}")
+    _check(evidence["report"]["required_checks"]["accessibility"] is False,
+           "the whole preflight JSON was not attached to the evidence")
+
+    # 3. Supported, preconditions met: continue (clear), no reasons.
+    ok_app = _fake_preflight_app("ok-her", passing)
+    evidence, reasons = _preflight_gate(ok_app, registry, work_dir / "pf-ok")
+    _check(evidence.get("clear") is True and reasons == [],
+           f"passing preflight must continue: clear={evidence.get('clear')} reasons={reasons}")
+
+    # 4. Supported but wrote no report: fail closed (cannot prove preconditions).
+    silent = run_preflight(_fake_preflight_app("silent-her", None), registry,
+                           work_dir / "pf-silent", timeout_seconds=30.0)
+    _check(silent.report is None, "silent preflight should have produced no report")
+    _check(silent.clear is False and silent.blocking_reasons,
+           "a supported preflight with no report must fail closed")
+
+    _check(not registry.running(), "a preflight child was left running by the test")
+    return ["preflight gate: older build records supported=false and continues; failing "
+            "preconditions BLOCK with the app's exact reason and whole JSON; passing "
+            "preconditions continue; a report-less supported preflight fails closed"]
+
+
+# --------------------------------------------------------- run preconditions
+
+
+def _unestablished_frontmost_stage(stop_reason: str, page_views: int = 7) -> dict:
+    """A browser_stage result that could not prove Safari is frontmost.
+
+    The shape is what `browser_stage.stage_controlled_page` /
+    `reload_controlled_page` return when the wait ended unestablished: the
+    controlled page did open (page_views moved) but the frontmost identity was
+    never proven, and the exact reason is the only thing a caller may act on.
+    """
+    return {
+        "url": paths.FIXTURE_URL,
+        "browser": paths.CONTROLLED_BROWSER_BUNDLE_IDENTIFIER,
+        "opened": True,
+        "page_views_after_open": page_views,
+        "page_views_after_reload": page_views,
+        "became_frontmost": False,
+        "frontmost_established": False,
+        "frontmost_bundle_id": "",
+        "frontmost_observed_bundle_id": "com.apple.finder",
+        "frontmost_stop_reason": stop_reason,
+        "frontmost_identity": {
+            "frontmost_established": False,
+            "frontmost_bundle_id": "",
+            "frontmost_observed_bundle_id": "com.apple.finder",
+            "frontmost_stop_reason": stop_reason,
+            "frontmost_attempts": 3,
+        },
+    }
+
+
+def test_frontmost_gate_blocks_before_any_call(work_dir: Path) -> list[str]:
+    """An unproven foreground stops a scenario; it never becomes a warning.
+
+    Part 1 pins the gate's decision function, part 2 drives one real scenario
+    through it with a stubbed browser stage and a probe entrypoint that fails the
+    test if it is ever reached, and part 3 runs the whole full-mode pipeline with
+    the staged page unproven. No Safari, no app, no provider and no desktop: the
+    runner's own rule is what is under test.
+    """
+    stop_reason = "frontmost app is com.apple.finder, not the controlled browser com.apple.Safari"
+    stage = _unestablished_frontmost_stage(stop_reason)
+
+    # 1. The gate only ever accepts a positive proof. A dry-run's skipped stage
+    #    and an established wait are "nothing to block"; everything else - an
+    #    unproven observation, a missing reason, a stage that reports no
+    #    frontmost fact at all - blocks rather than letting a desktop action
+    #    through on an unproven foreground.
+    _check(orchestration._frontmost_stop_reasons({"skipped": True}) == [],
+           "the dry-run skip record was misread as an unproven foreground")
+    _check(orchestration._frontmost_stop_reasons(
+        dict(stage, frontmost_established=True, frontmost_stop_reason="")) == [],
+           "an established frontmost wait must not block a scenario")
+    _check(orchestration._frontmost_stop_reasons(stage) == [stop_reason],
+           "an unproven foreground must carry its exact stop reason")
+    _check(orchestration._frontmost_stop_reasons(dict(stage, frontmost_stop_reason="")) != [],
+           "an unproven foreground with no recorded reason must still block")
+    _check(orchestration._frontmost_stop_reasons({"error": "staging failed"}) != [],
+           "a stage that reports no frontmost fact at all must fail closed, not "
+           "silently allow a desktop action")
+
+    # 2. One scenario: BLOCKED with the exact reason, and no probe was started.
+    scenario = _scenario_by_name("single_step_right_setting")
+
+    class _StubBrowserStage:
+        def __init__(self) -> None:
+            self.reload_calls = 0
+
+        def reload_controlled_page(self, _fixture, _previous_page_views):
+            self.reload_calls += 1
+            return dict(stage)
+
+    class _StubFixture:
+        def reset(self) -> dict:
+            return {"selected": None, "clicks": 0, "menu_open": False, "events": []}
+
+        def state(self) -> dict:
+            return {"selected": None, "clicks": 0, "menu_open": False, "events": [],
+                    "page_views": 6}
+
+    def _no_probe(*_args, **_kwargs):
+        raise SelfTestFailure("a probe (provider/Driver) call was started for a "
+                              "scenario the frontmost gate had blocked")
+
+    stubbed_stage = _StubBrowserStage()
+    scenario_out_dir = work_dir / "scenario-out"
+    real_stage, real_probe = orchestration.browser_stage, orchestration.run_probe
+    orchestration.browser_stage = stubbed_stage
+    orchestration.run_probe = _no_probe
+    try:
+        record = orchestration._run_scenario(
+            scenario,
+            RunOptions(app_path_argument=None, out_dir=scenario_out_dir, mode="full"),
+            RunContext(mode="full", entrypoint="self-test",
+                       app_path=work_dir / "Her.app", out_dir=scenario_out_dir,
+                       started_at_iso="2026-01-01T00:00:00+00:00"),
+            _StubFixture(), OwnedProcessRegistry(), {},
+        )
+    finally:
+        orchestration.browser_stage, orchestration.run_probe = real_stage, real_probe
+
+    _check(record["status"] == "blocked",
+           f"an unproven foreground must BLOCK the scenario, got {record['status']}")
+    _check(record["failure_reasons"] == [stop_reason],
+           f"the exact stop reason must be the failure reason: {record['failure_reasons']}")
+    _check(record["attempts"] == [],
+           "a blocked scenario must not carry attempts (the probe never ran)")
+    _check(record["frontmost_gate"]["stop_reasons"] == [stop_reason]
+           and record["frontmost_gate"]["frontmost_established"] is False,
+           f"the scenario did not record the gate decision: {record.get('frontmost_gate')}")
+    _check(stubbed_stage.reload_calls == 1,
+           "the foreground was not re-verified for the scenario that was blocked")
+
+    # 3. The whole run: every scenario BLOCKED before any provider or Driver call,
+    #    the fixture this run started stopped, and the package still valid.
+    out_dir = work_dir / "frontmost-blocked-run"
+
+    class _Identity:
+        blocking_reasons: list[str] = []
+
+        def to_dict(self) -> dict:
+            return {"bundle_identifier": paths.EXPECTED_BUNDLE_IDENTIFIER}
+
+    real = (orchestration.resolve_app_path, orchestration.inspect_app_identity,
+            orchestration.stage_controlled_page)
+    orchestration.resolve_app_path = lambda _argument: work_dir / "Her.app"
+    orchestration.inspect_app_identity = lambda _app_path: _Identity()
+    orchestration.stage_controlled_page = lambda _fixture, _previous: dict(stage)
+    try:
+        exit_code = run_acceptance(
+            RunOptions(app_path_argument=None, out_dir=out_dir, mode="full")
+        )
+    finally:
+        (orchestration.resolve_app_path, orchestration.inspect_app_identity,
+         orchestration.stage_controlled_page) = real
+
+    result = evidence.read_json(out_dir / "result.json")
+    _check(exit_code == 1, f"a frontmost-blocked run must exit 1, got {exit_code}")
+    _check(result["blocked_reason"] is not None
+           and stop_reason in result["blocked_reason"],
+           f"the report must name the exact stop reason: {result['blocked_reason']}")
+    _check(all(scenario_record["status"] == "blocked"
+               for scenario_record in result["scenarios"]),
+           f"every scenario must be blocked: "
+           f"{[s['status'] for s in result['scenarios']]}")
+    _check(all(scenario_record["failure_reasons"][0] == stop_reason
+               for scenario_record in result["scenarios"]),
+           "a blocked scenario did not carry the exact stop reason")
+    _check(not any(scenario_record["attempts"] for scenario_record in result["scenarios"]),
+           "a blocked run reported attempts, which would mean a probe had run")
+    _check(result["passed"] is False and result["proof"] is False,
+           "a run blocked on the foreground must never be a pass or proof")
+    _check(result["environment"]["frontmost_gate"]["frontmost_established"] is False,
+           "the run did not record the frontmost gate decision")
+    _check(result["environment"]["fixture"]["port_released_after_stop"] is True,
+           "a frontmost-blocked run left the fixture port occupied")
+    _check(result["environment"]["cleanup"]["owned_processes_remaining"] == 0,
+           "a frontmost-blocked run left owned processes running")
+    _check(evidence.validate_result_schema(result) == [],
+           f"the blocked package failed the evidence schema: "
+           f"{evidence.validate_result_schema(result)}")
+    # This full-mode run held the machine-wide mutex for its whole life: it must
+    # have given it back, or no later run could ever start.
+    afterwards = run_mutex.acquire(run_mutex.default_lock_path(out_dir))
+    _check(afterwards.acquired,
+           "a finished (blocked) run did not release the run mutex")
+    afterwards.release()
+    return ["the foreground gate blocks one scenario with browser_stage's exact stop "
+            "reason and never reaches the probe, and blocks the whole full-mode run "
+            "(exit 1, every scenario blocked, fixture stopped) while leaving the "
+            "evidence schema valid"]
+
+
+def test_run_mutex_serializes_concurrent_runs(work_dir: Path) -> list[str]:
+    """Two runners on one machine: the second is refused and changes nothing.
+
+    Part 1 proves the lock's own semantics against a real second acquisition
+    attempt. Part 2 starts a real second runner (the shipped CLI, as a separate
+    process) while this test holds the lock, and reads its refusal back from
+    disk: a distinct exit code, a report naming the active run's pid, and no
+    fixture, port or /state touched by the refused run.
+    """
+    # ---- 1. The lock's semantics, with a live second acquisition attempt.
+    active_out = work_dir / "active-run"
+    lock_path = run_mutex.default_lock_path(active_out)
+    _check(lock_path.parent == work_dir.resolve()
+           and lock_path.name == run_mutex.LOCK_FILE_NAME,
+           f"an evidence root outside out/acceptance must lock beside its own "
+           f"--out: {lock_path}")
+    shared_a = run_mutex.default_lock_path(work_dir / "out" / "acceptance" / "run-a")
+    shared_b = run_mutex.default_lock_path(work_dir / "out" / "acceptance" / "run-b")
+    _check(shared_a == shared_b and shared_a.parent.name == "acceptance"
+           and shared_a.name == run_mutex.LOCK_FILE_NAME,
+           f"two runs under one out/acceptance tree must share one lock file: "
+           f"{shared_a} vs {shared_b}")
+    _check(run_mutex.default_lock_path(work_dir / "nested" / "run") != lock_path,
+           "an unrelated evidence root must not serialise this one")
+
+    held = run_mutex.acquire(lock_path, owner={"mode": "full", "out_dir": str(active_out)})
+    _check(held.acquired, f"the first acquisition must succeed: {held.detail}")
+    try:
+        second = run_mutex.acquire(lock_path)
+        _check(second.state == "contended" and second.denied,
+               f"a second acquisition while the lock is held must be refused as "
+               f"contended, got state={second.state!r}")
+        _check("another acceptance run is active" in second.denial_reason()
+               and f"pid {os.getpid()}" in second.denial_reason(),
+               f"the refusal must name the active run's pid: {second.denial_reason()}")
+        # The held lock is undisturbed by the refused attempt: the record still
+        # names this process and nobody else can take the lock either.
+        holder = json.loads(lock_path.read_text(encoding="utf-8"))
+        _check(holder.get("pid") == os.getpid(),
+               f"the holder record was disturbed by the refused attempt: {holder}")
+        _check(run_mutex.acquire(lock_path).denied,
+               "the held lock stopped being held after a refused attempt")
+    finally:
+        held.release()
+
+    # Releasing never deletes the file: replacing the inode would let a third run
+    # lock a brand-new file while the first still holds the old one.
+    _check(lock_path.is_file(), "releasing the lock deleted the lock file")
+    reacquired = run_mutex.acquire(lock_path)
+    _check(reacquired.acquired, "a released lock must be acquirable again")
+    reacquired.release()
+
+    # ---- 2. A real second runner: refused, reported, and touching nothing.
+    second_out = work_dir / "second-runner"
+    second_lock = run_mutex.default_lock_path(second_out)
+    _check(second_lock == lock_path,
+           f"the second runner must contend for this test's lock: {second_lock}")
+    entrypoint = paths.repository_root() / "scripts/acceptance/her_voice_e2e.py"
+    _check(entrypoint.is_file(), f"the runner entrypoint is missing: {entrypoint}")
+    with run_mutex.hold(second_lock,
+                        owner={"mode": "full", "out_dir": str(second_out)}):
+        completed = subprocess.run(
+            [sys.executable, str(entrypoint), "--dry-run", "--out", str(second_out)],
+            cwd=str(paths.repository_root()), capture_output=True, text=True,
+            timeout=180.0, check=False,
+        )
+    _check(completed.returncode == RUN_MUTEX_BLOCKED_EXIT_CODE,
+           f"a second runner must exit {RUN_MUTEX_BLOCKED_EXIT_CODE}, got "
+           f"{completed.returncode}: {completed.stderr.strip()[-400:]}")
+    _check(f"pid {os.getpid()}" in completed.stdout,
+           f"the refused run did not name the active run's pid: {completed.stdout}")
+    reports = sorted(second_out.glob("blocked-by-active-run-*"))
+    _check(len(reports) == 1,
+           f"the refused run must write exactly one report directory: {reports}")
+    report = evidence.read_json(reports[0] / "result.json")
+    _check(report["exit_code"] == RUN_MUTEX_BLOCKED_EXIT_CODE,
+           f"the refusal report recorded exit_code={report['exit_code']}")
+    _check("another acceptance run is active" in (report["blocked_reason"] or "")
+           and f"pid {os.getpid()}" in (report["blocked_reason"] or ""),
+           f"the refusal report must name the active run: {report['blocked_reason']}")
+    _check(report["environment"]["run_mutex"]["state"] == "contended"
+           and report["environment"]["run_mutex"]["holder"]["pid"] == os.getpid(),
+           f"the refusal report did not record the mutex evidence: "
+           f"{report['environment'].get('run_mutex')}")
+    _check(all(scenario_record["status"] == "blocked"
+               for scenario_record in report["scenarios"])
+           and report["scenarios"],
+           "the refusal report must record every scenario as blocked")
+    _check(report["passed"] is False and report["proof"] is False,
+           "a refused run must never look like a pass")
+    _check(not (second_out / "result.json").is_file(),
+           "the refused run wrote into the shared --out directory, where it could "
+           "overwrite the active run's package")
+    _check(not port_accepts_connections(paths.FIXTURE_HOST, paths.FIXTURE_PORT),
+           "the refused run started a fixture while another run owns the desktop")
+    _check(evidence.validate_result_schema(report) == [],
+           f"the refusal report failed the evidence schema: "
+           f"{evidence.validate_result_schema(report)}")
+
+    # ---- 3. SIGINT mid-run releases the lock: a run that was killed must never
+    #         leave the machine serialised behind it.
+    interrupted_out = work_dir / "sigint-run"
+    interrupted_lock = run_mutex.default_lock_path(interrupted_out)
+    child = subprocess.Popen(
+        [sys.executable, str(entrypoint), "--dry-run", "--out", str(interrupted_out)],
+        cwd=str(paths.repository_root()), stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.monotonic() + 120.0
+        while time.monotonic() < deadline:
+            if any((interrupted_out / "scenario-artifacts").glob("*/run-1")):
+                break
+            time.sleep(0.02)
+        _check(any((interrupted_out / "scenario-artifacts").glob("*/run-1")),
+               "the interrupted run never reached a scenario")
+        child.send_signal(signal.SIGINT)
+        child.communicate(timeout=120.0)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.communicate(timeout=30.0)
+    _check(child.returncode == SIGINT_EXIT_CODE,
+           f"an interrupted run must exit {SIGINT_EXIT_CODE}, got {child.returncode}")
+    released = run_mutex.acquire(interrupted_lock)
+    _check(released.acquired, "an interrupted run did not release the run mutex")
+    released.release()
+    _check(interrupted_lock.is_file(), "the lock file disappeared with the run")
+    return [f"a second acquisition is refused as contended with the holder's pid, "
+            f"the held lock and its record are undisturbed, the lock file survives "
+            f"release, a real second runner exits {RUN_MUTEX_BLOCKED_EXIT_CODE} with "
+            f"a report naming pid {os.getpid()} while starting no fixture, and a "
+            f"SIGINTed run exits {SIGINT_EXIT_CODE} with the mutex released"]
+
 # ------------------------------------------------------------------- runner
 
 
@@ -781,15 +1506,21 @@ TESTS = (
     ("probe argument plumbing", test_probe_argument_plumbing),
     ("binary flag detection", test_binary_flag_detection),
     ("probe execution lifecycle", test_probe_execution_lifecycle),
+    ("preflight gate blocks and continues", test_preflight_gate_blocks_and_continues),
+    ("frontmost gate blocks before any call", test_frontmost_gate_blocks_before_any_call),
+    ("run mutex serializes concurrent runs", test_run_mutex_serializes_concurrent_runs),
     ("evidence schema validation", test_evidence_schema_validation),
     ("secret scan canaries", test_secret_scan_detects_canaries),
     ("judge: single-step right setting", test_judge_single_step_scenario),
     ("judge: two-step display settings/scale", test_judge_two_step_scenario),
     ("judge: continuity progress/cancel", test_judge_continuity_scenario),
     ("judge: unknown delivery fault", test_judge_unknown_scenario),
+    ("exit status honesty for launched instances",
+     test_exit_status_honesty_for_launched_instances),
     ("child process discipline", test_child_process_discipline),
     ("freshness gate blocks stale binary", test_freshness_gate_blocks_stale_binary),
     ("dry run full pipeline twice consistent", test_dry_run_full_pipeline_twice_consistent),
+    ("interrupted run still writes a report", test_interrupted_run_still_writes_report),
     ("dry run failure injection detected", test_dry_run_failure_injection_is_detected),
     ("dry run artifacts have no secrets", test_dry_run_artifacts_have_no_secrets),
 )

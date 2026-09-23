@@ -15,6 +15,17 @@ final class VoiceRouteProbe {
         if arguments.contains("--drop-next-delivery-receipt") {
             DesktopReceiptLossFault.armNextDelivery()
         }
+        // Read-only acceptance preflight: identity and real preconditions of
+        // this process, so the runner can BLOCK before any provider or Driver
+        // call. No desktop action, no mic, no keychain secret read.
+        if let index = arguments.firstIndex(of: "--preflight"), arguments.count > index + 1 {
+            SecKeychainSetUserInteractionAllowed(false)
+            Task {
+                await DiagnosticPreflight.run(outputURL: URL(fileURLWithPath: arguments[index + 1]))
+                NSApplication.shared.terminate(nil)
+            }
+            return true
+        }
         if let index = arguments.firstIndex(of: "--receipt-loss-probe"), arguments.count > index + 5 {
             SecKeychainSetUserInteractionAllowed(false)
             Task {
