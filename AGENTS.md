@@ -146,7 +146,7 @@ only the OS failure code/message, not a key. See the current task document for e
 | `TipTour/Voice/GeminiLiveClient.swift` | Gemini WebSocket protocol and tool declarations |
 | `TipTour/Voice/StepFunRealtimeClient.swift` | Ordered WebSocket events, response identity filtering, deduplicated calls and task-context data (~710 lines) |
 | `TipTour/Voice/StepFunRealtimeSession.swift` | Full-duplex session, receipt speech, cancellation and production-path synthetic probe (~1090 lines) |
-| `TipTour/Voice/StepFunRealtimeTools.swift` | Strict task/step parameters, observation-bound indices, and the goal-declared operation gate that refuses collapsing multi-step intents (~544 lines) |
+| `TipTour/Voice/StepFunRealtimeTools.swift` | Strict task/step parameters, observation-bound indices, goal-declared operation gate, redundant-action normalization and model-facing expected_label guidance (~627 lines) |
 | `TipTour/Voice/StepFunRealtimeToolRouter.swift` | Shared scene identity, constrained routing, task controls and session-bound access (~545 lines) |
 | `TipTour/Voice/StepFunVisionClient.swift` | Screen understanding, history-aware comparison and bounded general-model decisions (~295 lines) |
 | `TipTourTests/StepFunVisionClientTests.swift` | Vision request format and malformed screen-description regressions (~65 lines) |
@@ -166,8 +166,9 @@ only the OS failure code/message, not a key. See the current task document for e
 | `TipTour/Voice/DesktopActionVerifier.swift` | Pure target-specific result predicates (~55 lines) |
 | `TipTour/Perception/DesktopAccessibilityReader.swift` | Bounded read-only AX evidence and local candidate geometry (~110 lines) |
 | `TipTour/Voice/StepFunResponseBoundary.swift` | Stale/duplicate response rejection and verified-receipt transcript matching (~55 lines) |
-| `TipTour/Voice/DesktopVoiceTrace.swift` | Metadata telemetry and explicitly enabled bounded local diagnostics (~55 lines) |
-| `TipTour/Voice/VoiceRouteProbe.swift` | DEBUG probes; voice-task uses the production session, JEV fan-out probe never executes actions, receipt-loss/journal-recovery probe dispatch (~301 lines) |
+| `TipTour/Voice/DesktopVoiceTrace.swift` | Metadata telemetry and explicitly enabled bounded local diagnostics, written under the Her bundle identity (~61 lines) |
+| `TipTour/Voice/VoiceRouteProbe.swift` | DEBUG probes; voice-task uses the production session, JEV fan-out probe never executes actions, receipt-loss/journal-recovery/preflight probe dispatch (~312 lines) |
+| `TipTour/Voice/DiagnosticPreflight.swift` | DEBUG-only read-only acceptance preflight: bundle/team identity, accessibility trust, frontmost identity, no prompts (~132 lines) |
 | `TipTour/Voice/DesktopFaultRecoveryProbe.swift` | DEBUG-only one-shot receipt-loss fault plus receipt-loss and v1 journal-recovery acceptance probes (~724 lines) |
 | `TipTour/Workflow/WorkflowModalPolicy.swift` | Distinguishes blocking modals from unrelated modeless windows (~11 lines) |
 | `TipTourTests/DesktopTaskCoordinatorTests.swift` | Execution, cancellation, budget, escalation and continuation regressions, including the delivery-vs-outcome completion matrix (~1013 lines) |
@@ -180,7 +181,7 @@ only the OS failure code/message, not a key. See the current task document for e
 | `TipTour/UI/TipTourSettingsView.swift` | Models, desktop actions, privacy, permissions and advanced options |
 | `TipTour/UI/TextCommandPanelManager.swift` | Cursor-following, resizable command panel |
 | `TipTour/UI/TextCommandPanelView.swift` | JEV input, stop control and results |
-| `TipTour/Utilities/KeychainStore.swift` | Device-local provider credential storage |
+| `TipTour/Utilities/KeychainStore.swift` | Device-local provider credential storage; existence vs in-process readability states, DEBUG-only acceptance denial seam (~540 lines) |
 
 See `docs/source-layout.md` for the remaining directory responsibilities.
 
@@ -214,6 +215,21 @@ Read the evidence status before enabling automated real-app trials or changing t
 **Do NOT run `xcodebuild` from the terminal** — it invalidates TCC permissions and the app will need to re-request screen recording/accessibility access. Pure Swift parsing/typechecking and isolated tests are permitted without replacing or launching the installed app. Run `scripts/test-jev.sh` and `scripts/test-stepfun.sh` for the two decision suites.
 
 Known non-blocking Swift 6 concurrency and deprecated `onChange` warnings must not be fixed as incidental cleanup.
+
+## Acceptance infrastructure
+
+Real-user-path acceptance runs from `scripts/acceptance/`:
+
+- `her_voice_e2e.py` is the one-command runner: identity/freshness gate → machine preflight → controlled fixture (`tools/voice-acceptance/fixture.py`, :19475) or controlled desktop host app (`tools/cua-host`, :19476) → signed DEBUG Her launched via LaunchServices (`-n`, a new instance, never the user's running Her) → synthetic-PCM voice probes → real provider and executor → independent `/state` readback → six-layer evidence (`out/acceptance/<id>/result.json`: user words, model tool arguments, task/turn/attempt IDs, Her receipt, independent state, final speech, failure-recovery). Exit codes: 0 pass, 1 any non-pass, 3 preflight/precondition BLOCKED, 4 another run active (cross-process mutex), 130 SIGINT — every termination path writes the aggregate report.
+- `runner/machine_preflight.py` is read-only machine verification (ports, user Her process record, binary freshness, frontmost identity via ASN resolution, screen-lock state); unproven states fail closed.
+- `verify_evidence.py` is the independent reviewer: it re-derives PASS/FAIL from the evidence package and never trusts the product's own `passed` field. Accepted terminal contracts: `completed` with per-action corroboration, honest `uncertain_effect` with uncertainty speech, and `cancelled` with valid control binding and no unexplained side effects.
+- `manual_runner.py` drives human-in-the-loop steps (for example save → deny-read → restore in Settings): it prints instructions, waits for the human, and independently verifies each claim (keychain presence via `security` exit code, `/state`, process records). It never clicks UI itself.
+- `runner/conversation_driver.py` defines the multi-turn conversation script schema (turns with `wait_ms` / `barge_in` / `expect`); the in-app probe for 3+ turns and barge-in is rebuild-gated.
+- `runner/provider_shapes.py` records real tool-argument shapes per run as a contract-drift monitor; replays under `cassettes/` are labeled `acceptance: false` and can never stand in for E2E.
+- `runner/runner_faults.py` holds runner-side fault primitives (owned-fixture kill, stale-state window); arming requires a named `authorized_by`, and page-navigation faults never run automatically.
+- `tools/ax-probe/` (AXProbe) snapshots and, only with a user-created grant token, types into another app's UI; snapshot mode fails cleanly when the controlling process lacks Accessibility. No mode activates or focuses any app.
+
+Desktop acceptance requires the fixture or host app to be foreground, so it only runs inside a window the user explicitly grants. Background-safe work (builds, self-tests, dry-runs, cassette replays, isolated suites, evidence review) never touches the desktop.
 
 ## Testing Rules
 

@@ -22,7 +22,7 @@ python3 tools/voice-acceptance/fixture.py
 服务端也拒绝在菜单打开前选中 `scale`。`POST /reset` 只重置此测试数据；
 重置后刷新 Safari 标签页，确保可见状态与服务端一致。
 
-## 八种 Debug 探针
+## 九种 Debug 探针
 
 以下 `APP_BINARY` 指 Xcode 构建产物的 `Her.app/Contents/MacOS/Her`
 （Xcode 工程中 target / scheme 仍叫 `tiptour-macos`，`PRODUCT_NAME=Her`，bundle ID `com.yishuziyu.her`）。
@@ -36,6 +36,7 @@ APP_BINARY --jev-fanout-probe com.apple.Safari '点击检查官网部署状态�
 APP_BINARY --voice-continuity-probe /tmp/progress.pcm /tmp/cancel.pcm /tmp/continuity-report.json
 APP_BINARY --drop-next-delivery-receipt --receipt-loss-probe com.apple.Safari http://127.0.0.1:19475 '{"goal":"点击右侧设置","action":"click","target_label":"设置","region":"right"}' '{"goal":"点击右侧设置","intent":"resume"}' /tmp/unknown-report.json
 APP_BINARY --journal-recovery-probe /tmp/app-support-root /tmp/journal-report.json
+APP_BINARY --preflight /tmp/preflight.json
 APP_BINARY --voice-playback-probe
 ```
 
@@ -67,6 +68,9 @@ APP_BINARY --voice-playback-probe
 - `journal-recovery-probe` 用真实 v1 字节驱动 `configureJournal/submit/cancelTask`：
    `completed` + `verified=false` 必须得到 `recovery_required`（保留任务身份、拒绝 plain resume、
    显式 cancel 后保留历史 attempt），不可读日志必须 `storage_failed` 且字节原样保留。
+- `preflight` 是只读环境/身份预检：写入 bundle/team、PID、二进制路径、辅助功能信任状态、前台应用身份与
+   阻塞原因；不弹任何授权窗、不解密钥匙串、不执行动作。验收运行器在调用供应商与 Driver 之前先跑它，
+   缺所需权限时零调用直接 BLOCKED。
   Keychain 无交互读取失败时明确退出，不弹出授权窗口。
 
 输入必须是 **无 WAV 文件头**的 24 kHz 单声道 PCM16 小端字节。可用系统 `say`
