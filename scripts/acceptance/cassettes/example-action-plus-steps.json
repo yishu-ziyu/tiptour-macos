@@ -1,0 +1,48 @@
+{
+  "cassette_format": 1,
+  "scenario": "single_step_right_setting",
+  "title": "01R drift shape: top-level action redundant with an identical steps entry",
+  "recorded_from": "The work order 01R rework context: the real StepFun session returned the click both as a top-level act_on_screen action and inside a steps array. The product normalizes the redundancy; this cassette locks that contract in.",
+  "note": "Contract regression only — never acceptance evidence. Replay through scripts/acceptance/runner/provider_shapes.py, which stamps every replay result with acceptance=false / purpose=contract-regression.",
+  "probe_record": {
+    "exit_record": {
+      "pid": null,
+      "self_exited": true,
+      "returncode": 0,
+      "timed_out": false,
+      "returncode_basis": "derived: cassette contract replay (no process ran)",
+      "report_artifact_present": true
+    },
+    "report_error": null,
+    "mock": true,
+    "note": "Contract-replay probe record: no probe process ran; the derived basis only satisfies the judges' base attempt checks."
+  },
+  "report": {
+    "route": "cassette_contract_replay",
+    "synthetic_input": true,
+    "microphone": "not_opened",
+    "speaker": "not_played",
+    "completed": true,
+    "error": "",
+    "timed_out": false,
+    "input_transcript": "点击右边的设置按钮",
+    "calls": [
+      {
+        "name": "act_on_screen",
+        "arguments": "{\"goal\":\"点击右边的设置按钮\",\"intent\":\"new\",\"action\":\"click\",\"target_label\":\"设置\",\"region\":\"right\",\"steps\":[{\"action\":\"click\",\"target_label\":\"设置\",\"region\":\"right\"}]}"
+      }
+    ],
+    "tool_results": [
+      "{\"goal\":\"点击右边的设置按钮\",\"status\":\"completed\",\"actions\":[\"click「设置」：动作已送达\"],\"detail\":\"任务步骤均已结束；各步完成依据已记录在操作历史中。\",\"app\":\"com.apple.Safari\",\"task_id\":\"11111111-2222-3333-4444-555555555555\",\"turn_id\":\"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\",\"target_version\":1,\"prior_actions\":[],\"current_actions\":[{\"id\":\"attempt-0001\",\"observationID\":\"obs-0001\",\"app\":\"com.apple.Safari\",\"targetID\":\"target-right-setting\",\"label\":\"设置\",\"action\":\"click\",\"decision_packet\":{\"action\":\"click\",\"where\":{\"region\":\"right\"},\"evidence\":[\"action_locked\",\"target_exact\",\"location_filtered_in_code\"]},\"completionPolicy\":\"delivery_sufficient\",\"delivery\":\"sent\",\"outcomeEvidence\":\"not_observed\",\"detail\":\"driver confirmed delivery\",\"completionBasis\":\"delivery_confirmed\",\"satisfied\":true,\"verified\":false}],\"verified_action_history\":[],\"satisfied_action_history\":[\"click「设置」：动作已送达\"],\"completed_step_count\":1,\"total_step_count\":1}"
+    ],
+    "rendered_texts": ["已点击「设置」。"],
+    "realtime_audio_bytes": 84000
+  },
+  "state_before": {"selected": null, "clicks": 0, "menu_open": false, "events": [], "page_views": 2},
+  "state_after": {"selected": "right-setting", "clicks": 1, "menu_open": false, "events": ["right-setting"], "page_views": 2},
+  "expect": {
+    "verdict": "passed",
+    "basis_contains": "delivery-sufficient",
+    "why": "The redundant action+steps shape must still route to exactly one click on the right-hand 设置 control: independent /state shows selected=right-setting with exactly one new event, and the receipt claims completion on a corroborated delivery-sufficient basis. If normalization regresses (double execution, lost region, dropped step), the state or the receipt in this cassette stops corroborating and the judge must fail."
+  }
+}

@@ -1487,6 +1487,172 @@ def test_run_mutex_serializes_concurrent_runs(work_dir: Path) -> list[str]:
             f"a report naming pid {os.getpid()} while starting no fixture, and a "
             f"SIGINTed run exits {SIGINT_EXIT_CODE} with the mutex released"]
 
+# -------------------------------------------- provider argument shape monitor
+
+
+def _write_json_file(path: Path, payload) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _probe_report(calls: list[dict]) -> dict:
+    return {
+        "route": "production_realtime_session",
+        "completed": True, "error": "", "timed_out": False,
+        "input_transcript": "点击右边的设置按钮",
+        "calls": calls,
+        "tool_results": [], "rendered_texts": [],
+        "realtime_audio_bytes": 1000,
+    }
+
+
+def _act_on_screen(arguments) -> dict:
+    return {"name": "act_on_screen", "arguments": arguments}
+
+
+def test_provider_shape_monitor_detects_drift(work_dir: Path) -> list[str]:
+    from . import provider_shapes
+
+    drift_run = work_dir / "drift-run"
+    _write_json_file(
+        drift_run / "scenario-artifacts" / "single_step_right_setting" / "run-1" / "realtime.json",
+        _probe_report([
+            # The 01R shape: the click returned both top-level and inside steps.
+            _act_on_screen(json.dumps({"goal": "点击右边的设置按钮", "intent": "new",
+                                       "action": "click", "target_label": "设置",
+                                       "region": "right",
+                                       "steps": [{"action": "click", "target_label": "设置",
+                                                  "region": "right"}]}, ensure_ascii=False)),
+            # A label slot narrating a result instead of naming a control.
+            _act_on_screen(json.dumps({"goal": "打开显示设置", "action": "click",
+                                       "target_label": "页面已打开显示设置"}, ensure_ascii=False)),
+            # A click with no target_label: a required contract field is gone.
+            _act_on_screen(json.dumps({"goal": "点击右边的设置按钮", "action": "click",
+                                       "region": "right"}, ensure_ascii=False)),
+            # Top level and steps disagree: the redundancy became a conflict.
+            _act_on_screen(json.dumps({"goal": "打开显示设置", "action": "click",
+                                       "target_label": "显示设置",
+                                       "steps": [{"action": "open_app",
+                                                  "application": "com.apple.Safari"}]},
+                                      ensure_ascii=False)),
+            # Arguments that are not a JSON object at all.
+            _act_on_screen("not-json"),
+        ]))
+
+    shapes = provider_shapes.record_shapes(drift_run)
+    _check(shapes["calls_total"] == 5,
+           f"5 recorded calls expected: {shapes['calls_total']}")
+    _check(shapes["tool_names"] == {"act_on_screen": 5},
+           f"tool name distribution wrong: {shapes['tool_names']}")
+    _check(shapes["mixed_action_and_steps"]["count"] == 2,
+           f"the redundant action+steps shape was missed: {shapes['mixed_action_and_steps']}")
+    _check(shapes["steps_count_distribution"] == {"1": 2, "none": 2},
+           f"steps-count distribution wrong: {shapes['steps_count_distribution']}")
+    _check(shapes["result_phrase_labels"]["count"] == 1,
+           f"the result-phrase label was missed: {shapes['result_phrase_labels']}")
+    _check(set(shapes["result_phrase_labels"]["words_seen"]) >= {"页面已", "已打开"},
+           f"unobservable words not surfaced: {shapes['result_phrase_labels']}")
+    _check(shapes["missing_fields"]["count"] == 1,
+           f"the target_label-less click was missed: {shapes['missing_fields']}")
+    _check(shapes["conflicts"]["count"] == 1,
+           f"the conflicting top-level/steps call was missed: {shapes['conflicts']}")
+    _check(shapes["unparsable_arguments"] == 1,
+           f"the unparsable arguments were missed: {shapes['unparsable_arguments']}")
+    _check(len(shapes["drift_flags"]) == 5,
+           f"every drift class must raise a flag: {shapes['drift_flags']}")
+    _check(any("action+steps" in flag for flag in shapes["drift_flags"]),
+           f"the 01R drift flag must name the shape: {shapes['drift_flags']}")
+    shapes_file = drift_run / "shapes.json"
+    _check(shapes_file.is_file(), f"record_shapes wrote no shapes.json: {shapes_file}")
+    on_disk = json.loads(shapes_file.read_text(encoding="utf-8"))
+    _check(on_disk["acceptance"] is False,
+           "shapes.json must declare it is not acceptance evidence")
+    _check("contract-drift" in on_disk["purpose"],
+           f"shapes.json must state its drift-monitoring purpose: {on_disk['purpose']}")
+
+    # A well-formed single-shape report must raise no drift flag.
+    clean_run = work_dir / "clean-run"
+    _write_json_file(
+        clean_run / "scenario-artifacts" / "single_step_right_setting" / "run-1" / "realtime.json",
+        _probe_report([
+            _act_on_screen(json.dumps({"goal": "点击右边的设置按钮", "intent": "new",
+                                       "action": "click", "target_label": "设置",
+                                       "region": "right"}, ensure_ascii=False)),
+        ]))
+    clean = provider_shapes.record_shapes(clean_run)
+    _check(clean["calls_total"] == 1 and clean["drift_flags"] == [],
+           f"a contract-shaped call was flagged as drift: {clean['drift_flags']}")
+    _check(clean["steps_count_distribution"] == {"none": 1},
+           f"a call without steps must count as none: {clean['steps_count_distribution']}")
+
+    # A run with no probe reports profiles to zero calls and never crashes.
+    empty = provider_shapes.record_shapes(work_dir / "empty-run")
+    _check(empty["calls_total"] == 0 and empty["drift_flags"] == [],
+           f"an empty run must profile clean: {empty}")
+    return ["the monitor detects mixed action+steps (01R shape), result-phrase labels, "
+            "missing contract fields, conflicting redundancy and unparsable arguments, "
+            "counts the steps distribution, leaves contract-shaped calls unflagged, "
+            "and writes a non-acceptance shapes.json"]
+
+
+def test_cassette_replay_is_contract_labeled(work_dir: Path) -> list[str]:
+    from . import provider_shapes
+
+    source = (paths.repository_root()
+              / "scripts/acceptance/cassettes/example-action-plus-steps.json")
+    _check(source.is_file(), f"the example cassette is missing: {source}")
+    # The replay writes <cassette>.replay.json next to the cassette, so the copy
+    # under test lives in the self-test work dir: the repository stays clean.
+    cassette = work_dir / "example-action-plus-steps.json"
+
+    def _fresh_cassette() -> dict:
+        return json.loads(source.read_text(encoding="utf-8"))
+
+    cassette.write_bytes(source.read_bytes())
+    result = provider_shapes.replay_cassette(cassette)
+    _check(result["acceptance"] is False,
+           "a cassette replay must never claim acceptance evidence")
+    _check(result["purpose"] == "contract-regression",
+           f"a cassette replay must be purpose-labeled: {result['purpose']!r}")
+    _check(result["matched"] is True,
+           f"the example cassette regressed against the judges: {result['verdict']}")
+    _check(result["verdict"]["status"] == "passed",
+           f"the 01R shape must still judge as the intended click: {result['verdict']}")
+    _check(any("delivery-sufficient" in line for line in result["verdict"]["basis"]),
+           f"the passing basis must cite its corroborated completion: {result['verdict']['basis']}")
+    _check(result["shape_profile"]["mixed_action_and_steps"]["count"] == 1,
+           "the replay must profile the cassette's raw arguments shape")
+
+    replay_file = work_dir / "example-action-plus-steps.json.replay.json"
+    _check(replay_file.is_file(), "the replay wrote no <cassette>.replay.json")
+    on_disk = json.loads(replay_file.read_text(encoding="utf-8"))
+    _check(on_disk["acceptance"] is False and on_disk["purpose"] == "contract-regression",
+           "the on-disk replay artifact must carry the anti-impersonation header")
+
+    # A wrong expectation is a regression, and a state that no longer
+    # corroborates the receipt (the double-click normalization failure) must
+    # make the judges fail: the replay re-judges, it does not rubber-stamp.
+    conflicting = _fresh_cassette()
+    conflicting["state_after"]["clicks"] = 2
+    conflicting["state_after"]["events"] = ["right-setting", "right-setting"]
+    conflicting["expect"] = {"verdict": "failed", "failure_contains": "clicks changed by 2"}
+    _write_json_file(cassette, conflicting)
+    double = provider_shapes.replay_cassette(cassette, write=False)
+    _check(double["matched"] is True,
+           f"a double-clicking state must fail the judges: {double['verdict']}")
+
+    mislabeled = _fresh_cassette()
+    mislabeled["expect"]["verdict"] = "failed"
+    _write_json_file(cassette, mislabeled)
+    mismatch = provider_shapes.replay_cassette(cassette, write=False)
+    _check(mismatch["matched"] is False and mismatch["regression"] is True,
+           "a cassette whose expectation no longer holds must report a regression")
+    return ["the example action+steps cassette replays to a passing judge verdict, "
+            "every replay artifact is stamped acceptance=false / purpose=contract-regression "
+            "by the replay tool itself, a double-clicking state fails the judges, and a "
+            "stale expectation is reported as a regression"]
+
+
 # ------------------------------------------------------------------- runner
 
 
@@ -1523,6 +1689,8 @@ TESTS = (
     ("interrupted run still writes a report", test_interrupted_run_still_writes_report),
     ("dry run failure injection detected", test_dry_run_failure_injection_is_detected),
     ("dry run artifacts have no secrets", test_dry_run_artifacts_have_no_secrets),
+    ("provider shape monitor detects drift", test_provider_shape_monitor_detects_drift),
+    ("cassette replay is labeled contract regression", test_cassette_replay_is_contract_labeled),
 )
 
 
