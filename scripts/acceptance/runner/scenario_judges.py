@@ -245,6 +245,24 @@ def _speech_texts(report: dict) -> list[str]:
     return []
 
 
+def _recorded_field(record: Any, *names: str, default: Any = None) -> Any:
+    """The first spelling of a field the record actually carries, never a guess.
+
+    The continuity probe spells the same fact differently across its own
+    artifacts (`status` in the runner's recorded chains, `receipt_status` in the
+    product report; `task_id` at round level, `control_task_id` on the control).
+    Reading every recorded spelling of the *same* field keeps one artifact's
+    naming from inventing a fact — or from hiding the one it carries — and a
+    field absent under all spellings stays `None`.
+    """
+    if not isinstance(record, dict):
+        return default
+    for name in names:
+        if name in record:
+            return record[name]
+    return default
+
+
 def _base_attempt_checks(probe_record: dict, report: dict | None) -> tuple[list[str], list[str]]:
     """Checks every probe-driven scenario shares: exit, report, speech presence."""
     basis: list[str] = []
@@ -610,6 +628,194 @@ def judge_two_step_display_settings_scale(
 # ------------------------------------------------------------ scenario continuity
 
 
+# The continuity probe's own reporting fields, so the layers below are read by
+# name instead of being reconstructed:
+#
+# * per round — `tool_name` + `tool_arguments` (the model's verbatim provider
+#   tool call, the same shape `VoiceRouteProbe` records in `calls`), plus the
+#   control the router executed (`action`, `task_id`, `turn_id`,
+#   `control_binding_valid`, `tool_count`, `rejected_tools`);
+# * per round — the receipt facts (`task_id`, `turn_id`, `receipt_status`,
+#   `completed_step_count`, `total_step_count`);
+# * report level — `published_receipts[*]`, every receipt the coordinator
+#   published for this chain, including `current_action_facts` with the two
+#   layer facts per action (`delivery`, `outcome_evidence`, `completion_policy`,
+#   `completion_basis`, attempt id).
+#
+# Anything the report does not carry stays null and is named in the layer's
+# `absent_fields`; no value is ever synthesised to fill a hole.
+
+_CONTINUITY_ROUND_LABELS = ("progress", "cancel_after_reconnect")
+
+
+def _continuity_action_facts(report: dict) -> dict:
+    """Published receipt action facts keyed by the receipt's own turn id."""
+    facts: dict[str, list[dict]] = {}
+    snapshots = report.get("published_receipts")
+    if not isinstance(snapshots, list):
+        return facts
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict):
+            continue
+        turn_id = snapshot.get("turn_id")
+        recorded = snapshot.get("current_action_facts")
+        if not isinstance(turn_id, str) or not isinstance(recorded, list):
+            continue
+        entries = facts.setdefault(turn_id, [])
+        entries.extend(fact for fact in recorded if isinstance(fact, dict))
+    return facts
+
+
+def _continuity_round_receipt(label: str, round_payload: dict,
+                              published_facts: dict) -> dict:
+    """One round's Her receipt, field by field out of the report."""
+    turn_id = _recorded_field(round_payload, "turn_id", "control_turn_id")
+    entry = {
+        "round": label,
+        "input_transcript": round_payload.get("input_transcript"),
+        "task_id": _recorded_field(round_payload, "task_id", "control_task_id"),
+        "turn_id": turn_id,
+        "status": _recorded_field(round_payload, "status", "receipt_status"),
+        "task_control_action": round_payload.get("action"),
+        "control_binding_valid": round_payload.get("control_binding_valid"),
+        "completed_step_count": _recorded_field(round_payload, "completed_step_count"),
+        "total_step_count": _recorded_field(round_payload, "total_step_count"),
+        "current_action_facts": list(published_facts.get(turn_id) or []),
+    }
+    entry["absent_fields"] = sorted(key for key, value in entry.items()
+                                    if value is None and key not in ("absent_fields", "round"))
+    return entry
+
+
+def _continuity_receipt(report: dict, progress_round: dict, cancel_round: dict) -> dict:
+    """The continuity scenario's Her-receipt evidence layer.
+
+    The scenario's receipt is the one the task ended on, so the layer carries
+    the final round's identity and status at the top level — the shape the
+    reviewer's receipt criteria read — and both rounds' receipt facts below it.
+    Per-action delivery/outcome facts are attached only from
+    `published_receipts[*].current_action_facts`, matched by the receipt's own
+    `turn_id`; a report that publishes no receipts simply records none.
+    """
+    published_facts = _continuity_action_facts(report)
+    rounds = [_continuity_round_receipt(label, round_payload, published_facts)
+              for label, round_payload in zip(_CONTINUITY_ROUND_LABELS,
+                                              (progress_round, cancel_round))]
+    current_actions = []
+    for entry in rounds:
+        for fact in entry["current_action_facts"]:
+            current_actions.append({
+                "id": _recorded_field(fact, "attempt_id", "id"),
+                "action": fact.get("action"),
+                "label": fact.get("label"),
+                "delivery": fact.get("delivery"),
+                "outcome_evidence": fact.get("outcome_evidence"),
+                "completion_policy": fact.get("completion_policy"),
+                "completion_basis": fact.get("completion_basis"),
+                "satisfied": fact.get("satisfied"),
+                "turn_id": entry["turn_id"],
+                "round": entry["round"],
+            })
+    receipt = {
+        "scenario": "continuity_progress_cancel",
+        "task_id": rounds[-1]["task_id"],
+        "turn_id": rounds[-1]["turn_id"],
+        "status": rounds[-1]["status"],
+        "target_version": _recorded_field(cancel_round, "control_target_version",
+                                          "target_version"),
+        "current_actions": current_actions,
+        "rounds": rounds,
+    }
+    receipt["absent_fields"] = sorted(
+        [f"receipt.{key}" for key, value in receipt.items()
+         if value is None and key not in ("absent_fields", "rounds", "current_actions")]
+        + [f"rounds[{position}].{field}"
+           for position, entry in enumerate(rounds) for field in entry["absent_fields"]]
+    )
+    return receipt
+
+
+def _continuity_round_action(round_payload: dict) -> Any:
+    """The task_control action one round used, under either recorded spelling.
+
+    The runner's recorded chains carry the parsed `action`; the product report
+    carries the same fact as `control_action`. Reading only one spelling would
+    fail a real run for a naming difference, so both are read and neither is
+    invented.
+    """
+    return _recorded_field(round_payload, "action", "control_action")
+
+
+def _continuity_final_status(round_payload: dict) -> Any:
+    """The receipt status one round ended on (`status` / `receipt_status`)."""
+    return _recorded_field(round_payload, "status", "receipt_status")
+
+
+def _continuity_control_binding(cancel_round: dict, progress_round: dict,
+                                report: dict) -> Any:
+    """Whether the cancel control was bound to the current task/version/turn.
+
+    The recorded chains carry the probe's `control_binding_valid` flag directly.
+    The product report carries the fields the flag was derived from instead, so
+    the binding is re-derived from them — cancel on this chain's task, on this
+    round's own turn, at the admitted target version — and stays `None` (which
+    fails closed) whenever any of those fields is missing.
+    """
+    recorded = cancel_round.get("control_binding_valid")
+    if recorded is not None:
+        return recorded
+    action = _continuity_round_action(cancel_round)
+    control_task_id = _recorded_field(cancel_round, "task_id", "control_task_id")
+    control_turn_id = _recorded_field(cancel_round, "turn_id", "control_turn_id")
+    control_version = _recorded_field(cancel_round, "control_target_version",
+                                      "target_version")
+    peer_task_id = _recorded_field(progress_round, "task_id", "control_task_id")
+    if action is None or not control_task_id or not control_turn_id:
+        return None
+    if action != "cancel" or control_task_id != peer_task_id:
+        return False
+    if control_turn_id != _recorded_field(cancel_round, "turn_id", "control_turn_id"):
+        return False
+    admitted_version = report.get("target_version")
+    if isinstance(admitted_version, int) and control_version is not None:
+        return control_version == admitted_version
+    return True
+
+
+def _continuity_tool_arguments(report: dict, progress_round: dict,                               cancel_round: dict) -> list[dict]:
+    """The continuity scenario's model-tool-argument evidence layer.
+
+    Verbatim first, always: the report's own `calls` list (what scenarios A and
+    C record), else each round's `tool_name` + `tool_arguments` — the
+    continuity probe's verbatim record of the model's `task_control` call, the
+    report-level equivalent of the session's `pendingCall`. A round whose report
+    records the call but not its verbatim arguments contributes the control
+    facts it does record, with `arguments: null` and
+    `verbatim_arguments_recorded: false`, so the layer never manufactures an
+    arguments string to look complete.
+    """
+    calls = report.get("calls")
+    if isinstance(calls, list) and calls:
+        return [call for call in calls if isinstance(call, dict)]
+    entries = []
+    for label, round_payload in zip(_CONTINUITY_ROUND_LABELS, (progress_round, cancel_round)):
+        verbatim_arguments = _recorded_field(round_payload, "tool_arguments")
+        entries.append({
+            "round": label,
+            "input_transcript": round_payload.get("input_transcript"),
+            "name": _recorded_field(round_payload, "tool_name"),
+            "arguments": verbatim_arguments,
+            "verbatim_arguments_recorded": verbatim_arguments is not None,
+            "tool_count": round_payload.get("tool_count"),
+            "rejected_tools": round_payload.get("rejected_tools"),
+            "task_control_action": round_payload.get("action"),
+            "task_id": _recorded_field(round_payload, "task_id", "control_task_id"),
+            "turn_id": _recorded_field(round_payload, "turn_id", "control_turn_id"),
+            "control_binding_valid": round_payload.get("control_binding_valid"),
+        })
+    return entries
+
+
 def judge_continuity_progress_cancel(
     scenario,
     probe_record: dict,
@@ -634,6 +840,67 @@ def judge_continuity_progress_cancel(
         )
         return verdict
     verdict.evidence["rounds"] = rounds
+    verdict.evidence["model_input_transcript"] = [
+        round_payload.get("input_transcript") for round_payload in rounds
+    ]
+
+    progress_round, cancel_round = rounds[0], rounds[1]
+
+    # The two layers this judge used to claim in its basis without ever
+    # recording: Her's receipt for the task the two rounds referred to, and the
+    # model's tool arguments for the progress and cancel turns. Both are read
+    # out of the probe report by field name; whatever the report does not
+    # carry stays null and is named, so a reviewer can tell a recorded fact
+    # from an absent one.
+    layer_expectations = expectations.get("evidence_layers") or {}
+    her_receipt = _continuity_receipt(report, progress_round, cancel_round)
+    verdict.evidence["her_receipt"] = her_receipt
+    tool_arguments = _continuity_tool_arguments(report, progress_round, cancel_round)
+    verdict.evidence["model_tool_arguments"] = tool_arguments
+
+    if not (her_receipt.get("task_id") and her_receipt.get("turn_id")
+            and her_receipt.get("status")):
+        message = (
+            "The probe report records no Her receipt facts for the continuity rounds "
+            "(task_id / turn_id / status), so the receipt layer cannot be judged: "
+            f"{her_receipt!r}"
+        )
+        if layer_expectations.get("her_receipt_required", True):
+            verdict.failure_reasons.append(message)
+        else:
+            verdict.basis.append(f"Her-receipt layer absent as declared: {message}")
+    else:
+        verdict.basis.append(
+            f"Her receipt layer from the probe report's own round fields: task_id="
+            f"{her_receipt.get('task_id')!r}, turn_id={her_receipt.get('turn_id')!r}, "
+            f"status={her_receipt.get('status')!r}, per-round receipts for both turns, "
+            f"{len(her_receipt.get('current_actions') or [])} recorded action fact(s) from "
+            "published_receipts. Fields the report does not carry are null and listed in "
+            f"absent_fields: {her_receipt.get('absent_fields') or 'none'}"
+        )
+
+    verbatim_recorded = any(entry.get("verbatim_arguments_recorded")
+                            for entry in tool_arguments if isinstance(entry, dict))
+    if not verbatim_recorded:
+        reason = layer_expectations.get("model_tool_arguments_verbatim_optional_reason")
+        if layer_expectations.get("model_tool_arguments_verbatim_optional"):
+            verdict.basis.append(
+                "Model-tool-argument layer carries the recorded task_control facts with "
+                f"arguments=null: {reason}"
+            )
+        else:
+            verdict.failure_reasons.append(
+                "The probe report records no verbatim model tool arguments for either "
+                "continuity round (no report.calls and no rounds[*].tool_arguments); the "
+                "raw-argument layer cannot be judged."
+            )
+    else:
+        verdict.basis.append(
+            "Model tool arguments recorded verbatim from the probe report: "
+            + "; ".join(f"{entry.get('round')} {entry.get('name')!r} "
+                        f"{entry.get('arguments')!r}"
+                        for entry in tool_arguments if isinstance(entry, dict))
+        )
 
     progress_round, cancel_round = rounds[0], rounds[1]
     expected_actions = expectations.get("round_actions") or ["status", "cancel"]
@@ -641,7 +908,7 @@ def judge_continuity_progress_cancel(
         (progress_round, expected_actions[0], "first"),
         (cancel_round, expected_actions[1], "second"),
     ):
-        if round_payload.get("action") != expected_action:
+        if _continuity_round_action(round_payload) != expected_action:
             verdict.failure_reasons.append(
                 f"The {label} round used task_control action "
                 f"{round_payload.get('action')!r}, expected {expected_action!r} "
@@ -672,12 +939,15 @@ def judge_continuity_progress_cancel(
                 f"Fresh turn binding after reconnect: {progress_round.get('turn_id')!r} → "
                 f"{cancel_round.get('turn_id')!r}."
             )
-    if not cancel_round.get("control_binding_valid"):
+    control_binding = _continuity_control_binding(cancel_round, progress_round, report)
+    if not control_binding:
         verdict.failure_reasons.append(
-            "The cancel control was not bound to the current task/version/turn."
+            "The cancel control was not bound to the current task/version/turn "
+            f"(derived binding={control_binding!r} from the round's recorded control "
+            "fields; a missing field fails closed rather than being assumed)."
         )
     expected_final = expectations.get("require_final_status")
-    if expected_final and cancel_round.get("status") != expected_final:
+    if expected_final and _continuity_final_status(cancel_round) != expected_final:
         verdict.failure_reasons.append(
             f"Final receipt status is {cancel_round.get('status')!r}, expected {expected_final!r}."
         )
