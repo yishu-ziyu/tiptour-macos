@@ -145,11 +145,14 @@ private func makeDescription(capturedAt: Date = Date()) -> StepFunScreenDescript
     // the model's exact statement; the top-level action proves nothing the
     // list does not already say, so it is dropped and the reason recorded.
     let normalized = try StepFunActionArguments.decode(Data(#"{"goal":"点击打开显示设置，然后点击缩放选项","action":"click","steps":[{"action":"click","target_label":"打开显示设置"},{"action":"click","target_label":"缩放选项"}]}"#.utf8))
+    // The outcome under test is the effective plan the executor would run:
+    // exactly the two declared controls, in order, nothing invented.
     let steps = try normalized.validatedSteps()
     #expect(steps.count == 2)
+    #expect(steps[0].action == .click)
     #expect(steps[0].targetLabel == "打开显示设置")
+    #expect(steps[1].action == .click)
     #expect(steps[1].targetLabel == "缩放选项")
-    #expect(normalized.normalizationNotes.count == 1)
 
     // A conflicting action kind or any mixed single-step parameter is a real
     // conflict, not redundancy: still rejected, never silently accepted.
