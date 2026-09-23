@@ -24,6 +24,24 @@
       "mode": "advisory",
       "forbidden_substrings": ["已确认 1/2", "已确认 2/2"],
       "required_semantics_note": "Work order 02 requires progress speech to distinguish delivery from verification; the verbatim text is always recorded. Set --require-evidence-language to gate on it."
+    },
+    "evidence_layers": {
+      "her_receipt_required": true,
+      "her_receipt_source_fields": [
+        "report.rounds[*].task_id (or .control_task_id)",
+        "report.rounds[*].turn_id (or .control_turn_id)",
+        "report.rounds[*].status (the product report spells it receipt_status)",
+        "report.rounds[*].completed_step_count / .total_step_count",
+        "report.rounds[*].control_binding_valid",
+        "report.published_receipts[*].current_action_facts (delivery, outcome_evidence, completion_policy, completion_basis, attempt_id, label, satisfied), matched to a round by the receipt's own turn_id"
+      ],
+      "model_tool_arguments_required": true,
+      "model_tool_arguments_source_fields": [
+        "report.calls[*] (the verbatim provider tool calls, exactly what the click scenarios record)",
+        "report.rounds[*].tool_name + report.rounds[*].tool_arguments (the continuity probe's verbatim record of the model's task_control call — the report-level equivalent of the realtime session's pendingCall)"
+      ],
+      "model_tool_arguments_verbatim_optional": true,
+      "model_tool_arguments_verbatim_optional_reason": "A continuity turn's only provider tool call is a task_control progress/cancel query: it carries the action and the task identity, not the click-step action arguments (target_label/region/steps) the click scenarios judge. When the probe report records the call but not its verbatim arguments JSON — a runner-level dry-run mock chain — the layer keeps the recorded control facts with arguments=null and names the absent field, and no arguments string is invented to fill the hole."
     }
   }
 }
