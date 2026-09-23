@@ -2036,6 +2036,83 @@ final class TipTourEngine {
         return nil
     }
 
+    /// The horizontal half of the display that a literal Chinese spatial word in
+    /// a top-level request names.
+    ///
+    /// WHY the engine keeps its own copy of these words rather than sharing one
+    /// with the voice route: the equivalent voice implementation
+    /// (`StepFunActionArguments.literalHorizontalRegion`, which delegates to
+    /// `VoiceDeclaredOperation.horizontalRegion` and its `rightSideWords` /
+    /// `leftSideWords` sets in TipTour/Voice/StepFunRealtimeTools.swift) is
+    /// private to that file, and the harness pointer path must ground an action
+    /// without reaching into voice-layer types. The word sets below are
+    /// deliberately identical to that source: literal spatial words are owned by
+    /// code, so a goal must constrain the same way whether it arrives by voice
+    /// or by `POST /v1/act`. If the voice word set ever changes, change this too.
+    private enum LiteralHorizontalRegion {
+        case left
+        case right
+
+        private static let rightSideWords = ["右边", "右侧", "右方"]
+        private static let leftSideWords = ["左边", "左侧", "左方"]
+
+        /// The named half, or nil when the request names both halves or neither.
+        /// Both halves at once is not a usable restriction.
+        init?(goal: String?) {
+            guard let goal else { return nil }
+            let saysRight = Self.rightSideWords.contains { goal.contains($0) }
+            let saysLeft = Self.leftSideWords.contains { goal.contains($0) }
+            guard saysRight != saysLeft else { return nil }
+            self = saysRight ? .right : .left
+        }
+
+        /// Whether the target's centre lies in the named half of its own display.
+        ///
+        /// The boundary mirrors the voice route's `DesktopTargetRegion.contains`
+        /// (right: centreX at or past the display's vertical midpoint; left:
+        /// before it) so both routes partition the screen identically. A target
+        /// with incomplete stored geometry cannot be judged and is kept, exactly
+        /// as `targetsForGoalContext` does, because discarding an unjudgeable
+        /// candidate would turn a request that resolves today into a miss.
+        func contains(_ target: LocalPerceptionTargetCache.SnapshotTarget) -> Bool {
+            guard target.globalBox.count >= 4, target.displayFrame.count >= 4 else { return true }
+            let centerX = (target.globalBox[0] + target.globalBox[2]) / 2
+            let displayCenterX = (target.displayFrame[0] + target.displayFrame[2]) / 2
+            switch self {
+            case .left: return centerX < displayCenterX
+            case .right: return centerX >= displayCenterX
+            }
+        }
+    }
+
+    /// Narrows candidates to the half of the display the goal's literal spatial
+    /// words name — but only when that actually separates the candidates.
+    ///
+    /// WHY: measured on 2026-09-23, harness `POST /v1/act` with
+    /// goal="点击右边的设置按钮" and targetLabel="设置" clicked the left-hand
+    /// control of the same name (global centre x≈340 on a 1710pt-wide display).
+    /// Nothing on this path read the user's own spatial words, while the voice
+    /// route already applied them through `StepFunActionArguments`.
+    ///
+    /// When the wording conflicts with nothing — every candidate already sits in
+    /// the named half, or none does — the candidate set comes back unchanged, so
+    /// the constraint can only ever disambiguate between same-named controls and
+    /// never rejects a request that resolves without it.
+    ///
+    /// Explicit selection is untouched: this runs inside `bestTarget`, which the
+    /// callers only reach when no `targetID`/`targetMark` was supplied, and
+    /// targetless actions (type/press_key/shortcut/scroll) never call it. The
+    /// wording describes a location and never a mouse button, so right-side
+    /// wording is not a right-click.
+    private func candidatesWithinLiteralHorizontalRegion(
+        _ targets: [LocalPerceptionTargetCache.SnapshotTarget],
+        goal: String
+    ) -> [LocalPerceptionTargetCache.SnapshotTarget] {
+        guard let region = LiteralHorizontalRegion(goal: goal) else { return targets }
+        let narrowed = targets.filter { region.contains($0) }
+        return narrowed.isEmpty ? targets : narrowed
+    }
+
     private func bestTarget(
         requestedLabel: String?,
         goal: String,
@@ -2050,9 +2127,11 @@ final class TipTourEngine {
         )
         guard !availableTargets.isEmpty else { return nil }
 
+        let candidates = candidatesWithinLiteralHorizontalRegion(availableTargets, goal: goal)
+
         let query = requestedLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let query, !query.isEmpty {
-            return availableTargets
+            return candidates
                 .compactMap { target -> (target: LocalPerceptionTargetCache.SnapshotTarget, score: Double)? in
                     guard let score = labelMatchScore(query: query, label: target.label) else { return nil }
                     return (target, score + sourceScore(target.source) + min(target.confidence, 1.0))
@@ -2061,7 +2140,7 @@ final class TipTourEngine {
                 .target
         }
 
-        return availableTargets
+        return candidates
             .compactMap { target -> (target: LocalPerceptionTargetCache.SnapshotTarget, score: Double)? in
                 guard let score = labelMatchScore(query: goal, label: target.label) else { return nil }
                 return (target, score + sourceScore(target.source) + min(target.confidence, 1.0))
