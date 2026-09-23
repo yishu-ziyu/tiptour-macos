@@ -11,18 +11,25 @@ a complete package: the run must never die without evidence. The same guarantee
 covers a non-normal end: an interrupt (SIGINT/SIGTERM) or an unexpected exception
 settles what is in flight, stops exactly the children this run started, and
 still writes the aggregate result.json.
+
+Two preconditions are enforced as hard stops rather than warnings, because a
+warning that continues is exactly how a run ends up acting on a desktop it never
+proved: the machine-wide run mutex (one acceptance run holds the desktop at a
+time) and the frontmost identity of the staged controlled page (re-proven before
+every scenario, never inherited from an earlier one).
 """
 from __future__ import annotations
 
 import datetime as _datetime
 import json
+import os
 import signal
 import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import browser_stage, dry_run, evidence, paths, scenarios as scenario_defs
+from . import browser_stage, dry_run, evidence, paths, run_mutex, scenarios as scenario_defs
 from .app_identity import inspect_app_identity, resolve_app_path
 from .browser_stage import BrowserStageError, reload_controlled_page, stage_controlled_page
 from .fixture_page import FixtureError, FixtureServer
@@ -53,6 +60,13 @@ HER_PROCESS_PATTERN = "Her.app/Contents/MacOS/Her"
 # read-only preflight failed or could not prove preconditions", separate from
 # the identity/fixture BLOCK (1) and the scenario verdict exit (0/1).
 PREFLIGHT_BLOCKED_EXIT_CODE = 3
+
+# A distinct exit code for the run mutex: 4 means "another acceptance run is
+# already active on this machine", separate from the identity/fixture BLOCK (1),
+# the in-app preflight gate (3) and the verdict/interrupt exits (0/1/130). It is
+# reported before anything is resolved, started or opened, so it can never be
+# confused with a verdict about the product.
+RUN_MUTEX_BLOCKED_EXIT_CODE = 4
 
 # Interruptions use the shell convention 128+signal, so an interrupted run is
 # never mistaken for a scenario verdict. Any abort that is not a numbered signal
@@ -301,10 +315,90 @@ def run_acceptance(options: RunOptions, abort: AbortState | None = None) -> int:
         _restore_signal_handlers(previous_handlers)
 
 
+def _locked_out_report_directory(out_dir: Path) -> Path:
+    """Where a refused run writes the report that proves it refused.
+
+    A clearly named subdirectory of the requested `--out`, never
+    `<out>/result.json`: two runners handed the same `--out` must not let the
+    second one's refusal overwrite the first one's package. The name carries the
+    reason, the UTC stamp and the pid of the run that was refused.
+    """
+    stamp = _datetime.datetime.now(_datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
+    return out_dir / f"blocked-by-active-run-{stamp}-pid{os.getpid()}"
+
+
+def _finish_locked_out(options: RunOptions, run_lock) -> int:
+    """Refuse the second run: report it, and touch nothing of the first run's.
+
+    Reached before the app path is resolved, before any identity is inspected,
+    before the fixture starts and before a page is opened, so "another run is
+    active" can never be contaminated by this run's own state. The output is a
+    complete evidence package - BLOCKED scenarios, the run mutex evidence and the
+    exact holder pid - written inside `_locked_out_report_directory`, so the
+    active run's result.json, fixture, /state, port and processes are left
+    exactly as they are.
+    """
+    reason = run_lock.denial_reason()
+    report_dir = _locked_out_report_directory(options.out_dir)
+    print("Run refused: " + reason, flush=True)
+    print(f"Refusal report: {report_dir}", flush=True)
+    context = RunContext(
+        mode=options.mode,
+        entrypoint=_default_entrypoint(Path("<the signed DEBUG Her.app>"), options.out_dir),
+        app_path=Path("(unresolved: another acceptance run is already active)"),
+        out_dir=report_dir,
+        started_at_iso=_utc_now_iso(),
+    )
+    environment: dict = {
+        "run_mutex": run_lock.to_evidence(),
+        "blocked": True,
+        "blocking_reasons": [reason],
+        "note": ("This run took the machine-wide run mutex first and could not get "
+                 "it, so it exited before resolving the app, inspecting its identity, "
+                 "starting the fixture, binding the port, opening the controlled page "
+                 "or signalling any process. The active run named in run_mutex.holder "
+                 "owns the desktop for as long as it holds the lock."),
+    }
+    scenario_results: list[dict] = []
+    try:
+        loaded_scenarios = scenario_defs.load_scenarios(
+            selected_names=options.selected_scenarios,
+            repeat_overrides=options.repeat_overrides or None,
+        )
+    except scenario_defs.ScenarioError as error:
+        environment["scenario_definitions_error"] = str(error)
+    else:
+        scenario_results = _blocked_scenario_records(
+            loaded_scenarios, [reason],
+            "Blocked by the run mutex before any provider or Driver call: another "
+            "acceptance run is already active on this machine.",
+            extra={"run_mutex": run_lock.to_evidence()},
+        )
+    return _finish(context, options, scenario_results, environment,
+                   exit_code=RUN_MUTEX_BLOCKED_EXIT_CODE, blocked_reason=reason)
+
+
 def _run_acceptance(options: RunOptions, abort: AbortState) -> int:
+    """Hold the machine-wide run mutex, then run the whole pipeline under it.
+
+    The mutex is acquired before anything is resolved, started or opened, and it
+    is released by the `with` block's `finally` on every exit path — normal,
+    timeout, SIGINT, exception — and by the kernel if this process is killed
+    outright, so an interrupted run never leaves the desktop serialised behind
+    it. A run that finds the lock already held is refused here: it exits with
+    `RUN_MUTEX_BLOCKED_EXIT_CODE` and writes its own refusal report without
+    touching the active run's fixture, /state, port or processes.
+    """
+    options.out_dir.mkdir(parents=True, exist_ok=True)
+    with run_mutex.hold_for_run(options) as run_lock:
+        if run_lock is not None and run_lock.denied:
+            return _finish_locked_out(options, run_lock)
+        return _run_acceptance_locked(options, abort, run_lock)
+
+
+def _run_acceptance_locked(options: RunOptions, abort: AbortState, run_lock) -> int:
     started_at = _utc_now_iso()
     out_dir = options.out_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
     app_path = resolve_app_path(options.app_path_argument)
     context = RunContext(
         mode=options.mode,
@@ -315,6 +409,10 @@ def _run_acceptance(options: RunOptions, abort: AbortState) -> int:
     )
     registry = OwnedProcessRegistry()
     environment: dict = {}
+    if run_lock is not None:
+        # Who held the desktop for this run, and from when: the mutex is part of
+        # proving that no second run raced this one.
+        environment["run_mutex"] = run_lock.to_evidence()
     scenario_results: list[dict] = []
     blocked_reason: str | None = None
 
@@ -333,7 +431,8 @@ def _run_acceptance(options: RunOptions, abort: AbortState) -> int:
     except scenario_defs.ScenarioError as error:
         blocked_reason = f"Scenario definitions are unusable: {error}"
         print(blocked_reason, flush=True)
-        return _finish(context, options, [], {"scenario_definitions_error": str(error)},
+        environment["scenario_definitions_error"] = str(error)
+        return _finish(context, options, [], environment,
                        exit_code=1, blocked_reason=blocked_reason)
 
     if options.mode == "full" and identity.blocking_reasons:
@@ -411,6 +510,7 @@ def _run_acceptance(options: RunOptions, abort: AbortState) -> int:
 
     fixture = FixtureServer(out_dir, registry)
     fixture_record: dict = {}
+    frontmost_stop_reasons: list[str] = []
     try:
         fixture_record["start"] = fixture.start()
         fixture.assert_controlled_page_marker()
@@ -431,6 +531,19 @@ def _run_acceptance(options: RunOptions, abort: AbortState) -> int:
             except (BrowserStageError, FixtureError) as error:
                 environment["browser_stage"] = {"error": str(error)}
                 print(f"Browser staging failed: {error}", flush=True)
+            else:
+                # Staging is proof, not a warning: if Safari was never proven to
+                # be the frontmost app on the staged controlled page, there is no
+                # desktop to act on and no scenario may make a provider or Driver
+                # call. The reasons are carried out verbatim, and the same
+                # question is re-asked before every scenario below.
+                frontmost_stop_reasons = _frontmost_stop_reasons(environment["browser_stage"])
+                if frontmost_stop_reasons:
+                    environment["frontmost_gate"] = _frontmost_gate_record(
+                        environment["browser_stage"], frontmost_stop_reasons,
+                        phase="staged_page")
+                    print("Frontmost precondition BLOCKED: "
+                          + "; ".join(frontmost_stop_reasons), flush=True)
         else:
             environment["browser_stage"] = {
                 "skipped": True,
@@ -455,6 +568,31 @@ def _run_acceptance(options: RunOptions, abort: AbortState) -> int:
         cleanup = registry.terminate_all()
         return _finish(context, options, scenario_results,
                        {"fixture": fixture_record, "cleanup": cleanup},
+                       exit_code=1, blocked_reason=blocked_reason)
+
+    if frontmost_stop_reasons:
+        # The staged page's foreground was never proven, so not one scenario may
+        # run: every scenario is BLOCKED with the exact stop reason, the fixture
+        # this run started is stopped, and the aggregate report still exists.
+        # Zero provider calls, zero Driver calls, zero desktop side effects.
+        blocked_reason = ("Frontmost precondition BLOCKED: "
+                          + "; ".join(frontmost_stop_reasons))
+        scenario_results = _blocked_scenario_records(
+            loaded_scenarios, frontmost_stop_reasons,
+            "Blocked before any provider or Driver call: the staged controlled "
+            "page was never proven frontmost, so there was no desktop to act on.",
+            extra={"frontmost_gate": environment["frontmost_gate"]},
+        )
+        fixture_record["stop"] = fixture.stop()
+        fixture_record["port_released_after_stop"] = not port_accepts_connections(
+            paths.FIXTURE_HOST, paths.FIXTURE_PORT, timeout_seconds=2.0
+        )
+        environment["fixture"] = fixture_record
+        environment["cleanup"] = {
+            "terminated": registry.terminate_all(),
+            "owned_processes_remaining": len(registry.running()),
+        }
+        return _finish(context, options, scenario_results, environment,
                        exit_code=1, blocked_reason=blocked_reason)
 
     # ---- scenarios ----
@@ -703,6 +841,114 @@ def _build_blocked_scenarios(scenarios, reasons: list[str], preflight_evidence: 
     return records
 
 
+# ------------------------------------------------------ frontmost precondition
+
+
+def _frontmost_stop_reasons(stage) -> list[str]:
+    """The exact stop reasons an unproven foreground carries, verbatim.
+
+    `stage` is whatever browser_stage returned, and the question is only ever
+    answered positively: the controlled browser must have been *proven*
+    frontmost. A stage that proved it yields no reason (an established wait keeps
+    an empty `frontmost_stop_reason`, so the field never invents a failure), and a
+    stage that was never meant to check — the dry-run skip — yields nothing.
+    Anything else, including a stage that reports no frontmost fact at all, is
+    unproven and blocks: only the reason differs, and a missing one is stated as
+    missing instead of being quietly dropped.
+    """
+    if not isinstance(stage, dict) or stage.get("skipped"):
+        return []
+    if bool(stage.get("frontmost_established")):
+        return []
+    reason = str(stage.get("frontmost_stop_reason") or "").strip()
+    if not reason:
+        reason = ("frontmost_established is false for the staged controlled page "
+                  f"{paths.FIXTURE_URL} with no reason recorded")
+    return [reason]
+
+
+def _frontmost_gate_record(stage, reasons: list[str], phase: str) -> dict:
+    """The evidence-sized projection of one frontmost gate decision."""
+    stage = stage if isinstance(stage, dict) else {}
+    frontmost_identity = (stage.get("frontmost_identity")
+                          if isinstance(stage.get("frontmost_identity"), dict) else {})
+    return {
+        "phase": phase,
+        "fixture_url": paths.FIXTURE_URL,
+        "expected_frontmost_bundle_id": paths.CONTROLLED_BROWSER_BUNDLE_IDENTIFIER,
+        "frontmost_established": bool(stage.get("frontmost_established")),
+        "frontmost_bundle_id": stage.get("frontmost_bundle_id") or "",
+        "frontmost_observed_bundle_id": stage.get("frontmost_observed_bundle_id") or "",
+        "frontmost_attempts": frontmost_identity.get("frontmost_attempts"),
+        "page_views_after_open": stage.get("page_views_after_open"),
+        "page_views_after_reload": stage.get("page_views_after_reload"),
+        "stop_reasons": list(reasons),
+        "rule": ("A non-dry-run scenario may make no provider and no Driver call "
+                 "unless the controlled browser was proven frontmost in that same "
+                 "check; the reason is carried out exactly as browser_stage wrote it."),
+    }
+
+
+def _compact_reload_record(scenario_name: str, run_index: int, stage) -> dict:
+    """One line proving the foreground was re-verified for this run index."""
+    stage = stage if isinstance(stage, dict) else {}
+    return {
+        "scenario": scenario_name,
+        "run_index": run_index,
+        "frontmost_established": bool(stage.get("frontmost_established")),
+        "frontmost_bundle_id": stage.get("frontmost_bundle_id") or "",
+        "frontmost_observed_bundle_id": stage.get("frontmost_observed_bundle_id") or "",
+        "frontmost_stop_reason": stage.get("frontmost_stop_reason") or "",
+        "page_views_after_reload": stage.get("page_views_after_reload"),
+    }
+
+
+def _blocked_scenario_records(scenarios, reasons: list[str], note: str,
+                              extra: dict | None = None) -> list[dict]:
+    """One BLOCKED record per scenario, sharing `reasons` and a policy note."""
+    records: list[dict] = []
+    for scenario in scenarios:
+        record = {
+            "name": scenario.name,
+            "title": scenario.title,
+            "status": "blocked",
+            "user_words": scenario.user_words,
+            "model_tool_arguments": None,
+            "task_turn_attempt_ids": None,
+            "her_receipt": None,
+            "independent_state": None,
+            "final_speech": None,
+            "failure_recovery": {"fault_injected": False, "recovery_evidence": None,
+                                 "note": note},
+            "basis": [],
+            "failure_reasons": list(reasons),
+            "attempts": [],
+        }
+        record.update(extra or {})
+        records.append(record)
+    return records
+
+
+def _frontmost_blocked_scenario(scenario, reasons: list[str], stage, run_index: int) -> dict:
+    """One scenario blocked by an unproven foreground, with its exact reason.
+
+    `attempts` stays empty on purpose: the probe was never started, so there is
+    no attempt, no provider call and no Driver call to describe. Nothing is
+    inferred from a previous run's artifacts.
+    """
+    gate = _frontmost_gate_record(stage, reasons, phase=f"scenario:{scenario.name}")
+    record = _blocked_scenario_records(
+        [scenario], reasons,
+        "Blocked before any provider or Driver call: the controlled page was not "
+        "proven frontmost for this scenario, so no attempt was started.",
+        extra={"browser_stage": stage, "frontmost_gate": gate,
+               "blocked_before_run_index": run_index,
+               "repeat": scenario.repeat,
+               "reproduction": scenario.reproduction},
+    )[0]
+    return record
+
+
 def _run_scenario(scenario, options: RunOptions, context: RunContext,
                   fixture: FixtureServer, registry: OwnedProcessRegistry,
                   environment: dict, abort: AbortState | None = None) -> dict:
@@ -812,7 +1058,22 @@ def _run_scenario(scenario, options: RunOptions, context: RunContext,
             # is about to mutate. (Safari is reloaded with LaunchServices only;
             # AppleScript automation would intercept real mouse events.)
             fixture.reset()
-            browser_stage.reload_controlled_page(fixture, fixture.state().get("page_views"))
+            stage = browser_stage.reload_controlled_page(
+                fixture, fixture.state().get("page_views")
+            )
+            environment.setdefault("browser_stage_reloads", []).append(
+                _compact_reload_record(scenario.name, run_index, stage)
+            )
+            # The foreground is re-proven for THIS scenario: a frontmost result
+            # from an earlier scenario says nothing about the desktop this one is
+            # about to click on, so it is never reused. An unproven foreground
+            # BLOCKS the scenario with its exact stop reason, before the probe -
+            # and therefore before any provider or Driver call - is started.
+            stop_reasons = _frontmost_stop_reasons(stage)
+            if stop_reasons:
+                print(f"[{scenario.name}] BLOCKED: " + "; ".join(stop_reasons), flush=True)
+                return _frontmost_blocked_scenario(scenario, stop_reasons, stage,
+                                                   run_index)
             state_before = _snapshot(fixture)
             probe_result = run_probe(request, registry,
                                      timeout_seconds=options.probe_timeout_seconds)

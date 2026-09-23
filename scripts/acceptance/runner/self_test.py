@@ -19,7 +19,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import dry_run, evidence, paths
+from . import dry_run, evidence, orchestration, paths, run_mutex
 from .app_identity import inspect_app_identity
 from .fixture_page import FixtureError, FixtureServer
 from .process_control import (
@@ -48,8 +48,10 @@ from .synthetic_speech import (
     validate_raw_pcm,
 )
 from .orchestration import (
+    RUN_MUTEX_BLOCKED_EXIT_CODE,
     SIGINT_EXIT_CODE,
     AbortState,
+    RunContext,
     RunOptions,
     _abort_exit_code,
     _install_abort_signal_handlers,
@@ -1177,6 +1179,314 @@ def test_preflight_gate_blocks_and_continues(work_dir: Path) -> list[str]:
             "preconditions continue; a report-less supported preflight fails closed"]
 
 
+# --------------------------------------------------------- run preconditions
+
+
+def _unestablished_frontmost_stage(stop_reason: str, page_views: int = 7) -> dict:
+    """A browser_stage result that could not prove Safari is frontmost.
+
+    The shape is what `browser_stage.stage_controlled_page` /
+    `reload_controlled_page` return when the wait ended unestablished: the
+    controlled page did open (page_views moved) but the frontmost identity was
+    never proven, and the exact reason is the only thing a caller may act on.
+    """
+    return {
+        "url": paths.FIXTURE_URL,
+        "browser": paths.CONTROLLED_BROWSER_BUNDLE_IDENTIFIER,
+        "opened": True,
+        "page_views_after_open": page_views,
+        "page_views_after_reload": page_views,
+        "became_frontmost": False,
+        "frontmost_established": False,
+        "frontmost_bundle_id": "",
+        "frontmost_observed_bundle_id": "com.apple.finder",
+        "frontmost_stop_reason": stop_reason,
+        "frontmost_identity": {
+            "frontmost_established": False,
+            "frontmost_bundle_id": "",
+            "frontmost_observed_bundle_id": "com.apple.finder",
+            "frontmost_stop_reason": stop_reason,
+            "frontmost_attempts": 3,
+        },
+    }
+
+
+def test_frontmost_gate_blocks_before_any_call(work_dir: Path) -> list[str]:
+    """An unproven foreground stops a scenario; it never becomes a warning.
+
+    Part 1 pins the gate's decision function, part 2 drives one real scenario
+    through it with a stubbed browser stage and a probe entrypoint that fails the
+    test if it is ever reached, and part 3 runs the whole full-mode pipeline with
+    the staged page unproven. No Safari, no app, no provider and no desktop: the
+    runner's own rule is what is under test.
+    """
+    stop_reason = "frontmost app is com.apple.finder, not the controlled browser com.apple.Safari"
+    stage = _unestablished_frontmost_stage(stop_reason)
+
+    # 1. The gate only ever accepts a positive proof. A dry-run's skipped stage
+    #    and an established wait are "nothing to block"; everything else - an
+    #    unproven observation, a missing reason, a stage that reports no
+    #    frontmost fact at all - blocks rather than letting a desktop action
+    #    through on an unproven foreground.
+    _check(orchestration._frontmost_stop_reasons({"skipped": True}) == [],
+           "the dry-run skip record was misread as an unproven foreground")
+    _check(orchestration._frontmost_stop_reasons(
+        dict(stage, frontmost_established=True, frontmost_stop_reason="")) == [],
+           "an established frontmost wait must not block a scenario")
+    _check(orchestration._frontmost_stop_reasons(stage) == [stop_reason],
+           "an unproven foreground must carry its exact stop reason")
+    _check(orchestration._frontmost_stop_reasons(dict(stage, frontmost_stop_reason="")) != [],
+           "an unproven foreground with no recorded reason must still block")
+    _check(orchestration._frontmost_stop_reasons({"error": "staging failed"}) != [],
+           "a stage that reports no frontmost fact at all must fail closed, not "
+           "silently allow a desktop action")
+
+    # 2. One scenario: BLOCKED with the exact reason, and no probe was started.
+    scenario = _scenario_by_name("single_step_right_setting")
+
+    class _StubBrowserStage:
+        def __init__(self) -> None:
+            self.reload_calls = 0
+
+        def reload_controlled_page(self, _fixture, _previous_page_views):
+            self.reload_calls += 1
+            return dict(stage)
+
+    class _StubFixture:
+        def reset(self) -> dict:
+            return {"selected": None, "clicks": 0, "menu_open": False, "events": []}
+
+        def state(self) -> dict:
+            return {"selected": None, "clicks": 0, "menu_open": False, "events": [],
+                    "page_views": 6}
+
+    def _no_probe(*_args, **_kwargs):
+        raise SelfTestFailure("a probe (provider/Driver) call was started for a "
+                              "scenario the frontmost gate had blocked")
+
+    stubbed_stage = _StubBrowserStage()
+    scenario_out_dir = work_dir / "scenario-out"
+    real_stage, real_probe = orchestration.browser_stage, orchestration.run_probe
+    orchestration.browser_stage = stubbed_stage
+    orchestration.run_probe = _no_probe
+    try:
+        record = orchestration._run_scenario(
+            scenario,
+            RunOptions(app_path_argument=None, out_dir=scenario_out_dir, mode="full"),
+            RunContext(mode="full", entrypoint="self-test",
+                       app_path=work_dir / "Her.app", out_dir=scenario_out_dir,
+                       started_at_iso="2026-01-01T00:00:00+00:00"),
+            _StubFixture(), OwnedProcessRegistry(), {},
+        )
+    finally:
+        orchestration.browser_stage, orchestration.run_probe = real_stage, real_probe
+
+    _check(record["status"] == "blocked",
+           f"an unproven foreground must BLOCK the scenario, got {record['status']}")
+    _check(record["failure_reasons"] == [stop_reason],
+           f"the exact stop reason must be the failure reason: {record['failure_reasons']}")
+    _check(record["attempts"] == [],
+           "a blocked scenario must not carry attempts (the probe never ran)")
+    _check(record["frontmost_gate"]["stop_reasons"] == [stop_reason]
+           and record["frontmost_gate"]["frontmost_established"] is False,
+           f"the scenario did not record the gate decision: {record.get('frontmost_gate')}")
+    _check(stubbed_stage.reload_calls == 1,
+           "the foreground was not re-verified for the scenario that was blocked")
+
+    # 3. The whole run: every scenario BLOCKED before any provider or Driver call,
+    #    the fixture this run started stopped, and the package still valid.
+    out_dir = work_dir / "frontmost-blocked-run"
+
+    class _Identity:
+        blocking_reasons: list[str] = []
+
+        def to_dict(self) -> dict:
+            return {"bundle_identifier": paths.EXPECTED_BUNDLE_IDENTIFIER}
+
+    real = (orchestration.resolve_app_path, orchestration.inspect_app_identity,
+            orchestration.stage_controlled_page)
+    orchestration.resolve_app_path = lambda _argument: work_dir / "Her.app"
+    orchestration.inspect_app_identity = lambda _app_path: _Identity()
+    orchestration.stage_controlled_page = lambda _fixture, _previous: dict(stage)
+    try:
+        exit_code = run_acceptance(
+            RunOptions(app_path_argument=None, out_dir=out_dir, mode="full")
+        )
+    finally:
+        (orchestration.resolve_app_path, orchestration.inspect_app_identity,
+         orchestration.stage_controlled_page) = real
+
+    result = evidence.read_json(out_dir / "result.json")
+    _check(exit_code == 1, f"a frontmost-blocked run must exit 1, got {exit_code}")
+    _check(result["blocked_reason"] is not None
+           and stop_reason in result["blocked_reason"],
+           f"the report must name the exact stop reason: {result['blocked_reason']}")
+    _check(all(scenario_record["status"] == "blocked"
+               for scenario_record in result["scenarios"]),
+           f"every scenario must be blocked: "
+           f"{[s['status'] for s in result['scenarios']]}")
+    _check(all(scenario_record["failure_reasons"][0] == stop_reason
+               for scenario_record in result["scenarios"]),
+           "a blocked scenario did not carry the exact stop reason")
+    _check(not any(scenario_record["attempts"] for scenario_record in result["scenarios"]),
+           "a blocked run reported attempts, which would mean a probe had run")
+    _check(result["passed"] is False and result["proof"] is False,
+           "a run blocked on the foreground must never be a pass or proof")
+    _check(result["environment"]["frontmost_gate"]["frontmost_established"] is False,
+           "the run did not record the frontmost gate decision")
+    _check(result["environment"]["fixture"]["port_released_after_stop"] is True,
+           "a frontmost-blocked run left the fixture port occupied")
+    _check(result["environment"]["cleanup"]["owned_processes_remaining"] == 0,
+           "a frontmost-blocked run left owned processes running")
+    _check(evidence.validate_result_schema(result) == [],
+           f"the blocked package failed the evidence schema: "
+           f"{evidence.validate_result_schema(result)}")
+    # This full-mode run held the machine-wide mutex for its whole life: it must
+    # have given it back, or no later run could ever start.
+    afterwards = run_mutex.acquire(run_mutex.default_lock_path(out_dir))
+    _check(afterwards.acquired,
+           "a finished (blocked) run did not release the run mutex")
+    afterwards.release()
+    return ["the foreground gate blocks one scenario with browser_stage's exact stop "
+            "reason and never reaches the probe, and blocks the whole full-mode run "
+            "(exit 1, every scenario blocked, fixture stopped) while leaving the "
+            "evidence schema valid"]
+
+
+def test_run_mutex_serializes_concurrent_runs(work_dir: Path) -> list[str]:
+    """Two runners on one machine: the second is refused and changes nothing.
+
+    Part 1 proves the lock's own semantics against a real second acquisition
+    attempt. Part 2 starts a real second runner (the shipped CLI, as a separate
+    process) while this test holds the lock, and reads its refusal back from
+    disk: a distinct exit code, a report naming the active run's pid, and no
+    fixture, port or /state touched by the refused run.
+    """
+    # ---- 1. The lock's semantics, with a live second acquisition attempt.
+    active_out = work_dir / "active-run"
+    lock_path = run_mutex.default_lock_path(active_out)
+    _check(lock_path.parent == work_dir.resolve()
+           and lock_path.name == run_mutex.LOCK_FILE_NAME,
+           f"an evidence root outside out/acceptance must lock beside its own "
+           f"--out: {lock_path}")
+    shared_a = run_mutex.default_lock_path(work_dir / "out" / "acceptance" / "run-a")
+    shared_b = run_mutex.default_lock_path(work_dir / "out" / "acceptance" / "run-b")
+    _check(shared_a == shared_b and shared_a.parent.name == "acceptance"
+           and shared_a.name == run_mutex.LOCK_FILE_NAME,
+           f"two runs under one out/acceptance tree must share one lock file: "
+           f"{shared_a} vs {shared_b}")
+    _check(run_mutex.default_lock_path(work_dir / "nested" / "run") != lock_path,
+           "an unrelated evidence root must not serialise this one")
+
+    held = run_mutex.acquire(lock_path, owner={"mode": "full", "out_dir": str(active_out)})
+    _check(held.acquired, f"the first acquisition must succeed: {held.detail}")
+    try:
+        second = run_mutex.acquire(lock_path)
+        _check(second.state == "contended" and second.denied,
+               f"a second acquisition while the lock is held must be refused as "
+               f"contended, got state={second.state!r}")
+        _check("another acceptance run is active" in second.denial_reason()
+               and f"pid {os.getpid()}" in second.denial_reason(),
+               f"the refusal must name the active run's pid: {second.denial_reason()}")
+        # The held lock is undisturbed by the refused attempt: the record still
+        # names this process and nobody else can take the lock either.
+        holder = json.loads(lock_path.read_text(encoding="utf-8"))
+        _check(holder.get("pid") == os.getpid(),
+               f"the holder record was disturbed by the refused attempt: {holder}")
+        _check(run_mutex.acquire(lock_path).denied,
+               "the held lock stopped being held after a refused attempt")
+    finally:
+        held.release()
+
+    # Releasing never deletes the file: replacing the inode would let a third run
+    # lock a brand-new file while the first still holds the old one.
+    _check(lock_path.is_file(), "releasing the lock deleted the lock file")
+    reacquired = run_mutex.acquire(lock_path)
+    _check(reacquired.acquired, "a released lock must be acquirable again")
+    reacquired.release()
+
+    # ---- 2. A real second runner: refused, reported, and touching nothing.
+    second_out = work_dir / "second-runner"
+    second_lock = run_mutex.default_lock_path(second_out)
+    _check(second_lock == lock_path,
+           f"the second runner must contend for this test's lock: {second_lock}")
+    entrypoint = paths.repository_root() / "scripts/acceptance/her_voice_e2e.py"
+    _check(entrypoint.is_file(), f"the runner entrypoint is missing: {entrypoint}")
+    with run_mutex.hold(second_lock,
+                        owner={"mode": "full", "out_dir": str(second_out)}):
+        completed = subprocess.run(
+            [sys.executable, str(entrypoint), "--dry-run", "--out", str(second_out)],
+            cwd=str(paths.repository_root()), capture_output=True, text=True,
+            timeout=180.0, check=False,
+        )
+    _check(completed.returncode == RUN_MUTEX_BLOCKED_EXIT_CODE,
+           f"a second runner must exit {RUN_MUTEX_BLOCKED_EXIT_CODE}, got "
+           f"{completed.returncode}: {completed.stderr.strip()[-400:]}")
+    _check(f"pid {os.getpid()}" in completed.stdout,
+           f"the refused run did not name the active run's pid: {completed.stdout}")
+    reports = sorted(second_out.glob("blocked-by-active-run-*"))
+    _check(len(reports) == 1,
+           f"the refused run must write exactly one report directory: {reports}")
+    report = evidence.read_json(reports[0] / "result.json")
+    _check(report["exit_code"] == RUN_MUTEX_BLOCKED_EXIT_CODE,
+           f"the refusal report recorded exit_code={report['exit_code']}")
+    _check("another acceptance run is active" in (report["blocked_reason"] or "")
+           and f"pid {os.getpid()}" in (report["blocked_reason"] or ""),
+           f"the refusal report must name the active run: {report['blocked_reason']}")
+    _check(report["environment"]["run_mutex"]["state"] == "contended"
+           and report["environment"]["run_mutex"]["holder"]["pid"] == os.getpid(),
+           f"the refusal report did not record the mutex evidence: "
+           f"{report['environment'].get('run_mutex')}")
+    _check(all(scenario_record["status"] == "blocked"
+               for scenario_record in report["scenarios"])
+           and report["scenarios"],
+           "the refusal report must record every scenario as blocked")
+    _check(report["passed"] is False and report["proof"] is False,
+           "a refused run must never look like a pass")
+    _check(not (second_out / "result.json").is_file(),
+           "the refused run wrote into the shared --out directory, where it could "
+           "overwrite the active run's package")
+    _check(not port_accepts_connections(paths.FIXTURE_HOST, paths.FIXTURE_PORT),
+           "the refused run started a fixture while another run owns the desktop")
+    _check(evidence.validate_result_schema(report) == [],
+           f"the refusal report failed the evidence schema: "
+           f"{evidence.validate_result_schema(report)}")
+
+    # ---- 3. SIGINT mid-run releases the lock: a run that was killed must never
+    #         leave the machine serialised behind it.
+    interrupted_out = work_dir / "sigint-run"
+    interrupted_lock = run_mutex.default_lock_path(interrupted_out)
+    child = subprocess.Popen(
+        [sys.executable, str(entrypoint), "--dry-run", "--out", str(interrupted_out)],
+        cwd=str(paths.repository_root()), stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.monotonic() + 120.0
+        while time.monotonic() < deadline:
+            if any((interrupted_out / "scenario-artifacts").glob("*/run-1")):
+                break
+            time.sleep(0.02)
+        _check(any((interrupted_out / "scenario-artifacts").glob("*/run-1")),
+               "the interrupted run never reached a scenario")
+        child.send_signal(signal.SIGINT)
+        child.communicate(timeout=120.0)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.communicate(timeout=30.0)
+    _check(child.returncode == SIGINT_EXIT_CODE,
+           f"an interrupted run must exit {SIGINT_EXIT_CODE}, got {child.returncode}")
+    released = run_mutex.acquire(interrupted_lock)
+    _check(released.acquired, "an interrupted run did not release the run mutex")
+    released.release()
+    _check(interrupted_lock.is_file(), "the lock file disappeared with the run")
+    return [f"a second acquisition is refused as contended with the holder's pid, "
+            f"the held lock and its record are undisturbed, the lock file survives "
+            f"release, a real second runner exits {RUN_MUTEX_BLOCKED_EXIT_CODE} with "
+            f"a report naming pid {os.getpid()} while starting no fixture, and a "
+            f"SIGINTed run exits {SIGINT_EXIT_CODE} with the mutex released"]
+
 # ------------------------------------------------------------------- runner
 
 
@@ -1197,6 +1507,8 @@ TESTS = (
     ("binary flag detection", test_binary_flag_detection),
     ("probe execution lifecycle", test_probe_execution_lifecycle),
     ("preflight gate blocks and continues", test_preflight_gate_blocks_and_continues),
+    ("frontmost gate blocks before any call", test_frontmost_gate_blocks_before_any_call),
+    ("run mutex serializes concurrent runs", test_run_mutex_serializes_concurrent_runs),
     ("evidence schema validation", test_evidence_schema_validation),
     ("secret scan canaries", test_secret_scan_detects_canaries),
     ("judge: single-step right setting", test_judge_single_step_scenario),
