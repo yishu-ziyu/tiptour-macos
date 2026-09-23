@@ -129,9 +129,37 @@ private func makeDescription(capturedAt: Date = Date()) -> StepFunScreenDescript
         #"{"goal":"点击 os","action":"invented"}"#,
         #"{"goal":"点击 os","index":2}"#,
         #"{"goal":"点击 os","action":"click","text":"不应被忽略"}"#,
-        #"{"goal":"两步","action":"click","steps":[{"action":"click"}]}"#,
         #"{"goal":"打开应用","action":"open_app"}"#,
         #"{"goal":"输入","action":"type","text":"hello"}"#
+    ] {
+        #expect(throws: (any Error).self) {
+            let arguments = try StepFunActionArguments.decode(Data(json.utf8))
+            _ = try arguments.validatedSteps()
+        }
+    }
+}
+
+@Test func redundantTopLevelActionAlongsideExplicitStepsNormalizesWithoutLosingSteps() throws {
+    // The real StepFun model returns both an explicit steps list and a
+    // redundant top-level action naming the first step's kind. The list is
+    // the model's exact statement; the top-level action proves nothing the
+    // list does not already say, so it is dropped and the reason recorded.
+    let normalized = try StepFunActionArguments.decode(Data(#"{"goal":"点击打开显示设置，然后点击缩放选项","action":"click","steps":[{"action":"click","target_label":"打开显示设置"},{"action":"click","target_label":"缩放选项"}]}"#.utf8))
+    // The outcome under test is the effective plan the executor would run:
+    // exactly the two declared controls, in order, nothing invented.
+    let steps = try normalized.validatedSteps()
+    #expect(steps.count == 2)
+    #expect(steps[0].action == .click)
+    #expect(steps[0].targetLabel == "打开显示设置")
+    #expect(steps[1].action == .click)
+    #expect(steps[1].targetLabel == "缩放选项")
+
+    // A conflicting action kind or any mixed single-step parameter is a real
+    // conflict, not redundancy: still rejected, never silently accepted.
+    for json in [
+        #"{"goal":"两步","action":"open_app","steps":[{"action":"click","target_label":"设置"}]}"#,
+        #"{"goal":"两步","action":"click","target_label":"设置","steps":[{"action":"click","target_label":"缩放"}]}"#,
+        #"{"goal":"两步","action":"click","region":"right","steps":[{"action":"click","target_label":"缩放"}]}"#
     ] {
         #expect(throws: (any Error).self) {
             let arguments = try StepFunActionArguments.decode(Data(json.utf8))

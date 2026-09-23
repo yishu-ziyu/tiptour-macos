@@ -36,7 +36,7 @@ enum StepFunRealtimeToolDeclarations {
         "application": ["type": "string", "description": "Exact installed application name for open_app, such as Safari. Never put a visible control's label here: open_app starts applications and never clicks controls on screen."],
         "direction": ["type": "string", "enum": ["up", "down", "left", "right"]],
         "amount": ["type": "integer", "minimum": 1, "maximum": 5],
-        "expected_label": ["type": "string", "description": "Visible result expected AFTER this step, not a declaration of success."]
+        "expected_label": ["type": "string", "description": "Visible result expected AFTER this step, not a declaration of success. It must be a verifiable on-screen control or label name that can be matched exactly against what is on screen — ideally the control the next step of the same plan depends on, such as the control the following step operates. Never write an outcome sentence such as 页面已打开 or 显示设置页面已打开: no control on screen is ever named that way, so the step could never be verified. When no exact control name is known, omit this field."]
     ]
 
     static let all: [[String: Any]] = [describeScreen, actOnScreen]
@@ -86,7 +86,7 @@ enum StepFunRealtimeToolDeclarations {
         "type": "function",
         "function": [
             "name": "act_on_screen",
-            "description": "Execute an authorized desktop task. By default this attempts ONE action. For a short workflow provide an explicit steps list, at most six, with all known parameters. Steps run in order and each needs its own completion evidence: a step that only delivers input (click, scroll or key with no expected result) counts as done once the input is sent, while a step that must produce a state change — open_app, type, or any step carrying expected_label — needs an independently verified result before the next step runs. Call directly for action requests.",
+            "description": "Execute an authorized desktop task. By default this attempts ONE action. For a short workflow provide an explicit steps list, at most six, with all known parameters. Steps run in order and each needs its own completion evidence: a step that only delivers input (click, scroll or key with no expected result) counts as done once the input is sent, while a step that must produce a state change — open_app, type, or any step carrying expected_label — needs an independently verified result before the next step runs. An expected_label must be an exact observable control or label name, never a description of what happened, otherwise that evidence can never be found; keep your explicit steps list as declared, one entry per control the user asked you to operate. Call directly for action requests.",
             "parameters": [
                 "type": "object",
                 "properties": stepProperties.merging([
@@ -200,6 +200,36 @@ struct StepFunActionArguments: Decodable {
     let amount: Int?
     let expectedLabel: String?
 
+    /// Why these arguments had to be reshaped before they could describe a
+    /// plan; empty whenever the model states the plan directly. Recorded so an
+    /// auditor can tell a normalizing acceptance from a contract-clean one
+    /// without re-deriving the reason from the raw JSON.
+    private(set) var normalizationNotes: [String] {
+        get { normalizationJournal.notes }
+        set { normalizationJournal.notes = newValue }
+    }
+
+    /// Holds the notes by reference. `validatedSteps()` cannot be a mutating
+    /// method — its callers keep the decoded arguments in a constant — so a
+    /// stored array would live on an immutable copy and swallow every note.
+    /// Decoding `StepFunActionArguments` stays synthesized: the journal is
+    /// never part of the tool arguments.
+    private let normalizationJournal = NormalizationJournal()
+
+    private final class NormalizationJournal: Decodable {
+        var notes: [String]
+
+        init() {
+            notes = []
+        }
+
+        /// The record is runtime state, never model input, so decoding always
+        /// starts from an empty note list.
+        init(from decoder: Decoder) throws {
+            notes = []
+        }
+    }
+
     enum CodingKeys: String, CodingKey, CaseIterable {
         case goal, index, action, intent, steps, region, relation, text, key, application, direction, amount
         case targetLabel = "target_label"
@@ -226,12 +256,28 @@ struct StepFunActionArguments: Decodable {
             throw DesktopTaskContractError.invalid("编号必须绑定同一观察 ID，未执行。")
         }
         if let steps {
-            guard !steps.isEmpty, steps.count <= 6, index == nil, action == nil, targetLabel == nil,
-                  region == nil, anchorLabel == nil, relation == nil, text == nil, key == nil,
-                  application == nil, direction == nil, amount == nil, expectedLabel == nil, observationID == nil else {
+            // A realtime session routinely repeats one top-level action that the
+            // first explicit step already states, and that repetition used to be
+            // rejected as a conflict before the declared-steps gate below could
+            // ever run. Only the provably redundant repetition may be dropped
+            // here — see `redundantTopLevelAction(in:)` for the exact condition.
+            let droppedRedundantAction = Self.redundantTopLevelAction(in: self)
+            // Once that repetition is gone, a surviving top-level action really
+            // does contradict the explicit steps list and is still rejected.
+            let retainedTopLevelAction = droppedRedundantAction == nil ? action : nil
+            guard !steps.isEmpty, steps.count <= 6, index == nil, retainedTopLevelAction == nil,
+                  targetLabel == nil, region == nil, anchorLabel == nil, relation == nil, text == nil,
+                  key == nil, application == nil, direction == nil, amount == nil, expectedLabel == nil,
+                  observationID == nil else {
                 throw DesktopTaskContractError.invalid("多步列表不能与单步参数混用，未执行。")
             }
             for step in steps { try step.validate() }
+            if let droppedRedundantAction {
+                // Only a plan that survived every check above may claim a
+                // normalization happened, so the record never describes a
+                // rejected request.
+                recordNormalizationNote("redundant top-level action '\(droppedRedundantAction)' dropped in favour of the explicit steps list (no information lost)")
+            }
             return steps
         }
         // Code-owned intent gate. The user's own wording is the statement of
@@ -280,6 +326,43 @@ struct StepFunActionArguments: Decodable {
         step.allowsActionDecision = action == nil && kind == .click
         try step.validate()
         return [step]
+    }
+
+    /// Records why the arguments had to be reshaped, so the reason stays
+    /// available to whoever audits the accepted plan.
+    private func recordNormalizationNote(_ note: String) {
+        normalizationJournal.notes.append(note)
+    }
+
+    /// The top-level action that the explicit `steps` list already states, or
+    /// nil when there is nothing safe to drop.
+    ///
+    /// The condition is all-or-nothing on purpose: the top-level action must
+    /// name the same kind as the first step, and every other single-step field
+    /// must be absent. Repeating `click` in both places carries no information,
+    /// so removing one of them cannot lose a target, a direction, an anchor, a
+    /// constraint or a user-required outcome. A model that puts a
+    /// `target_label`, a `region`, an `expected_label` — or any other
+    /// single-step field — beside `steps` is contradicting itself, and that
+    /// contradiction is still rejected by `validatedSteps()`; normalizing it
+    /// "in favour of the steps" would silently choose which half of the request
+    /// to obey.
+    ///
+    /// The steps themselves are never rewritten: their order, targets and
+    /// `expected_label` stay exactly as the model decoded them.
+    private static func redundantTopLevelAction(in arguments: StepFunActionArguments) -> String? {
+        guard let topLevelAction = arguments.action,
+              let topLevelKind = DesktopActionKind(rawValue: topLevelAction),
+              let steps = arguments.steps, !steps.isEmpty,
+              topLevelKind == steps[0].action,
+              arguments.targetLabel == nil, arguments.region == nil,
+              arguments.anchorLabel == nil, arguments.relation == nil,
+              arguments.text == nil, arguments.key == nil,
+              arguments.application == nil, arguments.direction == nil,
+              arguments.amount == nil, arguments.expectedLabel == nil,
+              arguments.index == nil, arguments.observationID == nil
+        else { return nil }
+        return topLevelAction
     }
 
     /// Rebuilds a request the user's own wording already answers, when the
