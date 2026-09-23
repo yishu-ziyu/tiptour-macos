@@ -1,0 +1,369 @@
+{
+  "schema_version": 1,
+  "quality": "cancelled-contract-good",
+  "acceptance": false,
+  "description": "Reviewer testdata: the cancelled terminal contract. Scenario 1 is the real shape of a cancel — a progress question that performs no action, then 取消 after the reconnect: the receipt ends status=cancelled with an empty current_actions list, both rounds record control_binding_valid=true, and the independent /state is byte-identical before and after. Scenario 2 is a cancel that caught a two-step task after its first step: the delivered step's outcome is resolved (outcome_required + system_verified_outcome) and the one surviving effect is named in the receipt's allowed_side_effects. Neither final speech claims completion. The reviewer must judge this package PASS (exit code 0). Not product evidence — it only exercises the reviewer.",
+  "work_order": "INFRA-7",
+  "commit": "0000000000000000000000000000000000000000",
+  "branch": "feat/her-acceptance-infrastructure",
+  "app_bundle": "Her.app",
+  "bundle_id": "com.yishuziyu.her",
+  "team_id": "87DM76C54G",
+  "entrypoint": "python3 scripts/acceptance/verify_evidence.py --self-test",
+  "provider_connection_attempted": true,
+  "synthetic_audio": true,
+  "microphone_opened": false,
+  "desktop_fixture_only": true,
+  "not_product_evidence": true,
+  "mode": "dry_run",
+  "proof": false,
+  "passed": true,
+  "exit_code": 0,
+  "scenarios": [
+    {
+      "name": "continuity_progress_cancel",
+      "title": "Continuity：查询进度，重连后取消同一任务",
+      "status": "passed",
+      "user_words": "这个任务进行到哪一步了？ → 取消这个任务",
+      "model_tool_arguments": [
+        {
+          "round": "progress",
+          "input_transcript": "这个任务进行到哪一步了？",
+          "name": "task_control",
+          "arguments": "{\"action\":\"status\",\"task_id\":\"aaaaaaaa-0000-1111-2222-333333333333\"}",
+          "normalized_arguments": "{\"action\":\"status\",\"task_id\":\"aaaaaaaa-0000-1111-2222-333333333333\"}"
+        },
+        {
+          "round": "cancel_after_reconnect",
+          "input_transcript": "取消这个任务",
+          "name": "task_control",
+          "arguments": "{\"action\":\"cancel\",\"task_id\":\"aaaaaaaa-0000-1111-2222-333333333333\"}",
+          "normalized_arguments": "{\"action\":\"cancel\",\"task_id\":\"aaaaaaaa-0000-1111-2222-333333333333\"}"
+        }
+      ],
+      "task_turn_attempt_ids": {
+        "task_id": "aaaaaaaa-0000-1111-2222-333333333333",
+        "progress_turn_id": "bbbbbbbb-0000-1111-2222-333333333333",
+        "cancel_turn_id": "cccccccc-0000-1111-2222-333333333333"
+      },
+      "her_receipt": {
+        "scenario": "continuity_progress_cancel",
+        "task_id": "aaaaaaaa-0000-1111-2222-333333333333",
+        "turn_id": "cccccccc-0000-1111-2222-333333333333",
+        "status": "cancelled",
+        "target_version": 2,
+        "current_actions": [],
+        "rounds": [
+          {
+            "round": "progress",
+            "input_transcript": "这个任务进行到哪一步了？",
+            "task_id": "aaaaaaaa-0000-1111-2222-333333333333",
+            "turn_id": "bbbbbbbb-0000-1111-2222-333333333333",
+            "status": "paused",
+            "task_control_action": "status",
+            "control_binding_valid": true,
+            "completed_step_count": 1,
+            "total_step_count": 2,
+            "current_action_facts": [],
+            "absent_fields": []
+          },
+          {
+            "round": "cancel_after_reconnect",
+            "input_transcript": "取消这个任务",
+            "task_id": "aaaaaaaa-0000-1111-2222-333333333333",
+            "turn_id": "cccccccc-0000-1111-2222-333333333333",
+            "status": "cancelled",
+            "task_control_action": "cancel",
+            "control_binding_valid": true,
+            "completed_step_count": 1,
+            "total_step_count": 2,
+            "current_action_facts": [],
+            "absent_fields": []
+          }
+        ],
+        "absent_fields": []
+      },
+      "independent_state": {
+        "before": {
+          "selected": null,
+          "clicks": 0,
+          "menu_open": false,
+          "events": [],
+          "page_views": 4
+        },
+        "after": {
+          "selected": null,
+          "clicks": 0,
+          "menu_open": false,
+          "events": [],
+          "page_views": 4
+        },
+        "new_events": []
+      },
+      "final_speech": {
+        "progress_round": [
+          "任务尚未完成，已处理 1/2 步。"
+        ],
+        "cancel_round": [
+          "任务已取消，已经发生的操作记录保留。"
+        ]
+      },
+      "failure_recovery": {
+        "fault_injected": false,
+        "recovery_evidence": {
+          "cleanup": {
+            "note": "recorded at run end"
+          },
+          "note": "No fault is injected in this scenario. The runner still records the post-run dedup/recovery facts that matter for reruns: probe process exit, fixture shutdown, port release and the next run's clean start."
+        },
+        "rerun_hygiene": {}
+      },
+      "basis": [
+        "Both rounds record control_binding_valid=true, so the cancel was bound to the task and turn it cancelled.",
+        "The receipt records no delivery=sent action: asking for progress performed no action, so the cancel stopped the task before anything was delivered.",
+        "Independent /state is identical before and after both rounds: no desktop side effects and no side-effect residue.",
+        "The final speech states 尚未完成/已处理 for the progress round and reports the cancel without claiming 已确认/完成, so a cancelled terminal state is never spoken as a verified completion."
+      ],
+      "failure_reasons": [],
+      "attempts": [
+        {
+          "utterance": {
+            "utterances": [
+              {
+                "text": "这个任务进行到哪一步了？",
+                "synthetic": true,
+                "duration_seconds": 2.216,
+                "byte_count": 106374
+              },
+              {
+                "text": "取消这个任务",
+                "synthetic": true,
+                "duration_seconds": 1.296,
+                "byte_count": 62184
+              }
+            ],
+            "primary_text": "这个任务进行到哪一步了？"
+          },
+          "probe": {
+            "argv": [
+              "<mock>Her.app/Contents/MacOS/Her",
+              "--voice-continuity-probe",
+              "<progress-pcm>",
+              "<cancel-pcm>",
+              "<attempt-dir>/continuity-report.json"
+            ],
+            "mock": true,
+            "mock_description": "Mock chain: progress question keeps the same task paused with zero re-executed steps; the reconnect binds a fresh turn and cancels the same task. Independent /state never moves (no desktop side effects)."
+          },
+          "independent_state": {
+            "before": {
+              "selected": null,
+              "clicks": 0,
+              "menu_open": false,
+              "events": [],
+              "page_views": 4
+            },
+            "after": {
+              "selected": null,
+              "clicks": 0,
+              "menu_open": false,
+              "events": [],
+              "page_views": 4
+            }
+          },
+          "process_exit": {
+            "pid": null,
+            "self_exited": true,
+            "returncode": 0,
+            "timed_out": false,
+            "mock": true
+          },
+          "cleanup": {
+            "owned_processes_remaining": 0,
+            "note": "recorded at run end"
+          },
+          "mock": true
+        }
+      ]
+    },
+    {
+      "name": "single_step_then_cancel_after_first_step",
+      "title": "两步任务：第一步送达并被系统确认，用户在第二步前取消",
+      "status": "passed",
+      "user_words": "打开显示设置，然后调到缩放……算了，取消这个任务",
+      "model_tool_arguments": [
+        {
+          "name": "act_on_screen",
+          "arguments": "{\"goal\":\"打开显示设置\",\"intent\":\"new\",\"action\":\"click\",\"target_label\":\"打开显示设置\"}",
+          "normalized_arguments": "{\"goal\":\"打开显示设置\",\"intent\":\"new\",\"action\":\"click\",\"target_label\":\"打开显示设置\"}"
+        }
+      ],
+      "task_turn_attempt_ids": {
+        "task_id": "dddddddd-0000-1111-2222-333333333333",
+        "turn_id": "eeeeeeee-0000-1111-2222-333333333333",
+        "target_version": 1,
+        "action_attempt_ids": [
+          "attempt-0101"
+        ],
+        "observation_ids": [
+          "obs-0101"
+        ]
+      },
+      "her_receipt": {
+        "goal": "打开显示设置，然后调到缩放",
+        "status": "cancelled",
+        "actions": [
+          "click「打开显示设置」：结果已确认",
+          "click「缩放选项」：任务已取消，步骤未执行"
+        ],
+        "detail": "任务被用户取消；第一步的结果已由系统确认，第二步在取消前未执行。",
+        "app": "com.apple.Safari",
+        "task_id": "dddddddd-0000-1111-2222-333333333333",
+        "turn_id": "eeeeeeee-0000-1111-2222-333333333333",
+        "target_version": 1,
+        "control_binding_valid": true,
+        "allowed_side_effects": [
+          "open-display-settings"
+        ],
+        "prior_actions": [],
+        "current_actions": [
+          {
+            "id": "attempt-0101",
+            "observationID": "obs-0101",
+            "app": "com.apple.Safari",
+            "targetID": "target-open-display",
+            "label": "打开显示设置",
+            "action": "click",
+            "decision_packet": {
+              "action": "click",
+              "evidence": [
+                "action_locked",
+                "target_exact"
+              ]
+            },
+            "completionPolicy": "outcome_required",
+            "delivery": "sent",
+            "outcomeEvidence": "system_verified",
+            "detail": "the display menu became visible",
+            "completionBasis": "system_verified_outcome",
+            "satisfied": true,
+            "verified": true
+          },
+          {
+            "id": "attempt-0102",
+            "observationID": "obs-0102",
+            "app": "com.apple.Safari",
+            "targetID": "target-scale",
+            "label": "缩放选项",
+            "action": "click",
+            "decision_packet": {
+              "action": "click",
+              "evidence": [
+                "action_locked"
+              ]
+            },
+            "completionPolicy": "outcome_required",
+            "delivery": "not_sent",
+            "outcomeEvidence": "cancelled",
+            "detail": "the task was cancelled before this step ran",
+            "completionBasis": "not_attempted",
+            "satisfied": false,
+            "verified": false
+          }
+        ],
+        "verified_action_history": [
+          "click「打开显示设置」：菜单已出现"
+        ],
+        "satisfied_action_history": [
+          "click「打开显示设置」：动作已送达且结果已确认"
+        ],
+        "completed_step_count": 1,
+        "total_step_count": 2
+      },
+      "independent_state": {
+        "before": {
+          "selected": null,
+          "clicks": 0,
+          "menu_open": false,
+          "events": [],
+          "page_views": 2
+        },
+        "after": {
+          "selected": null,
+          "clicks": 1,
+          "menu_open": true,
+          "events": [
+            "open-display-settings"
+          ],
+          "page_views": 2
+        },
+        "new_events": [
+          "open-display-settings"
+        ]
+      },
+      "final_speech": [
+        "显示设置界面已经打开了，缩放那一步没有执行，任务已取消。"
+      ],
+      "failure_recovery": {
+        "fault_injected": false,
+        "recovery_evidence": null,
+        "note": "No fault was injected; nothing to recover."
+      },
+      "basis": [
+        "The receipt records control_binding_valid=true, so the cancel was bound to the task and turn it cancelled.",
+        "The delivery=sent step's outcome is resolved (completion_policy=outcome_required with completion_basis=system_verified_outcome), and the second step is recorded as not_attempted, so no delivered action is left mid-flight.",
+        "The only new independent event, 'open-display-settings', is named in the receipt's allowed_side_effects, so the surviving effect is explicitly allowed and the cancel leaves no unexplained residue.",
+        "The final speech reports the delivered step and the cancel without claiming 已完成/已确认 for the cancelled task."
+      ],
+      "failure_reasons": [],
+      "attempts": [
+        {
+          "utterance": {
+            "text": "打开显示设置，然后调到缩放……算了，取消这个任务",
+            "synthetic": true,
+            "metadata_only": true
+          },
+          "probe": {
+            "argv": [
+              "<mock>Her.app/Contents/MacOS/Her",
+              "--voice-task-probe",
+              "com.apple.Safari",
+              "<utterance-pcm>",
+              "<attempt-dir>"
+            ],
+            "mock": true,
+            "mock_description": "Mock chain: the first step is delivered and system-verified, the user cancels before the second step, and the independent /state records exactly the one allowed effect."
+          },
+          "independent_state": {
+            "before": {
+              "selected": null,
+              "clicks": 0,
+              "menu_open": false,
+              "events": []
+            },
+            "after": {
+              "selected": null,
+              "clicks": 1,
+              "menu_open": true,
+              "events": [
+                "open-display-settings"
+              ]
+            }
+          },
+          "process_exit": {
+            "pid": 4243,
+            "self_exited": true,
+            "returncode": 0,
+            "timed_out": false,
+            "returncode_basis": "derived: the identified instance terminated without any signal from the runner and the probe's report artifact is present; the exit status itself is not observable",
+            "report_artifact_present": true
+          },
+          "cleanup": {
+            "owned_processes_remaining": 0
+          },
+          "mock": false
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,202 @@
+{
+  "schema_version": 1,
+  "quality": "cancelled-but-claimed-complete",
+  "acceptance": false,
+  "description": "Reviewer testdata: the cancelled terminal contract, broken on its fourth condition. The task ends status=cancelled after its first (system-verified) step, the control binding is valid, the delivered step's outcome is resolved and the single surviving effect is explicitly allowed — every condition of the cancelled contract holds except the last one: the final speech claims 已完成并确认 of a task that ended cancelled. Claiming completion of a cancelled task is an overclaim, so the recorded pass is not supported and the reviewer must judge this package FAIL (exit code 1). It also shows why the overclaim criterion alone is not enough: the receipt does carry a system-verified basis for the delivered step, so the speech is licensed for that step but not for the cancelled task as a whole. Not product evidence — it only exercises the reviewer.",
+  "work_order": "INFRA-7",
+  "commit": "0000000000000000000000000000000000000000",
+  "branch": "feat/her-acceptance-infrastructure",
+  "app_bundle": "Her.app",
+  "bundle_id": "com.yishuziyu.her",
+  "team_id": "87DM76C54G",
+  "entrypoint": "python3 scripts/acceptance/verify_evidence.py --self-test",
+  "provider_connection_attempted": true,
+  "synthetic_audio": true,
+  "microphone_opened": false,
+  "desktop_fixture_only": true,
+  "not_product_evidence": true,
+  "mode": "dry_run",
+  "proof": false,
+  "passed": true,
+  "exit_code": 1,
+  "scenarios": [
+    {
+      "name": "single_step_then_cancel_after_first_step",
+      "title": "两步任务：第一步送达并被系统确认，用户在第二步前取消",
+      "status": "passed",
+      "user_words": "打开显示设置，然后调到缩放……算了，取消这个任务",
+      "model_tool_arguments": [
+        {
+          "name": "act_on_screen",
+          "arguments": "{\"goal\":\"打开显示设置\",\"intent\":\"new\",\"action\":\"click\",\"target_label\":\"打开显示设置\"}",
+          "normalized_arguments": "{\"goal\":\"打开显示设置\",\"intent\":\"new\",\"action\":\"click\",\"target_label\":\"打开显示设置\"}"
+        }
+      ],
+      "task_turn_attempt_ids": {
+        "task_id": "dddddddd-0000-1111-2222-333333333333",
+        "turn_id": "eeeeeeee-0000-1111-2222-333333333333",
+        "target_version": 1,
+        "action_attempt_ids": [
+          "attempt-0101"
+        ],
+        "observation_ids": [
+          "obs-0101"
+        ]
+      },
+      "her_receipt": {
+        "goal": "打开显示设置，然后调到缩放",
+        "status": "cancelled",
+        "actions": [
+          "click「打开显示设置」：结果已确认",
+          "click「缩放选项」：任务已取消，步骤未执行"
+        ],
+        "detail": "任务被用户取消；第一步的结果已由系统确认，第二步在取消前未执行。",
+        "app": "com.apple.Safari",
+        "task_id": "dddddddd-0000-1111-2222-333333333333",
+        "turn_id": "eeeeeeee-0000-1111-2222-333333333333",
+        "target_version": 1,
+        "control_binding_valid": true,
+        "allowed_side_effects": [
+          "open-display-settings"
+        ],
+        "prior_actions": [],
+        "current_actions": [
+          {
+            "id": "attempt-0101",
+            "observationID": "obs-0101",
+            "app": "com.apple.Safari",
+            "targetID": "target-open-display",
+            "label": "打开显示设置",
+            "action": "click",
+            "decision_packet": {
+              "action": "click",
+              "evidence": [
+                "action_locked",
+                "target_exact"
+              ]
+            },
+            "completionPolicy": "outcome_required",
+            "delivery": "sent",
+            "outcomeEvidence": "system_verified",
+            "detail": "the display menu became visible",
+            "completionBasis": "system_verified_outcome",
+            "satisfied": true,
+            "verified": true
+          },
+          {
+            "id": "attempt-0102",
+            "observationID": "obs-0102",
+            "app": "com.apple.Safari",
+            "targetID": "target-scale",
+            "label": "缩放选项",
+            "action": "click",
+            "decision_packet": {
+              "action": "click",
+              "evidence": [
+                "action_locked"
+              ]
+            },
+            "completionPolicy": "outcome_required",
+            "delivery": "not_sent",
+            "outcomeEvidence": "cancelled",
+            "detail": "the task was cancelled before this step ran",
+            "completionBasis": "not_attempted",
+            "satisfied": false,
+            "verified": false
+          }
+        ],
+        "verified_action_history": [
+          "click「打开显示设置」：菜单已出现"
+        ],
+        "satisfied_action_history": [
+          "click「打开显示设置」：动作已送达且结果已确认"
+        ],
+        "completed_step_count": 1,
+        "total_step_count": 2
+      },
+      "independent_state": {
+        "before": {
+          "selected": null,
+          "clicks": 0,
+          "menu_open": false,
+          "events": [],
+          "page_views": 2
+        },
+        "after": {
+          "selected": null,
+          "clicks": 1,
+          "menu_open": true,
+          "events": [
+            "open-display-settings"
+          ],
+          "page_views": 2
+        },
+        "new_events": [
+          "open-display-settings"
+        ]
+      },
+      "final_speech": [
+        "打开显示设置已完成并确认，缩放也已经调好了，任务已成功结束。"
+      ],
+      "failure_recovery": {
+        "fault_injected": false,
+        "recovery_evidence": null,
+        "note": "No fault was injected; nothing to recover."
+      },
+      "basis": [
+        "The recorded basis repeats the agent's claim that the cancelled task finished and was confirmed; the receipt keeps status=cancelled, so the claim has no terminal contract to rest on."
+      ],
+      "failure_reasons": [
+        "Final speech claims 已完成并确认/已成功结束 for a task whose receipt status is cancelled."
+      ],
+      "attempts": [
+        {
+          "utterance": {
+            "text": "打开显示设置，然后调到缩放……算了，取消这个任务",
+            "synthetic": true,
+            "metadata_only": true
+          },
+          "probe": {
+            "argv": [
+              "<mock>Her.app/Contents/MacOS/Her",
+              "--voice-task-probe",
+              "com.apple.Safari",
+              "<utterance-pcm>",
+              "<attempt-dir>"
+            ],
+            "mock": true,
+            "mock_description": "Mock chain: the first step is delivered and system-verified, the user cancels before the second step, and the final speech claims the whole task completed and confirmed anyway."
+          },
+          "independent_state": {
+            "before": {
+              "selected": null,
+              "clicks": 0,
+              "menu_open": false,
+              "events": []
+            },
+            "after": {
+              "selected": null,
+              "clicks": 1,
+              "menu_open": true,
+              "events": [
+                "open-display-settings"
+              ]
+            }
+          },
+          "process_exit": {
+            "pid": 4244,
+            "self_exited": true,
+            "returncode": 0,
+            "timed_out": false,
+            "returncode_basis": "derived: the identified instance terminated without any signal from the runner and the probe's report artifact is present; the exit status itself is not observable",
+            "report_artifact_present": true
+          },
+          "cleanup": {
+            "owned_processes_remaining": 0
+          },
+          "mock": false
+        }
+      ]
+    }
+  ]
+}
