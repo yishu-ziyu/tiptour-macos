@@ -32,12 +32,16 @@ that consumes it, and the record proves it was injected rather than observed.
 `navigate_page_away` is a *foreground* action: it steals focus from whatever the
 operator is doing. It is therefore defined but never called by any scenario - the
 manual runner or the integration owner runs it inside an authorized window, and
-the call requires both `confirm=True` and a non-empty `authorized_by`.
+the call requires both `confirm=True` and a named authorization
+`authorized_by="<name>:<YYYY-MM-DD>"`. Without that named human it is refused and
+the refusal is written on the record, so "who allowed this desktop action" is
+answerable from the evidence instead of from memory.
 """
 from __future__ import annotations
 
 import datetime
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -55,6 +59,17 @@ DEFAULT_KILL_GRACE_SECONDS = 5.0
 DEFAULT_NAVIGATE_URL = "about:blank"
 NAVIGATE_TIMEOUT_SECONDS = 20.0
 
+# The foreground primitive is a desktop action performed in front of the
+# operator, so it may only run inside an authorized window owned by a named
+# human. The authorization is a single string of the form
+# `"<name>:<YYYY-MM-DD>"` - who allowed it and on which date - and anything else
+# is refused and recorded as a refusal. No scenario may call this primitive
+# automatically: it exists so the manual runner or the integration owner can
+# exercise a controlled page being navigated away without the runner inventing
+# that decision for itself.
+AUTHORIZED_BY_FORMAT = "<name>:<YYYY-MM-DD>"
+_AUTHORIZED_BY_PATTERN = re.compile(r"^(?P<name>[^:\s][^:]*?)\s*:\s*(?P<date>\S+)\s*$")
+
 # Live timers are kept here so they are never garbage collected before firing,
 # and so `disarm_fault` can find and cancel them.
 _TIMERS: list[tuple[dict, threading.Timer]] = []
@@ -66,6 +81,27 @@ class FaultRefused(RuntimeError):
 
 def _now_iso() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat()
+
+
+def _check_authorization(authorized_by: Any) -> tuple[bool, str | None, str | None]:
+    """Validate a named foreground authorization.
+
+    Returns `(ok, normalized, refusal)`. The value must be a string of the form
+    `"<name>:<date>"`: a named human and a date. `None`, an empty string, or
+    anything without both halves is refused, and the refusal sentence names the
+    required format so the record explains what was missing.
+    """
+    if not isinstance(authorized_by, str) or not authorized_by.strip():
+        return False, None, (
+            f"authorized_by is required and must be {AUTHORIZED_BY_FORMAT!r}: a named human must "
+            "own this foreground action inside an authorized window")
+    candidate = authorized_by.strip()
+    match = _AUTHORIZED_BY_PATTERN.match(candidate)
+    if match is None or not match.group("name").strip() or not match.group("date").strip():
+        return False, None, (
+            f"authorized_by {candidate!r} is not a named authorization in the form "
+            f"{AUTHORIZED_BY_FORMAT!r}")
+    return True, f"{match.group('name').strip()}:{match.group('date').strip()}", None
 
 
 # ------------------------------------------------------------------- resolution
@@ -313,22 +349,34 @@ def restore_state_delay(fixture: Any, record: dict | None = None) -> dict:
 
 
 def plan_navigate_away(url: str = DEFAULT_NAVIGATE_URL,
-                       browser: str | None = None) -> dict:
+                       browser: str | None = None,
+                       authorized_by: str | None = None) -> dict:
     """Build the plan for navigating the controlled page away. Never executes."""
     browser = browser or paths.CONTROLLED_BROWSER_BUNDLE_IDENTIFIER
-    return {
+    plan = {
         "kind": "page_navigate_away",
         "target_pid_or_url": url,
         "browser_bundle_id": browser,
         "command": ["open", "-b", browser, url],
         "armed_at": _now_iso(),
         "armed": False,
+        "refused": False,
         "requires_foreground": True,
-        "note": ("Foreground action: it steals focus from whatever the operator is doing. Defined "
-                 "here but never invoked by a scenario; the manual runner or the integration owner "
-                 "calls navigate_page_away(confirm=True, authorized_by=...) inside an authorized "
-                 "window."),
+        "authorized_by": None,
+        "authorization_format": AUTHORIZED_BY_FORMAT,
+        "note": ("Foreground action: it steals focus from whatever the operator is doing. Never "
+                 "invoked by a scenario; the manual runner or the integration owner calls "
+                 "navigate_page_away(confirm=True, authorized_by='<name>:<date>') inside an "
+                 "authorized window."),
     }
+    # The authorization is validated even when it is absent: `None` is a missing
+    # authorization, and a missing authorization must refuse rather than pass.
+    ok, normalized, refusal = _check_authorization(authorized_by)
+    plan["authorized_by"] = normalized
+    if not ok:
+        plan["refused"] = True
+        plan["refusal"] = refusal
+    return plan
 
 
 def navigate_page_away(confirm: bool = False, authorized_by: str | None = None,
@@ -337,21 +385,24 @@ def navigate_page_away(confirm: bool = False, authorized_by: str | None = None,
     """Navigate the controlled page away through LaunchServices `open`.
 
     Deliberately inert unless a human opts in: it needs `confirm=True` *and* a
-    non-empty `authorized_by`, because it changes the desktop state in front of
-    the operator. Without both it returns the plan so a scenario can record the
-    intent without performing it. It navigates only the local controlled browser
-    to `about:blank`; it never touches the product under test.
+    named authorization `authorized_by="<name>:<YYYY-MM-DD>"`, because it changes
+    the desktop state in front of the operator. Anything else is refused - the
+    record carries `refused: true` with the reason and no `open` command is ever
+    run - so a caller can record the intent without performing it and the record
+    itself proves no desktop action was taken. It navigates only the local
+    controlled browser to `about:blank`; it never touches the product under test.
     """
-    record = plan_navigate_away(url=url, browser=browser)
+    record = plan_navigate_away(url=url, browser=browser, authorized_by=authorized_by)
     if not confirm:
+        record["refused"] = True
         record["refusal"] = ("confirm=True is required: this is a foreground action and no scenario "
                              "may call it automatically")
         return record
-    if not isinstance(authorized_by, str) or not authorized_by.strip():
-        record["refusal"] = ("authorized_by is required: a named human must own this foreground "
-                             "action inside an authorized window")
+    if record["refused"]:
+        # Missing or malformed authorization: refuse and say so on the record.
+        # `plan_navigate_away` has already written the reason, no `open` was
+        # built and no browser was touched.
         return record
-    record["authorized_by"] = authorized_by.strip()
     record["armed"] = True
     record["fired_at"] = _now_iso()
     opened = run_open_command(record["command"])
@@ -402,6 +453,7 @@ def describe_primitives() -> list[dict]:
          "effect": "LaunchServices `open` brings the browser forward on about:blank",
          "ownership": "foreground action owned by the manual/integration owner",
          "auto_callable_by_scenario": False,
+         "authorization_format": AUTHORIZED_BY_FORMAT,
          "foreground": True},
     ]
 

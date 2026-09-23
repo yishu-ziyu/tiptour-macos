@@ -28,6 +28,7 @@ from .fixture_page import FixtureError, FixtureServer
 from .process_control import (
     OwnedProcessRegistry,
     OwnedProcess,
+    pid_is_alive,
     port_accepts_connections,
     spawn_owned_process,
     terminate_owned_process,
@@ -2371,6 +2372,380 @@ def test_runner_fault_primitives_are_owned_only(work_dir: Path) -> list[str]:
             "navigate_page_away stays inert until a named human authorizes it"]
 
 
+def _fixture_port_is_bindable() -> bool:
+    """True when a fresh listener can take 127.0.0.1:19475 right now.
+
+    A port with no listener can be bound; a leaked fixture child still listening
+    on it cannot. This is the assertion that matters for the *next* run, because
+    the runner refuses to start when the port is occupied and never kills the
+    process that holds it.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        probe.bind((paths.FIXTURE_HOST, paths.FIXTURE_PORT))
+        probe.listen(1)
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+def test_fixture_released_when_the_controlled_page_phase_raises(work_dir: Path) -> list[str]:
+    """A non-FixtureError failure after the fixture spawns must release it.
+
+    The fixture phase only ever caught `FixtureError`, so an unexpected error
+    (an OSError from the spawn, a staging error that is not a BrowserStageError)
+    unwound the run straight out of `_run_acceptance_locked`: no package, and a
+    fixture child still holding 127.0.0.1:19475 against every later run. The
+    phase now treats any exception as evidence, and the release `finally` runs on
+    every exit path.
+    """
+    original_reset = FixtureServer.reset
+
+    def broken_reset(self) -> dict:
+        raise RuntimeError("injected: the controlled page stopped answering mid-setup")
+
+    FixtureServer.reset = broken_reset
+    try:
+        out_dir = work_dir / "exception-exit"
+        exit_code = run_acceptance(
+            RunOptions(app_path_argument=None, out_dir=out_dir, mode="dry_run")
+        )
+    finally:
+        FixtureServer.reset = original_reset
+
+    _check(exit_code == 1, f"a failed controlled-page phase must exit 1, got {exit_code}")
+    result = evidence.read_json(out_dir / "result.json")
+    environment = result["environment"]
+    started = environment["fixture"]["start"]
+    _check(isinstance(started.get("pid"), int), f"the fixture did start: {environment['fixture']}")
+    _check(environment["fixture"]["port_released_after_stop"] is True,
+           f"the fixture child was left listening: {environment['fixture']}")
+    _check(environment["cleanup"]["owned_processes_remaining"] == 0,
+           f"an owned child survived the exception path: {environment['cleanup']}")
+    _check(not pid_is_alive(int(started["pid"])),
+           f"the fixture pid {started['pid']} is still alive after the exception path")
+    _check(not port_accepts_connections(paths.FIXTURE_HOST, paths.FIXTURE_PORT)
+           and _fixture_port_is_bindable(),
+           f"port {paths.FIXTURE_PORT} is not listenable again after the exception path")
+    blocked = [scenario for scenario in result["scenarios"] if scenario["status"] == "blocked"]
+    _check(len(blocked) == len(result["scenarios"]),
+           f"every scenario must be recorded blocked, not left unrecorded: {result['scenarios']}")
+    return [f"an unexpected error in the controlled-page phase exited 1 with a complete "
+            f"package: fixture pid {started['pid']} terminated, port {paths.FIXTURE_PORT} "
+            "released and bindable again, and no owned processes left behind"]
+
+
+def test_fixture_released_after_dry_run_and_interrupt(work_dir: Path) -> list[str]:
+    """Both a finished dry run and an interrupted run leave 19475 listenable.
+
+    Dry-run exercises the normal exit path; the interrupt delivers a real SIGINT
+    the moment the fixture child is proven listening, which is the moment a leak
+    would be most expensive - it holds the port for every later run until the
+    orphan exits on its own.
+    """
+    dry_dir = work_dir / "dry-run-normal"
+    dry_code = run_acceptance(RunOptions(app_path_argument=None, out_dir=dry_dir, mode="dry_run"))
+    dry_result = evidence.read_json(dry_dir / "result.json")
+    _check(dry_result["environment"]["fixture"]["port_released_after_stop"] is True,
+           f"a finished dry run left the fixture port occupied: "
+           f"{dry_result['environment']['fixture']}")
+    _check(dry_result["environment"]["cleanup"]["owned_processes_remaining"] == 0,
+           f"a finished dry run left owned processes: {dry_result['environment']['cleanup']}")
+    _check(not port_accepts_connections(paths.FIXTURE_HOST, paths.FIXTURE_PORT)
+           and _fixture_port_is_bindable(),
+           f"port {paths.FIXTURE_PORT} is not listenable again after a finished dry run "
+           f"(exit {dry_code})")
+    for scenario in dry_result["scenarios"]:
+        for attempt in scenario.get("attempts", []):
+            injected = (attempt.get("failure_recovery") or {}).get("fault_injected")
+            _check(injected is False,
+                   f"a dry run makes no probe call, so no fault may be injected: {injected}")
+
+    out_dir = work_dir / "sigint-while-fixture-listening"
+    delivered = threading.Event()
+
+    def _interrupt() -> None:
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline and not delivered.is_set():
+            if port_accepts_connections(paths.FIXTURE_HOST, paths.FIXTURE_PORT):
+                # The fixture child this run started is listening: interrupt now,
+                # while it is unambiguously alive.
+                os.kill(os.getpid(), signal.SIGINT)
+                delivered.set()
+                return
+            time.sleep(0.005)
+
+    interrupter = threading.Thread(target=_interrupt, daemon=True)
+    interrupter.start()
+    try:
+        code = run_acceptance(RunOptions(app_path_argument=None, out_dir=out_dir,
+                                         mode="dry_run"))
+    finally:
+        interrupter.join(timeout=10.0)
+    _check(delivered.is_set(), "the synthetic SIGINT was never delivered")
+    _check(code == SIGINT_EXIT_CODE, f"SIGINT must exit {SIGINT_EXIT_CODE}, got {code}")
+    result = evidence.read_json(out_dir / "result.json")
+    _check(result["environment"]["abort"]["signal_name"] == "SIGINT",
+           f"the report does not record the interrupt: {result['environment'].get('abort')}")
+    _check(result["environment"]["fixture"]["port_released_after_stop"] is True,
+           f"an interrupted run left the fixture port occupied: {result['environment']['fixture']}")
+    _check(result["environment"]["cleanup"]["owned_processes_remaining"] == 0,
+           f"an interrupted run left owned processes: {result['environment']['cleanup']}")
+    _check(not port_accepts_connections(paths.FIXTURE_HOST, paths.FIXTURE_PORT)
+           and _fixture_port_is_bindable(),
+           f"port {paths.FIXTURE_PORT} is not listenable again after the interrupted run")
+    return [f"a finished dry run released the fixture (checking that no fault was injected "
+            "outside a probe call), and a real SIGINT delivered while the fixture child was "
+            f"listening ended the run with exit {SIGINT_EXIT_CODE}, the fixture stopped, "
+            f"port {paths.FIXTURE_PORT} released and bindable again, and no owned processes "
+            "left behind"]
+
+
+def _fake_scenario(fault):
+    """A scenario-shaped object for the fault-wiring self-test."""
+
+    class _Scenario:
+        name = "self-test-fault-wiring"
+        expectations = {} if fault is None else {"fault": fault}
+
+    return _Scenario()
+
+
+def test_fault_record_is_wired_into_the_attempt(work_dir: Path) -> list[str]:
+    """A declared fault arms before the probe and lands on that attempt.
+
+    The wiring lives in `orchestration._arm_scenario_fault`: a scenario's
+    `expectations.fault` spec becomes the primitive's own record, and
+    `_fault_injected_projection` reduces it to
+    `{kind, armed_at, fired, target, authorized_by}` for the attempt's
+    `failure_recovery.fault_injected`. An undeclared kind or an unauthorized
+    foreground fault is a refusal, never a silent no-op.
+    """
+    registry = OwnedProcessRegistry()
+
+    # 1. A scenario with no declared fault injects nothing at all.
+    _check(orchestration._scenario_fault_spec(_fake_scenario(None)) is None,
+           "a scenario without a fault must not get one")
+    _check(orchestration._fault_injected_projection(None) is None,
+           "no fault record must project to nothing at all")
+
+    # 2. The declared background fault arms against this run's own fixture child.
+    fixture = FixtureServer(work_dir / "fault-wiring", registry)
+    try:
+        fixture.start()
+        target_pid = int(fixture.owned.pid)
+        record = orchestration._arm_scenario_fault(
+            {"kind": "fixture_kill_after", "seconds": 0.3,
+             "reason": "self-test: recovery from a lost page"}, fixture, registry, 1)
+        _check(record["kind"] == "fixture_kill_after", f"fault kind: {record}")
+        _check(record["armed"] is True, f"the run's own fixture must be killable: {record}")
+        _check(record["target_pid_or_url"] == target_pid, f"fault target: {record}")
+        _check(bool(record["armed_at"]), f"a fault record needs armed_at: {record}")
+        deadline = time.monotonic() + 8.0
+        while fixture.owned.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        _check(fixture.owned.poll() is not None,
+               "the fault wired from orchestration did not terminate the fixture child")
+
+        projection = orchestration._fault_injected_projection(record)
+        for key in ("kind", "armed_at", "fired", "target", "authorized_by"):
+            _check(key in projection, f"the projection is missing {key!r}: {projection}")
+        _check(projection["kind"] == "fixture_kill_after", f"projection kind: {projection}")
+        _check(projection["armed_at"] == record["armed_at"],
+               f"projection armed_at: {projection}")
+        _check(projection["fired"] is True,
+               f"the fired fault must be recorded as fired: {projection}")
+        _check(projection["target"] == target_pid, f"projection target: {projection}")
+        _check(projection["authorized_by"] is None,
+               f"a background fault needs no named human: {projection}")
+        _check(projection["refused"] is False, f"a refusal flag on an armed fault: {projection}")
+    finally:
+        fixture.stop()
+
+    # 3. The readback fault arms without touching the fixture process.
+    readback = FixtureServer(work_dir / "fault-wiring-readback", registry)
+    try:
+        readback.start()
+        delay = orchestration._arm_scenario_fault(
+            {"kind": "state_delay_after", "seconds": 0.4}, readback, registry, 2)
+        _check(delay["kind"] == "state_delay_after" and delay["armed"] is True,
+               f"the state delay must be armed by the same wiring: {delay}")
+        projection = orchestration._fault_injected_projection(delay)
+        _check(projection["kind"] == "state_delay_after" and projection["fired"] is False,
+               f"a delay that has served no stale read yet has not fired: {projection}")
+        runner_faults.restore_state_delay(readback, delay)
+
+        # 4. The foreground fault needs a named human; the wiring refuses for it.
+        for spec in ({"kind": "page_navigate_away"},
+                     {"kind": "page_navigate_away", "authorized_by": "no date"},
+                     {"kind": "not_a_fault_kind"}):
+            refused = orchestration._arm_scenario_fault(spec, readback, registry, 3)
+            _check(refused["armed"] is False and refused["refused"] is True
+                   and bool(refused.get("refusal")),
+                   f"{spec} must be refused by the wiring, never executed: {refused}")
+            _check("open_returncode" not in refused,
+                   f"a refused foreground fault must not have run `open`: {refused}")
+            projection = orchestration._fault_injected_projection(refused)
+            _check(projection["fired"] is False and projection["refused"] is True
+                   and projection["authorized_by"] is None,
+                   f"a refused fault must project as refused: {projection}")
+    finally:
+        readback.stop()
+
+    # 5. The spec a scenario declares reaches the wiring verbatim.
+    spec = {"kind": "fixture_kill_after", "seconds": 0.2}
+    actual = orchestration._scenario_fault_spec(_fake_scenario(spec))
+    _check(actual == spec, f"a declared fault must reach the wiring verbatim: {actual}")
+    return ["a declared fixture_kill_after armed against the run's own child immediately "
+            "before the probe call, fired, and projected to {kind, armed_at, fired, target, "
+            "authorized_by} with the target pid; a state_delay_after armed on the readback "
+            "channel; and an unauthorized or unknown fault kind was refused and recorded as "
+            "a refusal instead of being executed"]
+
+
+def test_page_navigate_away_needs_a_named_authorization(work_dir: Path) -> list[str]:
+    """The foreground fault runs only with `authorized_by="<name>:<date>"`.
+
+    It changes the desktop in front of the operator, so no scenario may call it
+    automatically and no default may supply the name. Every refusal is recorded
+    as `refused: true` with the reason, and no `open` command is ever built.
+    """
+    inert = runner_faults.navigate_page_away()
+    _check(inert["armed"] is False and inert["refused"] is True,
+           f"the default call must be inert: {inert}")
+    _check("confirm=True" in inert["refusal"], f"the refusal must name the missing confirm: {inert}")
+    _check("open_returncode" not in inert, f"no `open` may be executed: {inert}")
+
+    unnamed = runner_faults.navigate_page_away(confirm=True)
+    _check(unnamed["armed"] is False and unnamed["refused"] is True,
+           f"confirm without a named human must be refused: {unnamed}")
+    _check("authorized_by" in unnamed["refusal"],
+           f"the refusal must name the missing authorization: {unnamed}")
+    _check(unnamed.get("authorized_by") is None, f"no authorization may be invented: {unnamed}")
+    _check("open_returncode" not in unnamed, f"no `open` may be executed: {unnamed}")
+
+    for bad in ("", "   ", "no-date-at-all", ":2026-09-23", "A Name:"):
+        refused = runner_faults.navigate_page_away(confirm=True, authorized_by=bad)
+        _check(refused["armed"] is False and refused["refused"] is True,
+               f"authorized_by={bad!r} must be refused: {refused}")
+
+    allowed = runner_faults.plan_navigate_away(authorized_by="A Integrator:2026-09-23")
+    _check(allowed["armed"] is False, f"a plan must never execute: {allowed}")
+    _check(allowed["refused"] is False, f"a named authorization must be accepted: {allowed}")
+    _check(allowed["authorized_by"] == "A Integrator:2026-09-23",
+           f"the authorization must be carried verbatim: {allowed}")
+
+    catalogue = {item["kind"]: item for item in runner_faults.describe_primitives()}
+    _check(catalogue["page_navigate_away"]["auto_callable_by_scenario"] is False,
+           "the foreground primitive must stay not scenario-callable")
+    _check(catalogue["page_navigate_away"]["authorization_format"]
+           == runner_faults.AUTHORIZED_BY_FORMAT,
+           f"the catalogue must publish the required authorization format: {catalogue}")
+    return [f"navigate_page_away is inert without confirm, refused with confirm but no "
+            f"authorized_by, and refused for blank, nameless, dateless or malformed values; "
+            f"only {runner_faults.AUTHORIZED_BY_FORMAT!r} is accepted, and only as a plan - "
+            "no call in this suite executes it"]
+
+
+def test_negative_match_only_passes_when_the_protocol_marks_it(work_dir: Path) -> list[str]:
+    """`matched: true` with `ok: false` is a pass only when marked negative.
+
+    The guided manual runner records the measurement; the reviewer decides what
+    it means. An unmarked negative match - the thing the step asked about was
+    absent, with nothing on the record saying the absence was the expectation -
+    is judged FAIL, so a protocol cannot turn a drifted read into proof by
+    omitting a field. The same measurement reviews as a pass once the
+    declaration `"negative_check": true` is on the step the reviewer reads.
+    """
+    script = paths.repository_root() / "scripts/acceptance/manual_runner.py"
+    _check(script.is_file(), f"manual runner script is missing: {script}")
+    base_step = {
+        "id": "keychain-item-absent",
+        "instruction": "Self-test step: nothing to do in the UI.",
+        "verify": {"kind": "keychain_item", "expect": "fail",
+                   "params": {"service": "her.acceptance.selftest.negative.missing",
+                              "account": "nobody"}},
+    }
+
+    def _record(step: dict, name: str) -> dict:
+        protocol_path = work_dir / f"protocol-{name}.json"
+        protocol_path.write_text(json.dumps({"scenario": "self-test: an absence", "steps": [step]},
+                                            ensure_ascii=False, indent=1), encoding="utf-8")
+        out_dir = work_dir / f"manual-{name}"
+        completed = subprocess.run(
+            [sys.executable, str(script), str(protocol_path), str(out_dir)],
+            input="\n", capture_output=True, text=True, check=False, timeout=120,
+        )
+        _check(completed.returncode == 0,
+               f"manual runner exited {completed.returncode}\nstdout:\n{completed.stdout}\n"
+               f"stderr:\n{completed.stderr}")
+        records = sorted(out_dir.glob("manual-*"))
+        _check(len(records) == 1, f"expected one manual-<ts> record dir: {records}")
+        return json.loads((records[0] / "record.json").read_text(encoding="utf-8"))
+
+    # 1. The real record of an undeclared negative check: a measured absence and
+    #    no declaration anywhere on it. The reviewer fails it.
+    unmarked = _record(dict(base_step), "unmarked")["steps"][0]
+    verification = unmarked["verification"]
+    _check(verification["expected"] == "fail" and verification["ok"] is False
+           and verification["matched"] is True,
+           f"the recorded measurement must be a matched negative check: {verification}")
+    _check("negative_check" not in verification and "negative_check" not in unmarked,
+           f"the record must not smuggle in a marker: {unmarked}")
+    review = orchestration.review_manual_step_verification(unmarked)
+    _check(review["verdict"] == "fail",
+           f"an unmarked negative match must be judged FAIL: {review}")
+    _check(review["negative_check"] is True and review["marked"] is False,
+           f"the review must name it a negative check with no marker: {review}")
+
+    # 2. The same protocol declaring the negative check measures the same absence,
+    #    and the declaration has to travel with the recorded step (or the recorded
+    #    verification) for the reviewer to see it - that is the shape a record
+    #    version that echoes the protocol's declaration produces.
+    declared_verify = dict(base_step)
+    declared_verify["verify"] = dict(base_step["verify"], negative_check=True)
+    declared_run = _record(declared_verify, "declared")["steps"][0]
+    _check(declared_run["verification"]["matched"] is True
+           and declared_run["verification"]["ok"] is False,
+           f"the declared run measures the same absence: {declared_run['verification']}")
+    for marked_step in (dict(declared_run, negative_check=True),
+                        {"id": declared_run["id"],
+                         "verification": dict(declared_run["verification"],
+                                              negative_check=True)}):
+        review = orchestration.review_manual_step_verification(marked_step)
+        _check(review["verdict"] == "pass",
+               f"a declared negative check must be judged a pass: {review}")
+        _check(review["marked"] is True and review["negative_check"] is True,
+               f"the review must see the declaration: {review}")
+
+    # 3. Today's record does not echo the protocol's declaration, so the record
+    #    alone still fails the review: the marker has to be visible to the
+    #    reviewer, which is what gives the strictness teeth.
+    review = orchestration.review_manual_step_verification(declared_run)
+    _check(review["verdict"] == "fail",
+           f"without the declaration on the record the negative match stays a FAIL: {review}")
+
+    # 5. Controls: a positive match passes and an unanswered read is
+    #    undetermined, so the rule is about the negative case only.
+    positive = orchestration.review_manual_step_verification(
+        {"id": "state", "verification": {"kind": "http_state", "expected": "pass",
+                                         "ok": True, "matched": True}})
+    _check(positive["verdict"] == "pass", f"a positive match must pass: {positive}")
+    unanswered = orchestration.review_manual_step_verification(
+        {"id": "state", "verification": {"kind": "http_state", "expected": "pass",
+                                         "ok": None, "matched": None}})
+    _check(unanswered["verdict"] == "undetermined",
+           f"an unanswered read must stay undetermined: {unanswered}")
+    return ["the guided runner recorded a matched negative check (expected fail, ok false, "
+            "matched true) twice, once with the protocol declaring negative_check=true and "
+            "once without; the reviewer failed the undeclared record, passed the same "
+            "measurement once the declaration was on the step the reviewer reads, and left "
+            "positive matches and unanswered reads unaffected"]
+
+
 _TESTS_WITHOUT_WORK_DIR = frozenset({
     test_probe_argument_plumbing,
     test_evidence_schema_validation,
@@ -2383,6 +2758,20 @@ TESTS = (
     ("fixture lifecycle and state semantics", test_fixture_lifecycle_and_state_semantics),
     ("fixture port release and clean second start", test_fixture_port_release_and_second_start),
     ("fixture refuses occupied port without killing", test_fixture_refuses_occupied_port_without_killing),
+    # The fixture-leak group runs here, before every test that starts its own
+    # fixture or its own dry run: if the release guarantee regressed, the port
+    # would stay occupied and every later test would fail for an environment
+    # reason instead of a runner one.
+    ("fixture released when the controlled-page phase raises",
+     test_fixture_released_when_the_controlled_page_phase_raises),
+    ("fixture released after a dry run and after an interrupt",
+     test_fixture_released_after_dry_run_and_interrupt),
+    ("fault record is attached to the attempt that ran under it",
+     test_fault_record_is_wired_into_the_attempt),
+    ("page navigate away needs a named authorization",
+     test_page_navigate_away_needs_a_named_authorization),
+    ("a negative match only passes when the protocol marks it",
+     test_negative_match_only_passes_when_the_protocol_marks_it),
     # These two run before the dry-run group: that group's interrupted-run case
     # has been observed to leave a fixture child listening on 19475 (reproduced
     # on unmodified HEAD), and a later fixture test would then fail for an
