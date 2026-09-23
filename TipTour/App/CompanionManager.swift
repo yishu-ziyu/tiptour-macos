@@ -62,17 +62,30 @@ final class CompanionManager: ObservableObject {
             // State and OSStatus only. The stored value is never logged.
             print("🔑 selected mode '\(selectedMode.keyName)' key: \(state.logDescription) (hasSelectedModeKey=\(hasSelectedModeKey))")
         }
-        if state.itemExists { clearResolvedKeyFailure() }
+        // Retire a key refusal ONLY on evidence that the read now succeeds.
+        // `.saved` proves the entry exists but says nothing about readability,
+        // and every refusal state is still a refusal — neither may clear a
+        // read-denied message that is still true (a presence refresh must not
+        // fake recovery). `.available` means this process actually held the
+        // value, the only proof that the published refusal no longer applies.
+        if state == .available { clearResolvedKeyFailure() }
     }
 
     /// Retire a key-refusal message that no longer applies.
     ///
-    /// Only the exact string this manager published for a key problem is
-    /// cleared, so a provider error, a permission refusal or a live session
-    /// failure can never be hidden by a key refresh.
+    /// The two key channels close independently: the JEV text refusal and the
+    /// StepFun voice refusal each have their own loop, so a JEV-only failure
+    /// must never have to wait for a voice failure to exist before it can be
+    /// retired (and vice versa). Only the exact string this manager published
+    /// for a key problem is cleared, so a provider error, a permission
+    /// refusal, a network failure or a live session failure can never be
+    /// hidden by a key refresh — none of those were registered here, and each
+    /// channel is reset only while it still holds the exact key message this
+    /// manager published for it.
     private func clearResolvedKeyFailure() {
-        guard let published = publishedVoiceKeyFailure else { return }
-        if voiceSessionErrorMessage == published { voiceSessionErrorMessage = nil }
+        if let publishedVoice = publishedVoiceKeyFailure, voiceSessionErrorMessage == publishedVoice {
+            voiceSessionErrorMessage = nil
+        }
         publishedVoiceKeyFailure = nil
         if let publishedText = publishedTextKeyFailure, textCommandActivityText == publishedText {
             textCommandActivityText = nil
@@ -1294,6 +1307,13 @@ final class CompanionManager: ObservableObject {
         // as a no-op argument-free in every other launch and does not exist in
         // a Release build.
         KeychainStore.applyAcceptanceLaunchArguments(CommandLine.arguments)
+        // Same argument family, same block — no second mechanism: name the seam
+        // this run is using (isolated service + accounts still owed a one-shot
+        // read refusal) so the acceptance log carries the injection source next
+        // to the real OSStatus the UI reports. An argument-free launch prints
+        // "denialArmedFor=none", which is the proof that nothing fires unless
+        // the explicit DEBUG flag was passed.
+        print("🔑 DEBUG keychain acceptance seam: \(KeychainStore.acceptanceSeamSummary)")
         #endif
         refreshProviderKeyStatus()
         refreshAllPermissions()
@@ -2888,6 +2908,18 @@ final class CompanionManager: ObservableObject {
             case .absent, .readDenied, .undecodable, .unavailable:
                 voiceState = .idle
                 publishVoiceKeyFailure(read.state.userMessage(subject: "阶跃密钥"))
+                return false
+            case .saved:
+                // `readItem` never answers `.saved`: a successful read maps to
+                // `.available` and only the attributes-only presence probe
+                // maps to `.saved`. This arm exists so the switch stays
+                // exhaustive and the rule stays honest — an entry that is
+                // provably stored while its value never reaches this process
+                // is a READ problem, not a missing key. Refuse without the
+                // value, never report it as "未保存", and never start a session
+                // that would die on its first provider call.
+                voiceState = .idle
+                publishVoiceKeyFailure("无法开始语音：阶跃密钥已保存在 macOS 钥匙串，但这次启动前没有读取到密钥内容（这是读取问题，并非未保存）。请重试；若持续出现，请在「设置 → 模型」重新保存密钥。")
                 return false
             }
             guard let apiKey = stepfunAPIKey, !apiKey.isEmpty else {

@@ -22,12 +22,35 @@ struct CompanionPanelView: View {
         case mode = 1, key, permissions
     }
 
-    /// Ready = onboarded with a saved key. Permissions are deliberately NOT
-    /// part of this: a permission revoked after onboarding must swap in the
-    /// callout below the same 开始 button, not teleport the user back into
-    /// setup where that callout can never appear.
+    /// Ready = onboarded with a key this process can actually use.
+    ///
+    /// Permissions are deliberately NOT part of this: a permission revoked
+    /// after onboarding must swap in the callout below the same 开始 button,
+    /// not teleport the user back into setup where that callout can never
+    /// appear.
+    ///
+    /// The key half is *readability*, never mere existence: `.saved` only
+    /// proves an entry is stored (the attributes-only presence probe never
+    /// decrypted it), and `.readDenied` / `.undecodable` / `.unavailable`
+    /// prove nothing usable at all — so none of them may wear the 已就绪 label
+    /// or light up the start button. Entering permission configuration is
+    /// gated separately (see `hasSavedModeKey`), so a saved-but-unread key
+    /// keeps its setup path without ever claiming readiness.
     private var isReady: Bool {
-        companionManager.hasCompletedOnboarding && companionManager.hasSelectedModeKey
+        companionManager.hasCompletedOnboarding && companionManager.selectedModeKeyState.isUsable
+    }
+
+    /// 已保存 = the keychain positively holds an entry for the selected mode.
+    ///
+    /// This is the *existence* gate, deliberately not the readability gate: a
+    /// `.saved` key — proven present by a presence probe, never read in this
+    /// process — counts as saved and must be able to move on to grant
+    /// permissions, and a `.readDenied` / `.undecodable` entry must never be
+    /// reported as "not saved" either. Usability is `isReady`'s job, so the
+    /// two facts can never be swapped: this gate opens setup, it can never
+    /// claim the key is usable.
+    private var hasSavedModeKey: Bool {
+        companionManager.selectedModeKeyState.itemExists
     }
 
     var body: some View {
@@ -79,7 +102,9 @@ struct CompanionPanelView: View {
         .onAppear {
             companionManager.refreshProviderKeyStatus()
             if companionManager.hasCompletedOnboarding {
-                setupStep = companionManager.hasSelectedModeKey ? .permissions : .key
+                // 已保存（含只查到条目、尚未读取验证的 .saved）就按已保存处理：
+                // 直接进入权限配置，不要求为钥匙串里已有的密钥再存一次。
+                setupStep = hasSavedModeKey ? .permissions : .key
             }
         }
     }
@@ -343,8 +368,11 @@ struct CompanionPanelView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(DS.Colors.accent).pointerCursor()
-                .disabled((setupStep == .key && !companionManager.hasSelectedModeKey)
-                    || (setupStep == .permissions && (!companionManager.hasSelectedModeKey || !companionManager.hasSelectedModePermissions)))
+                // WHY: the 继续 gate from the key step is existence, not
+                // readability — a `.saved` key is 已保存 and may proceed to
+                // permissions. Claiming the mode is usable is `isReady`'s job.
+                .disabled((setupStep == .key && !hasSavedModeKey)
+                    || (setupStep == .permissions && (!hasSavedModeKey || !companionManager.hasSelectedModePermissions)))
             }
         }
     }
@@ -743,9 +771,13 @@ struct CompanionPanelView: View {
     }
 
     private var statusText: String {
-        if !isReady {
-            return "设置"
-        }
+        // Two not-ready reasons need two different words: onboarding is still
+        // owed (设置), or onboarding is done but no usable key was read in this
+        // process (未就绪) — the latter must not bounce the user back into a
+        // 设置 they already finished. 就绪 below stays gated on `isReady`, so a
+        // merely-saved or unreadable key can never be called ready here.
+        if !companionManager.hasCompletedOnboarding { return "设置" }
+        if !isReady { return "未就绪" }
         if !companionManager.isOverlayVisible {
             return "就绪"
         }
