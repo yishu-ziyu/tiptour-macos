@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "quality": "overclaiming-speech",
+  "description": "Reviewer testdata: an overclaiming package. All six layers are present and the independent state shows the click, but the final speech claims 已确认 (a system-verified confirmation) while the receipt only carries delivery_confirmed on a delivery-sufficient step and no system-verified basis. Work order 02's rule — a confirmation may only be spoken for steps the system independently verified — must FAIL this package (exit code 1) despite status=passed and passed=true. Not product evidence — it only exercises the reviewer.",
+  "work_order": "INFRA-3",
+  "commit": "0000000000000000000000000000000000000000",
+  "branch": "feat/her-acceptance-infrastructure",
+  "app_bundle": "Her.app",
+  "bundle_id": "com.yishuziyu.her",
+  "team_id": "87DM76C54G",
+  "entrypoint": "python3 scripts/acceptance/verify_evidence.py --self-test",
+  "provider_connection_attempted": true,
+  "synthetic_audio": true,
+  "microphone_opened": false,
+  "desktop_fixture_only": true,
+  "mode": "full",
+  "proof": true,
+  "passed": true,
+  "exit_code": 0,
+  "scenarios": [
+    {
+      "name": "single_step_right_setting",
+      "title": "One-step spatial click",
+      "status": "passed",
+      "user_words": "点击右边的设置按钮",
+      "model_tool_arguments": [
+        {
+          "name": "act_on_screen",
+          "arguments": "{\"goal\":\"点击右边的设置按钮\",\"intent\":\"new\",\"action\":\"click\",\"target_label\":\"设置\",\"region\":\"right\"}",
+          "normalized_arguments": "{\"goal\":\"点击右边的设置按钮\",\"intent\":\"new\",\"action\":\"click\",\"target_label\":\"设置\",\"region\":\"right\"}"
+        }
+      ],
+      "task_turn_attempt_ids": {
+        "task_id": "11111111-2222-3333-4444-555555555555",
+        "turn_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "target_version": 1,
+        "action_attempt_ids": ["attempt-0001"],
+        "observation_ids": ["obs-0001"]
+      },
+      "her_receipt": {
+        "goal": "点击右边的设置按钮",
+        "status": "completed",
+        "actions": ["click「设置」：动作已送达"],
+        "detail": "任务步骤均已结束；各步完成依据已记录在操作历史中。",
+        "app": "com.apple.Safari",
+        "task_id": "11111111-2222-3333-4444-555555555555",
+        "turn_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "target_version": 1,
+        "prior_actions": [],
+        "current_actions": [
+          {
+            "id": "attempt-0001",
+            "observationID": "obs-0001",
+            "app": "com.apple.Safari",
+            "targetID": "target-right-setting",
+            "label": "设置",
+            "action": "click",
+            "decision_packet": {"action": "click", "where": {"region": "right"}, "evidence": ["action_locked", "target_exact", "location_filtered_in_code"]},
+            "completionPolicy": "delivery_sufficient",
+            "delivery": "sent",
+            "outcomeEvidence": "not_observed",
+            "detail": "driver confirmed delivery",
+            "completionBasis": "delivery_confirmed",
+            "satisfied": true,
+            "verified": false
+          }
+        ],
+        "verified_action_history": [],
+        "satisfied_action_history": ["click「设置」：动作已送达"],
+        "completed_step_count": 1,
+        "total_step_count": 1
+      },
+      "independent_state": {
+        "before": {"selected": null, "clicks": 0, "menu_open": false, "events": [], "page_views": 2},
+        "after": {"selected": "right-setting", "clicks": 1, "menu_open": false, "events": ["right-setting"], "page_views": 2},
+        "new_events": ["right-setting"]
+      },
+      "final_speech": ["已确认操作结果，右边的设置已经调整好了。"],
+      "failure_recovery": {
+        "fault_injected": false,
+        "recovery_evidence": null,
+        "note": "No fault was injected; nothing to recover."
+      },
+      "basis": [
+        "The recorded basis repeats the product claim without the system-verified outcome the spoken confirmation would require."
+      ],
+      "failure_reasons": [],
+      "attempts": [
+        {
+          "utterance": {"text": "点击右边的设置按钮", "synthetic": true, "metadata_only": true},
+          "probe": {"argv": ["<mock>Her.app/Contents/MacOS/Her", "--voice-task-probe", "com.apple.Safari", "<utterance-pcm>", "<attempt-dir>"]},
+          "independent_state": {"before": {"selected": null, "clicks": 0, "events": []}, "after": {"selected": "right-setting", "clicks": 1, "events": ["right-setting"]}},
+          "process_exit": {"pid": 4244, "self_exited": true, "returncode": 0, "timed_out": false},
+          "cleanup": {"owned_processes_remaining": 0},
+          "mock": false
+        }
+      ]
+    }
+  ]
+}
