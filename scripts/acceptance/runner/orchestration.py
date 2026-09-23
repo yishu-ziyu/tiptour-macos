@@ -29,7 +29,7 @@ import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import browser_stage, dry_run, evidence, paths, provider_shapes, run_mutex, scenarios as scenario_defs
+from . import browser_stage, dry_run, evidence, paths, provider_shapes, run_mutex, runner_faults, scenarios as scenario_defs
 from .app_identity import inspect_app_identity, resolve_app_path
 from .browser_stage import BrowserStageError, reload_controlled_page, stage_controlled_page
 from .fixture_page import FixtureError, FixtureServer
@@ -226,6 +226,7 @@ def _attempt_scenario_evidence(
     state_after: dict,
     cleanup_record: dict,
     mock: bool,
+    fault_injected: dict | None = None,
 ) -> dict:
     evidence_payload = dict(verdict.evidence)
     evidence_payload.setdefault("user_words", scenario.user_words)
@@ -245,11 +246,17 @@ def _attempt_scenario_evidence(
         "cleanup": cleanup_record,
         "mock": mock,
         "verdict": verdict.to_dict(),
+        # What this attempt did to the environment it was measured against: the
+        # fault projection {kind, armed_at, fired, target, authorized_by} when the
+        # scenario declares one, otherwise the explicit `False` that says no
+        # runner-side fault touched this attempt.
+        "failure_recovery": {"fault_injected": fault_injected if fault_injected else False},
     }
 
 
 def _failure_recovery_record(scenario, verdict_status: str, verdict_evidence: dict,
-                             cleanup: dict, rerun_hygiene: dict) -> dict:
+                             cleanup: dict, rerun_hygiene: dict,
+                             fault_injected: dict | None = None) -> dict:
     if scenario.name == "unknown_delivery_fault_recovery":
         if verdict_status == STATUS_PENDING:
             return {
@@ -268,16 +275,233 @@ def _failure_recovery_record(scenario, verdict_status: str, verdict_evidence: di
                      "comparing independent /state before and after."),
             "rerun_hygiene": rerun_hygiene,
         }
+    if fault_injected:
+        note = ("A runner-side fault was injected for this scenario: the attempt's "
+                "failure_recovery.fault_injected carries which primitive was armed, when, "
+                "whether it fired and what it targeted. The post-run facts that matter for "
+                "reruns are still recorded: probe process exit, fixture shutdown, port "
+                "release and the next run's clean start.")
+    else:
+        note = ("No fault is injected in this scenario. The runner still records the "
+                "post-run dedup/recovery facts that matter for reruns: probe process "
+                "exit, fixture shutdown, port release and the next run's clean start.")
     return {
-        "fault_injected": False,
+        "fault_injected": fault_injected if fault_injected else False,
         "recovery_evidence": {
             "cleanup": cleanup,
-            "note": ("No fault is injected in this scenario. The runner still records the "
-                     "post-run dedup/recovery facts that matter for reruns: probe process "
-                     "exit, fixture shutdown, port release and the next run's clean start."),
+            "note": note,
         },
         "rerun_hygiene": rerun_hygiene,
     }
+
+# ------------------------------------------------------ scenario fault wiring
+
+# A scenario declares a runner-side fault in its `expectations` block. It is
+# armed at one exact point - immediately before `run_probe` - so the attempt that
+# follows is measured against an environment this run broke on purpose, and the
+# break itself is on the record instead of being something a reviewer has to
+# infer from the verdict.
+#
+#   "expectations": {"fault": {"kind": "fixture_kill_after", "seconds": 0.4,
+#                              "reason": "prove recovery from a lost page"}}
+#   "expectations": {"fault": {"kind": "state_delay_after", "seconds": 1.5}}
+#   "expectations": {"fault": {"kind": "page_navigate_away",
+#                              "authorized_by": "A Integrator:2026-09-23"}}
+#
+# The background primitives (`fixture_kill_after`, `state_delay_after`) only ever
+# act on this run's registry-owned fixture child or on the runner's own /state
+# readback channel. The foreground primitive (`page_navigate_away`) runs only
+# with a named human and a date; without one it is refused and the refusal is
+# what lands in the record, so no scenario can steal the desktop on its own.
+SCENARIO_FAULT_KINDS = ("fixture_kill_after", "state_delay_after", "page_navigate_away")
+
+
+def _scenario_fault_spec(scenario) -> dict | None:
+    """The fault a scenario declares, or None when it declares none.
+
+    A scenario with no fault is the normal case and stays `fault_injected: False`
+    everywhere; the wiring below never invents a fault for a scenario that did
+    not ask for one.
+    """
+    expectations = getattr(scenario, "expectations", None)
+    if not isinstance(expectations, dict):
+        return None
+    spec = expectations.get("fault")
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        return {"kind": spec, "seconds": None,
+                "refusal": ("a scenario's fault must be an object with a 'kind', got "
+                            f"{spec!r}")}
+    return dict(spec)
+
+
+def _arm_scenario_fault(spec: dict, fixture: FixtureServer,
+                        registry: OwnedProcessRegistry, run_index: int) -> dict:
+    """Arm the declared fault immediately before the probe for `run_index`.
+
+    Every branch returns the primitive's own fault record - armed or refused -
+    so the caller can attach it to the attempt without inspecting the primitive.
+    """
+    kind = spec.get("kind")
+    reason = spec.get("reason") or f"scenario fault armed before attempt {run_index}"
+    if kind == "fixture_kill_after":
+        return runner_faults.kill_fixture_after(
+            fixture, spec.get("seconds"), registry, reason=reason)
+    if kind == "state_delay_after":
+        return runner_faults.delay_state_after(fixture, spec.get("seconds"), reason=reason)
+    if kind == "page_navigate_away":
+        # Foreground: never automatic. `authorized_by` must name a human and a
+        # date; `navigate_page_away` refuses without them and says so on the
+        # record, which is what the attempt then carries.
+        return runner_faults.navigate_page_away(
+            confirm=True,
+            authorized_by=spec.get("authorized_by"),
+            url=spec.get("url") or runner_faults.DEFAULT_NAVIGATE_URL,
+        )
+    refusal = spec.get("refusal") or (f"unknown fault kind {kind!r}; expected one of "
+                                      f"{', '.join(SCENARIO_FAULT_KINDS)}")
+    return {
+        "schema_version": runner_faults.FAULT_RECORD_SCHEMA_VERSION,
+        "kind": kind,
+        "target_pid_or_url": None,
+        "armed_at": _utc_now_iso(),
+        "armed": False,
+        "refused": True,
+        "refusal": refusal,
+    }
+
+
+def _fault_injected_projection(record: dict | None) -> dict | None:
+    """Project a fault record into the attempt-sized `fault_injected` value.
+
+    `{kind, armed_at, fired, target, authorized_by}` is what a reviewer needs to
+    re-derive what this attempt did to its own environment: which primitive,
+    when it was armed, whether it actually fired, and what it was aimed at (a
+    registry-owned PID, the runner's /state readback, or the controlled browser).
+    `authorized_by` is non-None only for the foreground primitive; the two
+    background primitives need no named human because they never change the
+    foreground. A refusal is carried as `refused: true` with its reason, so a
+    fault that declined to fire is visible as a refusal rather than as a silent
+    no-op.
+    """
+    if not isinstance(record, dict):
+        return None
+    projected = runner_faults.armed_faults([record])
+    return {
+        "kind": record.get("kind"),
+        "armed_at": record.get("armed_at"),
+        "fired": bool(projected[0].get("fired")) if projected else False,
+        "target": record.get("target_pid_or_url"),
+        "authorized_by": record.get("authorized_by"),
+        "armed": bool(record.get("armed")),
+        "refused": bool(record.get("refused")),
+        "refusal": record.get("refusal"),
+    }
+
+
+# ------------------------------------------------ manual protocol review rule
+
+# A manual protocol's step records its machine verification as
+# `{expected: "fail", ok: false, matched: true}` for a negative check ("the
+# keychain item must be gone"). That record is a *measurement*, not a verdict.
+# The reviewer decides what it means, and the integrator's rule is explicit: a
+# negative match counts as a pass only when the protocol author marked the step
+# `"negative_check": true`. Without the marker a negative match is still judged
+# FAIL, because "the thing I asked about was absent" only proves the contract
+# when the protocol shows the absence was the expectation rather than a read
+# that drifted.
+NEGATIVE_CHECK_MARKER = "negative_check"
+NEGATIVE_EXPECTATIONS = ("fail", "absent", "false")
+
+REVIEW_PASSED = "pass"
+REVIEW_FAILED = "fail"
+REVIEW_UNDETERMINED = "undetermined"
+
+
+def _step_verification(step: dict) -> dict:
+    """The verification of a recorded step, or of a protocol step's `verify`."""
+    if not isinstance(step, dict):
+        return {}
+    verification = step.get("verification")
+    if isinstance(verification, dict):
+        return verification
+    verify = step.get("verify")
+    return verify if isinstance(verify, dict) else {}
+
+
+def _step_negative_check_marked(step: dict, verification: dict) -> bool:
+    """True only when the protocol author opted the step in as a negative check.
+
+    The marker is read from the recorded step or the recorded verification; an
+    absent, false or non-boolean value is *not* a marker, so a protocol cannot
+    get the negative-check treatment by leaving the field out.
+    """
+    for source in (step, verification):
+        if isinstance(source, dict) and source.get(NEGATIVE_CHECK_MARKER) is True:
+            return True
+    return False
+
+
+def review_manual_step_verification(step: dict, verification: dict | None = None) -> dict:
+    """Review one manual step's machine verification.
+
+    Returns `{verdict, reason, ...}` with `verdict` in
+    `pass`/`fail`/`undetermined`:
+
+    * no verification, or a verification with no answer (`matched: null`) is
+      `undetermined` - the machine did not decide, so the reviewer does not
+      either;
+    * `matched: false` is a `fail` whatever the expectation was;
+    * `matched: true` with a positive expectation (`expect: pass`) is a `pass`;
+    * `matched: true` with a negative expectation (`expect: fail`) is a `pass`
+      **only** when the step carries `"negative_check": true`. An unmarked
+      negative match is a `fail`: the reviewer never upgrades a measurement into
+      a contract proof the protocol did not claim.
+    """
+    recorded = verification if verification is not None else _step_verification(step)
+    if not isinstance(recorded, dict) or not recorded:
+        return {"verdict": REVIEW_UNDETERMINED,
+                "reason": "the step has no machine verification to review",
+                "negative_check": False, "marked": False}
+    negative = (recorded.get("expected") in NEGATIVE_EXPECTATIONS
+                or _step_verification(step).get("expect") in NEGATIVE_EXPECTATIONS)
+    marked = _step_negative_check_marked(step, recorded)
+    review = {
+        "step": step.get("id") if isinstance(step, dict) else None,
+        "kind": recorded.get("kind"),
+        "expected": recorded.get("expected"),
+        "ok": recorded.get("ok"),
+        "matched": recorded.get("matched"),
+        "negative_check": negative,
+        "marked": marked,
+        "verdict": REVIEW_UNDETERMINED,
+        "reason": "",
+    }
+    if recorded.get("matched") is None:
+        review["reason"] = ("the verification was undetermined, so no verdict is "
+                            "inferred for this step")
+        return review
+    if recorded.get("matched") is False:
+        review["verdict"] = REVIEW_FAILED
+        review["reason"] = ("the machine verification did not match its expectation: "
+                            f"{recorded.get('summary') or recorded}")
+        return review
+    if not negative:
+        review["verdict"] = REVIEW_PASSED
+        review["reason"] = "the machine verification matched its expectation"
+        return review
+    if marked:
+        review["verdict"] = REVIEW_PASSED
+        review["reason"] = ("a declared negative check: the step asked for the thing to be "
+                            "absent and it was absent, so ok=false with matched=true is the "
+                            "passing outcome")
+        return review
+    review["verdict"] = REVIEW_FAILED
+    review["reason"] = (f"a negative expectation is only a pass when the step carries "
+                        f"{NEGATIVE_CHECK_MARKER!r}: true; this step matched with ok=false "
+                        "but was never declared a negative check, so it is judged FAIL")
+    return review
 
 
 def _synthesize_or_placeholder(text: str, cache_dir: Path, mode: str) -> tuple[dict, Path | None]:
@@ -511,153 +735,203 @@ def _run_acceptance_locked(options: RunOptions, abort: AbortState, run_lock) -> 
     fixture = FixtureServer(out_dir, registry)
     fixture_record: dict = {}
     frontmost_stop_reasons: list[str] = []
+    # One guarantee for the rest of the run: the fixture child registered in
+    # this run's OwnedProcessRegistry is stopped on *every* exit path - normal,
+    # blocked, interrupted, or an exception that escapes the scenario loop -
+    # before control leaves this function. The release is idempotent, so the
+    # paths that already stop it keep their own evidence, and it only ever
+    # signals processes the registry owns (the user's Her is never in it).
     try:
-        fixture_record["start"] = fixture.start()
-        fixture.assert_controlled_page_marker()
-        fixture_record["controlled_page_marker_verified"] = True
-        baseline_state = fixture.reset()
-        fixture_record["reset"] = baseline_state
-        if any((baseline_state.get(key) not in (None, False, 0, [])) for key in ("selected", "clicks", "menu_open", "events")):
-            raise FixtureError(
-                f"/state was not clean after reset: {json.dumps(baseline_state, ensure_ascii=False)}"
-            )
-        fixture_record["state_clean_after_reset"] = True
-        page_views_before_browser = fixture.state().get("page_views")
-        fixture_record["page_views_before_browser_open"] = page_views_before_browser
-
-        if options.mode == "full":
-            try:
-                environment["browser_stage"] = stage_controlled_page(fixture, page_views_before_browser)
-            except (BrowserStageError, FixtureError) as error:
-                environment["browser_stage"] = {"error": str(error)}
-                print(f"Browser staging failed: {error}", flush=True)
-            else:
-                # Staging is proof, not a warning: if Safari was never proven to
-                # be the frontmost app on the staged controlled page, there is no
-                # desktop to act on and no scenario may make a provider or Driver
-                # call. The reasons are carried out verbatim, and the same
-                # question is re-asked before every scenario below.
-                frontmost_stop_reasons = _frontmost_stop_reasons(environment["browser_stage"])
-                if frontmost_stop_reasons:
-                    environment["frontmost_gate"] = _frontmost_gate_record(
-                        environment["browser_stage"], frontmost_stop_reasons,
-                        phase="staged_page")
-                    print("Frontmost precondition BLOCKED: "
-                          + "; ".join(frontmost_stop_reasons), flush=True)
-        else:
-            environment["browser_stage"] = {
-                "skipped": True,
-                "reason": "dry-run never opens a browser or touches the desktop",
-            }
-            environment["dry_run_boundaries"] = dry_run.describe_dry_run_boundaries()
-    except FixtureError as error:
-        blocked_reason = f"Controlled-page environment failed: {error}"
-        print(blocked_reason, flush=True)
-        fixture_record["error"] = str(error)
-        environment["fixture"] = fixture_record
-        for scenario in loaded_scenarios:
-            scenario_results.append({
-                "name": scenario.name, "title": scenario.title, "status": "blocked",
-                "user_words": scenario.user_words, "model_tool_arguments": None,
-                "task_turn_attempt_ids": None, "her_receipt": None,
-                "independent_state": None, "final_speech": None,
-                "failure_recovery": {"fault_injected": False, "recovery_evidence": None,
-                                     "note": "Blocked before any scenario ran."},
-                "basis": [], "failure_reasons": [str(error)], "attempts": [],
-            })
-        cleanup = registry.terminate_all()
-        return _finish(context, options, scenario_results,
-                       {"fixture": fixture_record, "cleanup": cleanup},
-                       exit_code=1, blocked_reason=blocked_reason)
-
-    if frontmost_stop_reasons:
-        # The staged page's foreground was never proven, so not one scenario may
-        # run: every scenario is BLOCKED with the exact stop reason, the fixture
-        # this run started is stopped, and the aggregate report still exists.
-        # Zero provider calls, zero Driver calls, zero desktop side effects.
-        blocked_reason = ("Frontmost precondition BLOCKED: "
-                          + "; ".join(frontmost_stop_reasons))
-        scenario_results = _blocked_scenario_records(
-            loaded_scenarios, frontmost_stop_reasons,
-            "Blocked before any provider or Driver call: the staged controlled "
-            "page was never proven frontmost, so there was no desktop to act on.",
-            extra={"frontmost_gate": environment["frontmost_gate"]},
-        )
-        fixture_record["stop"] = fixture.stop()
-        fixture_record["port_released_after_stop"] = not port_accepts_connections(
-            paths.FIXTURE_HOST, paths.FIXTURE_PORT, timeout_seconds=2.0
-        )
-        environment["fixture"] = fixture_record
-        environment["cleanup"] = {
-            "terminated": registry.terminate_all(),
-            "owned_processes_remaining": len(registry.running()),
-        }
-        return _finish(context, options, scenario_results, environment,
-                       exit_code=1, blocked_reason=blocked_reason)
-
-    # ---- scenarios ----
-    # The per-scenario `except Exception` records a crash as a failed scenario.
-    # Anything that escapes it (a BaseException from cleanup, a signal whose
-    # handler raised, SystemExit, ...) is caught, the cleanup `finally` still
-    # runs, and the aggregate report is then written from `_finish_aborted`.
-    escaped: BaseException | None = None
-    try:
-        for scenario in loaded_scenarios:
-            try:
-                scenario_results.append(
-                    _run_scenario(scenario, options, context, fixture, registry, environment,
-                                  abort=abort)
+        try:
+            fixture_record["start"] = fixture.start()
+            fixture.assert_controlled_page_marker()
+            fixture_record["controlled_page_marker_verified"] = True
+            baseline_state = fixture.reset()
+            fixture_record["reset"] = baseline_state
+            if any((baseline_state.get(key) not in (None, False, 0, [])) for key in ("selected", "clicks", "menu_open", "events")):
+                raise FixtureError(
+                    f"/state was not clean after reset: {json.dumps(baseline_state, ensure_ascii=False)}"
                 )
-            except Exception as error:  # never die without evidence
-                traceback_text = traceback.format_exc(limit=4)
-                print(f"Scenario {scenario.name} crashed: {error}", flush=True)
-                if abort.requested:
-                    scenario_results.append(_aborted_scenario_record(
-                        scenario, abort, started=True, error=error,
-                        traceback_text=traceback_text))
-                    continue
+            fixture_record["state_clean_after_reset"] = True
+            page_views_before_browser = fixture.state().get("page_views")
+            fixture_record["page_views_before_browser_open"] = page_views_before_browser
+
+            if options.mode == "full":
+                try:
+                    environment["browser_stage"] = stage_controlled_page(fixture, page_views_before_browser)
+                except (BrowserStageError, FixtureError) as error:
+                    environment["browser_stage"] = {"error": str(error)}
+                    print(f"Browser staging failed: {error}", flush=True)
+                else:
+                    # Staging is proof, not a warning: if Safari was never proven to
+                    # be the frontmost app on the staged controlled page, there is no
+                    # desktop to act on and no scenario may make a provider or Driver
+                    # call. The reasons are carried out verbatim, and the same
+                    # question is re-asked before every scenario below.
+                    frontmost_stop_reasons = _frontmost_stop_reasons(environment["browser_stage"])
+                    if frontmost_stop_reasons:
+                        environment["frontmost_gate"] = _frontmost_gate_record(
+                            environment["browser_stage"], frontmost_stop_reasons,
+                            phase="staged_page")
+                        print("Frontmost precondition BLOCKED: "
+                              + "; ".join(frontmost_stop_reasons), flush=True)
+            else:
+                environment["browser_stage"] = {
+                    "skipped": True,
+                    "reason": "dry-run never opens a browser or touches the desktop",
+                }
+                environment["dry_run_boundaries"] = dry_run.describe_dry_run_boundaries()
+        except Exception as error:  # noqa: BLE001 - a controlled-page failure is evidence
+            # Anything that goes wrong while the fixture is being brought up -
+            # FixtureError, an OSError from the spawn, an unexpected error from
+            # the browser staging - becomes a BLOCKED package instead of an
+            # unwound stack: the fixture child this run already registered is
+            # still stopped (here and again in the release `finally`), so a
+            # failed start can never leave port 19475 occupied behind the run.
+            blocked_reason = f"Controlled-page environment failed: {error}"
+            print(blocked_reason, flush=True)
+            fixture_record["error"] = str(error)
+            fixture_record["error_type"] = type(error).__name__
+            environment["fixture"] = fixture_record
+            for scenario in loaded_scenarios:
                 scenario_results.append({
-                    "name": scenario.name, "title": scenario.title, "status": STATUS_FAILED,
+                    "name": scenario.name, "title": scenario.title, "status": "blocked",
                     "user_words": scenario.user_words, "model_tool_arguments": None,
                     "task_turn_attempt_ids": None, "her_receipt": None,
                     "independent_state": None, "final_speech": None,
                     "failure_recovery": {"fault_injected": False, "recovery_evidence": None,
-                                         "note": "Scenario raised instead of producing a verdict."},
-                    "basis": [], "failure_reasons": [f"{error}", traceback_text],
-                    "attempts": [],
+                                         "note": "Blocked before any scenario ran."},
+                    "basis": [], "failure_reasons": [str(error)], "attempts": [],
                 })
-    except BaseException as unexpected:  # noqa: BLE001 - a report must survive this
-        escaped = unexpected
+            # Release this run's children *before* writing the package, so the
+            # BLOCKED report carries the stop itself rather than only the
+            # intention to stop: the fixture record, the remaining-owned count
+            # and the port-release answer are on the evidence a reviewer reads.
+            # The `finally` below runs the same idempotent release again and
+            # re-asserts the same facts.
+            _release_owned_fixture(fixture, registry, fixture_record, environment)
+            return _finish(context, options, scenario_results, environment,
+                           exit_code=1, blocked_reason=blocked_reason)
+
+        if frontmost_stop_reasons:
+            # The staged page's foreground was never proven, so not one scenario may
+            # run: every scenario is BLOCKED with the exact stop reason, the fixture
+            # this run started is stopped, and the aggregate report still exists.
+            # Zero provider calls, zero Driver calls, zero desktop side effects.
+            blocked_reason = ("Frontmost precondition BLOCKED: "
+                              + "; ".join(frontmost_stop_reasons))
+            scenario_results = _blocked_scenario_records(
+                loaded_scenarios, frontmost_stop_reasons,
+                "Blocked before any provider or Driver call: the staged controlled "
+                "page was never proven frontmost, so there was no desktop to act on.",
+                extra={"frontmost_gate": environment["frontmost_gate"]},
+            )
+            _release_owned_fixture(fixture, registry, fixture_record, environment)
+            return _finish(context, options, scenario_results, environment,
+                           exit_code=1, blocked_reason=blocked_reason)
+
+        # ---- scenarios ----
+        # The per-scenario `except Exception` records a crash as a failed scenario.
+        # Anything that escapes it (a BaseException from cleanup, a signal whose
+        # handler raised, SystemExit, ...) is caught, the cleanup `finally` still
+        # runs, and the aggregate report is then written from `_finish_aborted`.
+        escaped: BaseException | None = None
+        try:
+            for scenario in loaded_scenarios:
+                try:
+                    scenario_results.append(
+                        _run_scenario(scenario, options, context, fixture, registry, environment,
+                                      abort=abort)
+                    )
+                except Exception as error:  # never die without evidence
+                    traceback_text = traceback.format_exc(limit=4)
+                    print(f"Scenario {scenario.name} crashed: {error}", flush=True)
+                    if abort.requested:
+                        scenario_results.append(_aborted_scenario_record(
+                            scenario, abort, started=True, error=error,
+                            traceback_text=traceback_text))
+                        continue
+                    scenario_results.append({
+                        "name": scenario.name, "title": scenario.title, "status": STATUS_FAILED,
+                        "user_words": scenario.user_words, "model_tool_arguments": None,
+                        "task_turn_attempt_ids": None, "her_receipt": None,
+                        "independent_state": None, "final_speech": None,
+                        "failure_recovery": {"fault_injected": False, "recovery_evidence": None,
+                                             "note": "Scenario raised instead of producing a verdict."},
+                        "basis": [], "failure_reasons": [f"{error}", traceback_text],
+                        "attempts": [],
+                    })
+        except BaseException as unexpected:  # noqa: BLE001 - a report must survive this
+            escaped = unexpected
+        finally:
+            _release_owned_fixture(fixture, registry, fixture_record, environment)
+            environment["user_her_processes"] = find_processes_matching(HER_PROCESS_PATTERN)
+
+        if escaped is not None or abort.requested:
+            # Either an exception escaped the scenario loop, or the run was asked to
+            # stop (the flag is what the signal handler left behind). Both end here:
+            # the same guaranteed-report path, with the interrupt recorded.
+            return _finish_aborted(context, options, loaded_scenarios, scenario_results,
+                                   environment, registry, abort, escaped)
+
+        # Exit code is meaningful: 0 only when every scenario passed. A pending
+        # scenario (work order not merged yet) is not a fake pass and not a runner
+        # failure — it exits non-zero with the reproduction command recorded.
+        statuses = [scenario["status"] for scenario in scenario_results]
+        exit_code = 0 if statuses and all(status == STATUS_PASSED for status in statuses) else 1
+        return _finish(context, options, scenario_results, environment, exit_code=exit_code)
     finally:
-        environment["fixture"] = fixture_record
-        environment["fixture"]["stop"] = fixture.stop()
-        environment["fixture"]["port_released_after_stop"] = not port_accepts_connections(
-            paths.FIXTURE_HOST, paths.FIXTURE_PORT, timeout_seconds=2.0
-        )
-        environment["cleanup"] = {"terminated": registry.terminate_all()}
-        environment["cleanup"]["owned_processes_remaining"] = len(registry.running())
-        environment["user_her_processes"] = find_processes_matching(HER_PROCESS_PATTERN)
-        environment["rerun_hygiene"] = {
-            "fixture_port_free": environment["fixture"]["port_released_after_stop"],
-            "no_owned_processes_remaining": environment["cleanup"]["owned_processes_remaining"] == 0,
-            "fixture_state_is_in_memory": True,
-            "note": ("A rerun starts the fixture fresh and resets /state; stale state cannot "
-                     "survive because the fixture process itself is stopped and restarted."),
-        }
+        _release_owned_fixture(fixture, registry, fixture_record, environment)
 
-    if escaped is not None or abort.requested:
-        # Either an exception escaped the scenario loop, or the run was asked to
-        # stop (the flag is what the signal handler left behind). Both end here:
-        # the same guaranteed-report path, with the interrupt recorded.
-        return _finish_aborted(context, options, loaded_scenarios, scenario_results,
-                               environment, registry, abort, escaped)
 
-    # Exit code is meaningful: 0 only when every scenario passed. A pending
-    # scenario (work order not merged yet) is not a fake pass and not a runner
-    # failure — it exits non-zero with the reproduction command recorded.
-    statuses = [scenario["status"] for scenario in scenario_results]
-    exit_code = 0 if statuses and all(status == STATUS_PASSED for status in statuses) else 1
-    return _finish(context, options, scenario_results, environment, exit_code=exit_code)
+def _release_owned_fixture(fixture: FixtureServer, registry: OwnedProcessRegistry,
+                           fixture_record: dict, environment: dict) -> dict:
+    """Stop the fixture child this run registered, plus every other owned child.
+
+    This is the single release point, called from the `finally` that wraps the
+    whole fixture phase of a run: normal end, blocked end, SIGINT/SIGTERM abort,
+    or an exception escaping the scenario loop all reach it. It is deliberately
+    idempotent - `FixtureServer.stop()` and `registry.terminate_all()` are both
+    safe to call again - and it only ever *adds* evidence: a stop record that a
+    path already wrote is kept, the port-release answer and the remaining-owned
+    count are re-verified and re-asserted, and nothing the registry does not own
+    can be signalled (the user's Her is never registered here).
+
+    The reason this exists: a fixture child that spawned but was never stopped
+    keeps 127.0.0.1:19475 listening, and every later run then starts with
+    "Port 19475 is already occupied" - a BLOCKED environment, not a verdict. The
+    runner's own children are therefore released before control leaves the run,
+    whatever the run did.
+    """
+    release: dict = {
+        "fixture_owned_by_this_run": fixture.owned is not None,
+        "stop": {"stopped": False, "reason": "the fixture child had already been stopped"},
+        "terminated": [],
+        "owned_processes_remaining": len(registry.running()),
+        "port_released": False,
+    }
+    if fixture.owned is not None:
+        release["stop"] = fixture.stop()
+    release["terminated"] = registry.terminate_all()
+    release["owned_processes_remaining"] = len(registry.running())
+    release["port_released"] = not port_accepts_connections(
+        paths.FIXTURE_HOST, paths.FIXTURE_PORT, timeout_seconds=2.0
+    )
+    fixture_record.setdefault("stop", release["stop"])
+    fixture_record["port_released_after_stop"] = release["port_released"]
+    environment["fixture"] = fixture_record
+    cleanup = environment.setdefault("cleanup", {})
+    if not cleanup.get("terminated"):
+        cleanup["terminated"] = release["terminated"]
+    cleanup["owned_processes_remaining"] = release["owned_processes_remaining"]
+    environment.setdefault("rerun_hygiene", {
+        "fixture_port_free": release["port_released"],
+        "no_owned_processes_remaining": release["owned_processes_remaining"] == 0,
+        "fixture_state_is_in_memory": True,
+        "note": ("A rerun starts the fixture fresh and resets /state; stale state cannot "
+                 "survive because the fixture process itself is stopped and restarted."),
+    })
+    return release
 
 
 def _aborted_scenario_record(scenario, abort: AbortState, started: bool,
@@ -956,6 +1230,7 @@ def _run_scenario(scenario, options: RunOptions, context: RunContext,
     attempt_artifacts: list[str] = []
     statuses: list[str] = []
     scenario_directory = _scenario_directory(context.out_dir, scenario.name)
+    fault_spec = _scenario_fault_spec(scenario)
 
     # An interrupted run starts no new work. The scenario is recorded as
     # not_run/aborted with the reason; the attempts this run already settled are
@@ -1033,6 +1308,9 @@ def _run_scenario(scenario, options: RunOptions, context: RunContext,
             probe_record = dry_run.build_dry_run_probe_record(chain, attempt_directory)
             probe_report = chain.report
             state_before, state_after = dry_run.clone_chain_state(chain)
+            # A dry-run never calls run_probe, so there is no probe call to arm a
+            # fault against: the attempt records `fault_injected: False`.
+            fault_record = None
             mock = True
             # Dry-run still exercises the real fixture reset mechanics.
             fixture.reset()
@@ -1075,6 +1353,15 @@ def _run_scenario(scenario, options: RunOptions, context: RunContext,
                 return _frontmost_blocked_scenario(scenario, stop_reasons, stage,
                                                    run_index)
             state_before = _snapshot(fixture)
+            # The fault this scenario declared is armed here - the last moment
+            # before the probe - so the probe's environment is already broken
+            # when it starts, and the record of the break is attached to this
+            # attempt rather than reconstructed after the verdict.
+            fault_record = _arm_scenario_fault(fault_spec, fixture, registry, run_index)
+            if fault_record is not None:
+                print(f"[{scenario.name}] fault armed: {fault_record.get('kind')} "
+                      f"armed={fault_record.get('armed')} "
+                      f"armed_at={fault_record.get('armed_at')}", flush=True)
             probe_result = run_probe(request, registry,
                                      timeout_seconds=options.probe_timeout_seconds)
             probe_record = probe_result.to_dict()
@@ -1100,6 +1387,7 @@ def _run_scenario(scenario, options: RunOptions, context: RunContext,
             state_before, state_after,
             cleanup_record={"owned_processes_remaining": 0, "note": "recorded at run end"},
             mock=mock,
+            fault_injected=_fault_injected_projection(fault_record),
         ))
         statuses.append(verdict.status)
         artifact = _write_attempt_evidence(attempt_directory, context.started_at_iso,
@@ -1114,6 +1402,14 @@ def _run_scenario(scenario, options: RunOptions, context: RunContext,
         STATUS_PENDING if all(status == STATUS_PENDING for status in statuses) else STATUS_FAILED
     )
     last_verdict = attempts[-1]["verdict"] if attempts else {}
+    # The last attempt's fault projection is what the scenario-level
+    # `failure_recovery` records, so the aggregate and the per-attempt evidence
+    # can never disagree about whether a fault was injected.
+    injected_fault = None
+    if attempts:
+        candidate = (attempts[-1].get("failure_recovery") or {}).get("fault_injected")
+        if isinstance(candidate, dict):
+            injected_fault = candidate
     return {
         "name": scenario.name,
         "title": scenario.title,
@@ -1128,6 +1424,7 @@ def _run_scenario(scenario, options: RunOptions, context: RunContext,
             scenario, overall_status,
             last_verdict.get("evidence", {}) if last_verdict else {},
             {"note": "recorded at run end"}, environment.get("rerun_hygiene", {}),
+            fault_injected=injected_fault,
         ),
         "basis": last_verdict.get("basis", []),
         "failure_reasons": _merged_failure_reasons(attempts),
