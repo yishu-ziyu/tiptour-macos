@@ -5,7 +5,15 @@ import OSLog
 /// an explicit DEBUG launch option and stay in a bounded, private local file.
 @MainActor
 enum DesktopVoiceTrace {
-    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "TipTour", category: "VoiceTask")
+    private static let logger = Logger(subsystem: appIdentity, category: "VoiceTask")
+
+    /// WHY: the diagnostics directory must follow the identity of the bundle that is actually running,
+    /// so a Her build writes under "Her" instead of the old product's name baked into the source.
+    /// The leaf ("VoiceDiagnostics") is what carries meaning; the root is derived, never hardcoded.
+    /// Diagnostics written by older builds stay where they were - nothing is migrated or deleted.
+    private static var appIdentity: String {
+        Bundle.main.bundleIdentifier ?? "Her"
+    }
 
     static func event(_ name: String, turnID: String, fields: [String: String] = [:], privateFields: [String: String] = [:]) {
         let publicRecord = encodedEvent(name, turnID: turnID, fields: fields, privateFields: privateFields, includePrivate: false)
@@ -15,7 +23,8 @@ enum DesktopVoiceTrace {
         let record = encodedEvent(name, turnID: turnID, fields: fields, privateFields: privateFields, includePrivate: true)
         do {
             let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("TipTour/VoiceDiagnostics", isDirectory: true)
+                .appendingPathComponent(appIdentity, isDirectory: true)
+                .appendingPathComponent("VoiceDiagnostics", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700])
             let file = directory.appendingPathComponent("events.jsonl")
