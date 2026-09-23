@@ -1,0 +1,56 @@
+{
+  "conversation_format": 1,
+  "name": "right_setting_interrupt_then_cancel",
+  "app": "Her.app",
+  "fixture_url": "http://127.0.0.1:19475",
+  "trace_prefix": "conversation/right-setting-interrupt",
+  "acceptance": false,
+  "description": "A realistic voice timeline: one instruction, an interruption while the answer is still playing, a correction that must not re-execute the first action, a progress question that must not claim completion, then a cancel of the same task.",
+  "note": "Contract regression sample only - never acceptance evidence. No probe in any build can drive this timeline yet: the DEBUG probes accept one PCM (--voice-task-probe / --voice-route-probe) or exactly two (--voice-continuity-probe <progress.pcm> <cancel.pcm>), so a barge-in turn needs a new in-app probe mode and an Xcode rebuild. Until that lands this cassette pins the schema: scripts/acceptance/runner/conversation_driver.py validates it, plans one PCM per turn through synthetic_speech, and degrades only the one- and two-turn cases onto the existing probes (a two-turn script maps to voice_continuity in the documented progress-then-cancel order). This script itself maps to requires_new_probe.",
+  "turns": [
+    {
+      "text": "帮我把右边的设置按钮点一下",
+      "wait_ms": 0,
+      "barge_in": false,
+      "expect": {
+        "tool_call": "act_on_screen"
+      }
+    },
+    {
+      "text": "等一下，先别点",
+      "wait_ms": 1200,
+      "barge_in": true,
+      "expect": {
+        "no_new_action": true,
+        "speech_not_contains": ["已点击", "已确认"]
+      }
+    },
+    {
+      "text": "那先打开显示设置",
+      "wait_ms": 800,
+      "barge_in": false,
+      "expect": {
+        "tool_call": "act_on_screen",
+        "speech_contains": "显示设置"
+      }
+    },
+    {
+      "text": "这个任务进行到哪一步了？",
+      "wait_ms": 1500,
+      "barge_in": false,
+      "expect": {
+        "no_new_action": true,
+        "speech_not_contains": ["已确认 1/2", "已确认 2/2"]
+      }
+    },
+    {
+      "text": "取消这个任务",
+      "wait_ms": 1000,
+      "barge_in": false,
+      "expect": {
+        "tool_call": "task_control",
+        "speech_contains": "取消"
+      }
+    }
+  ]
+}

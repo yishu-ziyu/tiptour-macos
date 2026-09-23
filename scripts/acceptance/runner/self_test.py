@@ -19,7 +19,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import dry_run, evidence, orchestration, paths, run_mutex
+from . import conversation_driver, dry_run, evidence, orchestration, paths, run_mutex
 from .app_identity import inspect_app_identity
 from .fixture_page import FixtureError, FixtureServer
 from .process_control import (
@@ -1888,6 +1888,256 @@ def test_cassette_replay_is_contract_labeled(work_dir: Path) -> list[str]:
             "stale expectation is reported as a regression"]
 
 
+# ------------------------------------------------- conversation script schema
+
+
+def _conversation_globals(name: str) -> dict:
+    return {
+        "name": name,
+        "app": "Her.app",
+        "fixture_url": paths.FIXTURE_URL,
+        "trace_prefix": f"conversation/{name}",
+    }
+
+
+def _two_turn_conversation_script() -> dict:
+    """The degenerate case the existing continuity probe can still drive."""
+    script = _conversation_globals("progress_then_cancel_degenerate")
+    script["turns"] = [
+        {"text": "这个任务进行到哪一步了？", "wait_ms": 0, "barge_in": False,
+         "expect": {"no_new_action": True}},
+        {"text": "取消这个任务", "wait_ms": 900, "barge_in": False,
+         "expect": {"tool_call": "task_control"}},
+    ]
+    return script
+
+
+def _valid_conversation_scripts() -> list[tuple[str, dict]]:
+    single = _conversation_globals("single_utterance")
+    single["turns"] = [
+        {"text": "帮我把右边的设置按钮点一下", "expect": {"tool_call": "act_on_screen"}},
+    ]
+
+    # A barge-in is legal exactly when a previous turn exists to interrupt, and
+    # speech expectations may be a list of substrings.
+    barge_later = _conversation_globals("correction_after_barge_in")
+    barge_later["turns"] = [
+        {"text": "帮我把右边的设置按钮点一下", "wait_ms": 0, "barge_in": False,
+         "expect": {"tool_call": "act_on_screen"}},
+        {"text": "等一下，先别点", "wait_ms": 1200, "barge_in": True,
+         "expect": {"no_new_action": True, "speech_not_contains": ["已点击", "已确认"]}},
+    ]
+
+    return [
+        ("committed example cassette",
+         conversation_driver.load_script(conversation_driver.example_script_path())),
+        ("single-turn script", single),
+        ("two-turn script", _two_turn_conversation_script()),
+        ("barge-in on a later turn", barge_later),
+    ]
+
+
+def _invalid_conversation_scripts() -> list[tuple[str, dict, str]]:
+    barge_first = _conversation_globals("barge_in_on_the_first_turn")
+    barge_first["turns"] = [
+        {"text": "等一下，先别点", "wait_ms": 0, "barge_in": True,
+         "expect": {"no_new_action": True}},
+    ]
+
+    empty_turn = _conversation_globals("silent_turn_with_nothing_to_check")
+    empty_turn["turns"] = [
+        {"text": "   ", "expect": {"something_else": True}},
+    ]
+
+    too_many_turns = _conversation_globals("unbounded_conversation")
+    too_many_turns["turns"] = [
+        {"text": f"第 {index} 句话", "expect": {"no_new_action": True}}
+        for index in range(conversation_driver.MAX_TURNS + 1)
+    ]
+
+    missing_keys = _conversation_globals("missing_globals_and_a_negative_wait")
+    missing_keys.pop("trace_prefix")
+    missing_keys["turns"] = [
+        {"text": "取消这个任务", "wait_ms": -5, "expect": {}},
+    ]
+
+    unknown_keys = _conversation_globals("unknown_keys")
+    unknown_keys["surprise"] = 1
+    unknown_keys["turns"] = [
+        {"text": "取消这个任务", "surprise_turn": True, "expect": {"tool_call": "task_control"}},
+    ]
+
+    long_text = _conversation_globals("overlong_utterance")
+    long_text["turns"] = [
+        {"text": "取消" * conversation_driver.MAX_TURN_TEXT_CHARS,
+         "expect": {"tool_call": "task_control"}},
+    ]
+
+    empty_speech_list = _conversation_globals("empty_speech_expectation")
+    empty_speech_list["turns"] = [
+        {"text": "取消这个任务", "expect": {"speech_contains": []}},
+    ]
+
+    return [
+        ("barge_in on the first turn", barge_first, "barge_in"),
+        ("empty turn text and an unrecognizable expectation", empty_turn, "text"),
+        ("more turns than the schema allows", too_many_turns, str(conversation_driver.MAX_TURNS)),
+        ("missing global key with a negative wait", missing_keys, "trace_prefix"),
+        ("unknown turn/global keys", unknown_keys, "surprise"),
+        ("overlong utterance text", long_text, str(conversation_driver.MAX_TURN_TEXT_CHARS)),
+        ("empty speech expectation list", empty_speech_list, "speech_contains"),
+    ]
+
+
+def test_conversation_script_schema_and_probe_degradation(work_dir: Path) -> list[str]:
+    app_binary = Path("/Applications/Her.app/Contents/MacOS/Her")
+    cache_dir = work_dir / "conversation-utterances"
+    placeholder = synthesize_placeholder_for_self_tests
+
+    for label, script in _valid_conversation_scripts():
+        problems = conversation_driver.validate_script(script)
+        _check(problems == [], f"{label} was rejected by validate_script: {problems}")
+
+    for label, script, expected_fragment in _invalid_conversation_scripts():
+        problems = conversation_driver.validate_script(script)
+        _check(problems, f"{label} was accepted by validate_script")
+        _check(any(expected_fragment in problem for problem in problems),
+               f"{label}: expected a problem naming {expected_fragment!r}, got {problems}")
+
+    # The committed example must declare what it is: a contract sample, never
+    # acceptance evidence, and its barge-in sits on a turn that has a predecessor.
+    example = conversation_driver.load_script(conversation_driver.example_script_path())
+    _check(example.get("acceptance") is False,
+           "the conversation example must be labeled acceptance=false")
+    _check(conversation_driver.barge_in_turn_indices(example) == [1],
+           f"the example's barge-in turn is wrong: "
+           f"{conversation_driver.barge_in_turn_indices(example)}")
+    _check(conversation_driver.turn_count(example) <= conversation_driver.MAX_TURNS,
+           "the example itself exceeds the schema's turn bound")
+
+    # plan_utterances: one PCM per turn, in script order, through the same
+    # synthesis path the runner already uses (the placeholder here: no `say`,
+    # deterministic, and explicitly labeled as not real speech).
+    plans = conversation_driver.plan_utterances(example, cache_dir, synthesizer=placeholder)
+    _check(len(plans) == conversation_driver.turn_count(example),
+           f"expected one plan per turn: {len(plans)} plans for "
+           f"{conversation_driver.turn_count(example)} turns")
+    for index, plan in enumerate(plans):
+        _check(plan.text == example["turns"][index]["text"],
+               f"turn {index} text drifted from the script: {plan.text!r}")
+        _check(plan.pcm_path.is_file() and plan.pcm_path.stat().st_size > 0,
+               f"turn {index} produced no PCM: {plan.pcm_path}")
+        _check(plan.audio.is_real_speech is False,
+               "placeholder PCM must stay labeled as not real speech")
+    _check(plans[0].as_tuple() == (plans[0].text, plans[0].pcm_path),
+           "the (text, pcm_path) pair projection is wrong")
+    _check([plan.barge_in for plan in plans] == [False, True, False, False, False],
+           f"barge-in flags did not follow the script: {[p.barge_in for p in plans]}")
+    _check([plan.wait_ms for plan in plans] == [0, 1200, 800, 1500, 1000],
+           f"wait offsets did not follow the script: {[p.wait_ms for p in plans]}")
+    _check(conversation_driver.total_wait_ms(example) == 4500,
+           f"total wait is wrong: {conversation_driver.total_wait_ms(example)}")
+
+    # Fail closed: an unusable script never reaches synthesis.
+    try:
+        conversation_driver.plan_utterances(_invalid_conversation_scripts()[0][1],
+                                            cache_dir, synthesizer=placeholder)
+    except conversation_driver.ConversationScriptError:
+        pass
+    else:
+        raise SelfTestFailure("plan_utterances synthesized an invalid conversation script")
+
+    # Two turns degrade onto --voice-continuity-probe, and the argument order is
+    # the probe's documented progress-then-cancel order: turn 0 first.
+    two_turn = _two_turn_conversation_script()
+    two_plans = conversation_driver.plan_utterances(two_turn, cache_dir,
+                                                    synthesizer=placeholder)
+    mapping = conversation_driver.map_conversation_to_probe(two_turn, two_plans)
+    _check(mapping.mode == "voice_continuity" and not mapping.requires_new_probe,
+           f"a two-turn script must map onto voice_continuity: {mapping.to_dict()}")
+    _check(mapping.utterance_pcm_paths == [two_plans[0].pcm_path, two_plans[1].pcm_path],
+           "the continuity mapping must keep turn 0 first and turn 1 second")
+    attempt_dir = work_dir / "continuity-attempt"
+    continuity_argv = build_probe_argv(conversation_driver.to_probe_request(
+        mapping, app_binary, attempt_dir))
+    _check(continuity_argv == [str(app_binary), "--voice-continuity-probe",
+                               str(two_plans[0].pcm_path), str(two_plans[1].pcm_path),
+                               str(attempt_dir / "continuity-report.json")],
+           f"two-turn conversation mapped onto the wrong continuity argv: {continuity_argv}")
+    _check(continuity_argv.index(str(two_plans[0].pcm_path))
+           < continuity_argv.index(str(two_plans[1].pcm_path)),
+           f"the progress utterance must precede the cancel utterance: {continuity_argv}")
+
+    # One turn degrades onto the single-utterance voice_task probe.
+    single = _valid_conversation_scripts()[1][1]
+    single_plans = conversation_driver.plan_utterances(single, cache_dir,
+                                                       synthesizer=placeholder)
+    single_mapping = conversation_driver.map_conversation_to_probe(single, single_plans)
+    _check(single_mapping.mode == "voice_task" and not single_mapping.requires_new_probe,
+           f"a single-turn script must map onto voice_task: {single_mapping.to_dict()}")
+    task_dir = work_dir / "task-attempt"
+    task_argv = build_probe_argv(conversation_driver.to_probe_request(
+        single_mapping, app_binary, task_dir))
+    _check(task_argv == [str(app_binary), "--voice-task-probe", "com.apple.Safari",
+                         str(single_plans[0].pcm_path), str(task_dir)],
+           f"single-turn conversation mapped onto the wrong voice_task argv: {task_argv}")
+
+    # The barge-in conversation (and any 3+ turn script) is rebuild-gated: it
+    # must refuse to degrade rather than drop turns onto a probe that cannot
+    # play them back.
+    gated = conversation_driver.map_conversation_to_probe(example, plans)
+    _check(gated.mode == "unmapped" and gated.requires_new_probe is True,
+           f"a barge-in conversation must not map onto an existing probe: {gated.to_dict()}")
+    _check(conversation_driver.PROPOSED_CONVERSATION_PROBE_FLAG in gated.proposed_argv_template,
+           f"the rebuild-gated mapping must name the probe it needs: "
+           f"{gated.proposed_argv_template}")
+    _check("barge-in" in gated.reason,
+           f"the rebuild-gated reason must name the barge-in: {gated.reason}")
+    try:
+        conversation_driver.to_probe_request(gated, app_binary, attempt_dir)
+    except conversation_driver.ConversationScriptError as error:
+        _check("rebuild-gated" in str(error),
+               f"the refusal must say rebuild-gated: {error}")
+    else:
+        raise SelfTestFailure("a barge-in conversation was mapped onto an existing probe")
+
+    three_turns = _conversation_globals("three_turns_without_barge_in")
+    three_turns["turns"] = [
+        {"text": "帮我把右边的设置按钮点一下", "expect": {"tool_call": "act_on_screen"}},
+        {"text": "这个任务进行到哪一步了？", "wait_ms": 700,
+         "expect": {"no_new_action": True}},
+        {"text": "取消这个任务", "wait_ms": 700,
+         "expect": {"tool_call": "task_control"}},
+    ]
+    three_plans = conversation_driver.plan_utterances(three_turns, cache_dir,
+                                                      synthesizer=placeholder)
+    three_mapping = conversation_driver.map_conversation_to_probe(three_turns, three_plans)
+    _check(three_mapping.requires_new_probe is True,
+           f"three turns cannot be driven by the one/two-PCM probes: {three_mapping.to_dict()}")
+    _check(three_mapping.utterance_pcm_paths == [plan.pcm_path for plan in three_plans],
+           "an unmapped script must still carry every planned PCM, in turn order")
+
+    # The manifest the new probe would consume keeps the whole timeline.
+    manifest = conversation_driver.build_conversation_manifest(example, plans)
+    _check(manifest["acceptance"] is False and len(manifest["turns"]) == 5,
+           f"the conversation manifest is wrong: {sorted(manifest)}")
+    _check(manifest["turns"][1]["barge_in"] is True
+           and manifest["turns"][1]["pcm_path"] == str(plans[1].pcm_path)
+           and manifest["turns"][1]["expect"] == example["turns"][1]["expect"],
+           f"the manifest lost the barge-in turn: {manifest['turns'][1]}")
+    _check(manifest["turns"][0]["is_real_speech"] is False,
+           "placeholder PCM must be reported as not real speech in the manifest")
+
+    return ["the committed conversation example validates and is labeled acceptance=false; "
+            "4 legal and 7 illegal scripts are judged by the schema (barge-in on turn 0, "
+            "silent/expect-less turn, turn bound, missing global, unknown keys, overlong text, "
+            "empty speech list); plan_utterances synthesizes one labeled placeholder PCM per "
+            "turn in script order and refuses an invalid script; a one-turn script degrades to "
+            "--voice-task-probe; a two-turn script degrades to --voice-continuity-probe with the "
+            "progress utterance first and the cancel second; barge-in and 3+ turn scripts are "
+            "rebuild-gated and name the probe flag they need"]
+
+
 # ------------------------------------------------------------------- runner
 
 
@@ -1933,6 +2183,8 @@ TESTS = (
     ("dry run artifacts have no secrets", test_dry_run_artifacts_have_no_secrets),
     ("provider shape monitor detects drift", test_provider_shape_monitor_detects_drift),
     ("cassette replay is labeled contract regression", test_cassette_replay_is_contract_labeled),
+    ("conversation script schema and probe degradation",
+     test_conversation_script_schema_and_probe_degradation),
 )
 
 

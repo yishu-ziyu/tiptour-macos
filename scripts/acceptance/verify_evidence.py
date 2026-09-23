@@ -28,6 +28,13 @@ Doctrine re-derived here (sources cited, code not reused):
 * A receipt with status=uncertain_effect must be spoken as uncertainty
   (runner scenario_judges.py UNCERTAINTY_WORDING; work order 02's
   "delivery-confirmed progress is worded 已处理/尚未完成, never 已确认").
+* A recorded pass may also rest on a cancelled terminal contract:
+  status=cancelled with a valid control binding, no un-disambiguated
+  delivery=sent action, no side-effect residue in the independent state and
+  no completion claim in the final speech (runner scenario_judges.py
+  judge_continuity_progress_cancel: the real shape of a cancel is a progress
+  question — no action — followed by 取消, so `cancelled` is a legitimate
+  success outcome and rejecting it is a reviewer bug, not strictness).
 * Raw model tool arguments must agree with the recorded effective/normalized
   plan when both are present (work order 01R: assert the effective plan, not
   the normalization mechanism).
@@ -45,8 +52,9 @@ Exit codes:
     1 — any criterion FAILed (this is the reviewer's "acceptance not proven");
     2 — the input could not be read or parsed (never an acceptance verdict).
 
---self-test replays the testdata packages offline: good must review as PASS,
-the missing-layer and overclaiming-speech packages must review as FAIL.
+--self-test replays the testdata packages offline: good and
+cancelled-contract-good must review as PASS; missing-layer,
+overclaiming-speech and cancelled-but-claimed-complete must review as FAIL.
 """
 
 from __future__ import annotations
@@ -107,6 +115,53 @@ CORROBORATED_COMPLETION = {
     ("outcome_required", "system_verified_outcome"),
 }
 SYSTEM_VERIFIED_BASISES = {("outcome_required", "system_verified_outcome")}
+
+# The third terminal contract: a task the user cancelled. Its real shape is a
+# progress question (no action) followed by 取消 — the task ends `cancelled`,
+# nothing was delivered and the independent /state never moved — so `cancelled`
+# is a legitimate success outcome, not a failed one. It is only licensed when
+# the receipt proves the cancel stopped a *resolved* state; see
+# `_cancelled_terminal_contract`. (runner scenario_judges.py
+# judge_continuity_progress_cancel: a valid control binding, the same task id
+# across rounds, a fresh turn binding, at most one fixture action and
+# state_before == state_after.)
+CANCELLED_STATUS = "cancelled"
+
+# Outcome markers that still leave a delivered step's result open. A cancelled
+# terminal state must not rest on them: a delivered step whose outcome is still
+# unknown/pending/not-observed belongs to the honest uncertain contract above,
+# not to this one.
+UNRESOLVED_OUTCOME_MARKERS = (
+    "unknown",
+    "unknown_effect",
+    "uncertain",
+    "uncertain_effect",
+    "ambiguous",
+    "unresolved",
+    "pending",
+    "not_observed",
+)
+
+# Outcomes that settle a delivered step as *not carried out*: the cancel caught
+# the step before it ran, or superseded it. Either way the step's result is
+# known and nothing is claimed about it.
+SETTLED_NON_EXECUTION_OUTCOMES = (
+    "cancelled",
+    "not_attempted",
+    "not_executed",
+    "superseded",
+    "skipped",
+    "rolled_back",
+)
+
+# Outcome markers that settle a delivered step as verified: the system
+# independently observed the result — the same evidence the completed contract
+# accepts.
+VERIFIED_OUTCOME_MARKERS = (
+    "system_verified",
+    "verified",
+    "system_observed",
+)
 
 # ------------------------------------------------------------- check plumbing
 
@@ -330,6 +385,202 @@ def _signature_differences(raw: dict, effective: dict) -> list[str]:
 # ------------------------------------------------------------ criteria bodies
 
 
+def _cancel_control_binding(receipt: dict) -> tuple[bool, str]:
+    """Whether the cancel control was bound to the task/version it cancelled.
+
+    Read from the receipt's own recorded flags: the receipt-level
+    `control_binding_valid` and each recorded round's own flag, under either
+    the snake_case or the camelCase spelling. A receipt that records no binding
+    flag at all fails closed — the reviewer never assumes a binding the
+    evidence does not state (runner scenario_judges.py `_continuity_control_binding`).
+    """
+    flags: list[tuple[str, bool]] = []
+    recorded = _field(receipt, "control_binding_valid", "controlBindingValid")
+    if isinstance(recorded, bool):
+        flags.append(("her_receipt.control_binding_valid", recorded))
+    rounds = receipt.get("rounds")
+    if isinstance(rounds, list):
+        for position, entry in enumerate(rounds):
+            if not isinstance(entry, dict):
+                continue
+            flag = _field(entry, "control_binding_valid", "controlBindingValid")
+            if isinstance(flag, bool):
+                flags.append((f"her_receipt.rounds[{position}].control_binding_valid", flag))
+    if not flags:
+        return False, ("no control_binding_valid flag is recorded, and a cancel whose "
+                       "control binding is not recorded fails closed")
+    invalid = [where for where, flag in flags if not flag]
+    if invalid:
+        return False, "invalid control binding recorded at " + ", ".join(invalid)
+    return True, ("recorded valid at " + ", ".join(where for where, _ in flags))
+
+
+def _action_outcome_settled(action: dict) -> tuple[bool, str]:
+    """Whether one delivered action's outcome is resolved rather than still open.
+
+    A cancelled terminal state may only rest on a state the receipt actually
+    resolved: the step's completion is corroborated (the completed contract's
+    own policy/basis pair), the system verified the outcome, or the receipt
+    records that the step did not run (it was cancelled / superseded / skipped).
+    An outcome marker that still says unknown, pending or not_observed leaves
+    the step mid-flight: that run belongs to the honest uncertain contract, not
+    to the cancelled one.
+    """
+    corroborated, detail = _completion_corroboration(action)
+    if corroborated:
+        return True, f"corroborated step ({detail})"
+    values = (
+        (_field(action, "outcome_evidence", "outcomeEvidence", "outcome"), "outcome_evidence"),
+        (_field(action, "completion_basis", "completionBasis"), "completion_basis"),
+        (_field(action, "status", "action_status"), "status"),
+    )
+    recorded = [(value, name) for value, name in values if isinstance(value, str)]
+    if not recorded:
+        return False, ("delivery=sent action records no outcome field at all, so what "
+                       "happened to the delivered step is unknown")
+    for value, name in recorded:
+        if value.strip().casefold() in UNRESOLVED_OUTCOME_MARKERS:
+            return False, (f"{name}={value!r} still leaves the delivered step unresolved; "
+                           f"that run belongs to the uncertain contract")
+    for value, name in recorded:
+        if value.strip().casefold() in SETTLED_NON_EXECUTION_OUTCOMES:
+            return True, f"{name}={value!r} records that the delivered step did not run"
+    for value, name in recorded:
+        if value.strip().casefold() in VERIFIED_OUTCOME_MARKERS:
+            return True, f"{name}={value!r} records the system-verified outcome of the step"
+    return False, ("delivery=sent with "
+                   + ", ".join(f"{name}={value!r}" for value, name in recorded)
+                   + ": neither a corroborated/verified completion nor a recorded "
+                     "non-execution, so the step's result is still ambiguous")
+
+
+def _cancelled_side_effect_residue(scenario: dict, receipt: dict,
+                                   sent: list[dict]) -> tuple[bool, str]:
+    """Whether the independent /state carries no side effect the cancel left behind.
+
+    Third condition of the cancelled contract: the independent state must be
+    identical before and after the cancel, or every effect that survived must be
+    explicitly allowed — named in an allowance the receipt records, or
+    attributable to a delivered action whose outcome the receipt resolved.
+
+    Unlike the delivery criterion above this never falls back to count
+    correspondence: with counts alone one surviving allowed effect and one
+    unexplained effect look like two explained ones, and telling them apart is
+    exactly what a cancelled contract is for. A receipt whose fixture events
+    cannot be matched to its actions must name the allowance explicitly.
+    """
+    state = scenario.get("independent_state")
+    events = _new_events(state)
+    before = _field(state, "before")
+    after = _field(state, "after")
+    if not events:
+        if isinstance(before, dict) and isinstance(after, dict):
+            if before == after:
+                return True, ("independent /state is identical before and after the "
+                              "cancel: no side-effect residue")
+            return False, ("the independent state changed across the cancel without any "
+                           f"new event being recorded: before={before!r} after={after!r}")
+        return True, "the independent state records no new events across the cancel"
+    allowed = _allowed_side_effects(receipt)
+    resolved = [action for action in sent if _action_outcome_settled(action)[0]]
+    labels = [_normalized_text(_field(action, "label", "target_label", "targetLabel",
+                                      "expected_label", default=""))
+              for action in resolved]
+    residue: list = []
+    for event in events:
+        if event in allowed:
+            continue
+        if any(label and (label in _normalized_text(event)
+                          or _normalized_text(event) in label) for label in labels):
+            continue
+        residue.append(event)
+    if residue:
+        return False, (f"new events {events!r} contain unexplained side-effect residue "
+                       f"{residue!r}: neither named in the receipt's allowance {allowed!r} "
+                       f"nor attributable to a delivered action whose outcome the receipt "
+                       f"resolved")
+    return True, (f"new events {events!r} are all explicitly allowed — each is named in "
+                  f"the receipt's allowance or attributable to a delivered action whose "
+                  f"outcome the receipt resolved")
+
+
+def _allowed_side_effects(receipt: dict) -> list:
+    """The effects a receipt explicitly records as allowed to survive the cancel."""
+    allowed: list = []
+    for name in ("allowed_side_effects", "allowed_new_events", "preserved_side_effects"):
+        value = _field(receipt, name)
+        if isinstance(value, list):
+            allowed.extend(value)
+    return allowed
+
+
+def _cancelled_terminal_contract(scenario: dict, index: int, receipt: dict) -> Check:
+    """The third terminal contract: a cancelled task can be a legitimate success.
+
+    The real shape of a cancel is a progress question (no action) followed by
+    取消: the task ends `cancelled`, nothing was delivered and the independent
+    /state never moved. Accepting that shape is not a weakening — the recorded
+    pass is only supported when all four conditions hold simultaneously:
+
+    1. the control binding is recorded valid (the cancel was bound to the
+       task/turn it cancelled) — a missing binding flag fails closed;
+    2. no delivery=sent action is left un-disambiguated (every delivered step's
+       outcome is resolved, or recorded as not carried out);
+    3. no side-effect residue: the independent state is unchanged across the
+       cancel, or every surviving effect is explicitly allowed;
+    4. the final speech does not claim completion/confirmation of the cancelled
+       task.
+
+    Any missing condition is a FAIL, never a PASS.
+    """
+    path = f"scenarios[{index}]"
+    problems: list[str] = []
+    satisfied: list[str] = []
+
+    bound, binding_detail = _cancel_control_binding(receipt)
+    (satisfied if bound else problems).append(f"control binding {binding_detail}")
+
+    sent = _delivered_actions(receipt)
+    receipt_level_sent = receipt.get("delivery") == "sent"
+    ambiguous = [position for position, action in enumerate(sent)
+                 if not _action_outcome_settled(action)[0]]
+    if ambiguous:
+        problems.append(
+            f"delivery=sent action(s) {ambiguous} remain un-disambiguated: "
+            + "; ".join(_action_outcome_settled(sent[position])[1]
+                        for position in ambiguous)
+            + " — a cancelled terminal state may not rest on a step whose result is "
+              "still open")
+    elif receipt_level_sent and not sent:
+        problems.append("the receipt claims delivery=sent at receipt level but records no "
+                        "per-action outcome, so the delivered step cannot be disambiguated")
+    elif sent:
+        satisfied.append(f"all {len(sent)} delivery=sent action(s) carry a resolved outcome")
+    else:
+        satisfied.append("the receipt records no delivery=sent action, so the cancel "
+                         "stopped the task before anything was delivered")
+
+    residue_ok, residue_detail = _cancelled_side_effect_residue(scenario, receipt, sent)
+    (satisfied if residue_ok else problems).append(f"side-effect residue: {residue_detail}")
+
+    speech = " ".join(_speech_texts(scenario.get("final_speech")))
+    claimed = [claim for claim in COMPLETION_CLAIMS if claim in speech]
+    if claimed:
+        problems.append(f"final speech claims completion {claimed} of a task that ended "
+                        f"cancelled: {speech!r}")
+    else:
+        satisfied.append(f"final speech does not claim completion: {speech!r}")
+
+    if problems:
+        return Check("scenario.recorded_pass_is_supported", f"scenarios[{index}]",
+                     f"{path}.her_receipt.status").fail(
+            "the cancelled terminal contract is incomplete: " + "; ".join(problems))
+    return Check("scenario.recorded_pass_is_supported", f"scenarios[{index}]",
+                 f"{path}.her_receipt.status").pass_(
+        "recorded pass is supported by the cancelled terminal contract (a cancelled "
+        "task is a legitimate success): " + "; ".join(satisfied))
+
+
 def _criterion_six_layers(scenario: dict, index: int) -> Check:
     path = f"scenarios[{index}]"
     missing = [layer for layer in SIX_LAYERS if scenario.get(layer) is None]
@@ -551,10 +802,19 @@ def _criterion_recorded_pass_is_supported(scenario: dict, index: int,
     """The positive criterion: the layers must prove the recorded PASS.
 
     A recorded pass requires every integrity criterion above to hold and a
-    receipt outcome the recorded verdict can rest on: `completed` with a
-    corroborated completion basis per delivered step (work order 03R item 8),
-    or an honest uncertain contract — uncertain receipt, uncertainty speech and
-    an independent side effect (work order 04's scenario U contract).
+    receipt outcome the recorded verdict can rest on. Three terminal contracts
+    are accepted:
+
+    * `completed` with a corroborated completion basis per delivered step (work
+      order 03R item 8);
+    * an honest uncertain contract — uncertain receipt, uncertainty speech and
+      an independent side effect (work order 04's scenario U contract);
+    * `cancelled` with the cancel contract of `_cancelled_terminal_contract`:
+      a valid control binding, no un-disambiguated delivered action, no
+      side-effect residue and no completion claim.
+
+    Anything else — including a `cancelled` receipt missing any of those
+    conditions — is a FAIL, never a PASS.
     """
     path = f"scenarios[{index}]"
     failed = [check for check in checks if check.failed]
@@ -596,6 +856,8 @@ def _criterion_recorded_pass_is_supported(scenario: dict, index: int,
             f"status={status!r} with uncertainty speech and independent side-effect "
             f"evidence"
         )
+    if status == CANCELLED_STATUS:
+        return _cancelled_terminal_contract(scenario, index, receipt)
     return Check("scenario.recorded_pass_is_supported", f"scenarios[{index}]",
                  f"{path}.her_receipt.status").fail(
         f"a recorded pass cannot rest on receipt status {status!r}"
@@ -803,11 +1065,13 @@ SELF_TEST_EXPECTATIONS = (
     ("good", "pass", 0),
     ("missing-layer", "fail", 1),
     ("overclaiming-speech", "fail", 1),
+    ("cancelled-contract-good", "pass", 0),
+    ("cancelled-but-claimed-complete", "fail", 1),
 )
 
 
 def self_test() -> int:
-    """Replay the testdata packages offline and assert the three verdicts.
+    """Replay the testdata packages offline and assert the expected verdicts.
 
     This exercises the reviewer, exactly like work order 02's
     verify-report.py --mock-self-test: it says nothing about any product.
@@ -860,8 +1124,8 @@ def self_test() -> int:
         for failure in failures:
             print(f"  - {failure}")
         return 1
-    print("\nreviewer self-test: PASS — the three testdata verdicts and strict "
-          "semantics behave as specified (this checks the reviewer, not any product)")
+    print("\nreviewer self-test: PASS — the testdata verdicts and strict semantics "
+          "behave as specified (this checks the reviewer, not any product)")
     return 0
 
 
