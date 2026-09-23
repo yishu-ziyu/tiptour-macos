@@ -393,6 +393,39 @@ def test_judge_single_step_scenario(work_dir: Path) -> list[str]:
     verdict = _judge("single_step_right_setting", _self_exited_record(), good.report,
                      good.state_before, good.state_after)
     _check(verdict.passed, f"good chain rejected: {verdict.failure_reasons}")
+    _check(any("delivery-sufficient" in line or "system-verified" in line
+               for line in verdict.basis),
+           f"a passing A chain must name its corroborated completion basis: {verdict.basis}")
+
+    # Work order 03R item 8: the same chain carrying an uncertain_effect receipt is
+    # an honest, safe FAILED attempt - never scenario A's PASS.
+    uncertain = json.loads(json.dumps(good.report))
+    uncertain_receipt = json.loads(uncertain["tool_results"][0])
+    uncertain_receipt["status"] = "uncertain_effect"
+    uncertain_receipt["completed_step_count"] = 0
+    uncertain_receipt["actions"] = ["click「设置」：结果未确认"]
+    uncertain_receipt["detail"] = "操作结果未确认，已停止；页面变化不等于目标完成。"
+    uncertain["tool_results"][0] = json.dumps(uncertain_receipt, ensure_ascii=False)
+    uncertain["rendered_texts"] = ["已向「设置」发送操作，但目标结果还没有确认，已停下。"]
+    verdict = _judge("single_step_right_setting", _self_exited_record(), uncertain,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed,
+           f"an uncertain_effect receipt was passed for scenario A: {verdict.basis}")
+    _check(any("uncertain_effect" in reason for reason in verdict.failure_reasons),
+           f"the refusal must name the uncertain receipt: {verdict.failure_reasons}")
+    _check(any("recorded as a FAILED attempt, never as a PASS" in line
+               for line in verdict.basis),
+           f"the honest failure must carry its own basis: {verdict.basis}")
+
+    # delivery=unknown is not a delivered click for this scenario either.
+    unknown = json.loads(json.dumps(good.report))
+    unknown_receipt = json.loads(unknown["tool_results"][0])
+    unknown_receipt["current_actions"][0]["delivery"] = "unknown"
+    unknown["tool_results"][0] = json.dumps(unknown_receipt, ensure_ascii=False)
+    verdict = _judge("single_step_right_setting", _self_exited_record(), unknown,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed,
+           f"delivery=unknown was passed for scenario A: {verdict.failure_reasons}")
 
     bad = _chain("single_step_right_setting", "bad_double_click")
     verdict = _judge("single_step_right_setting", _self_exited_record(), bad.report,
@@ -439,9 +472,10 @@ def test_judge_single_step_scenario(work_dir: Path) -> list[str]:
     verdict = _judge("single_step_right_setting", _self_exited_record(), right_click,
                      good.state_before, good.state_after)
     _check(not verdict.passed, "right_click execution was accepted for a 右边 request")
-    return ["scenario A: honest uncertain receipt with corroborating /state passes; duplicate "
-            "click, lying receipt, overclaiming speech, timeout, missing report and "
-            "right_click are each rejected"]
+    return ["scenario A: a completed receipt with delivery=sent and a corroborated "
+            "completion basis passes; an uncertain_effect or delivery=unknown receipt, "
+            "duplicate click, lying receipt, overclaiming speech, timeout, missing report "
+            "and right_click are each rejected"]
 
 
 def test_judge_two_step_scenario(work_dir: Path) -> list[str]:
@@ -474,8 +508,60 @@ def test_judge_two_step_scenario(work_dir: Path) -> list[str]:
     verdict = _judge("two_step_display_settings_scale", _self_exited_record(), single_step,
                      good.state_before, good.state_after)
     _check(not verdict.passed, "a single top-level click was accepted as the two-step scenario")
-    return ["scenario C: two explicit steps with exact ordered /state passes; the open_app "
-            "bug signature, reordered side effects and a single-step submission are rejected"]
+
+    # Work order 03R item 8: an uncertain receipt is this scenario's honest failure,
+    # never its PASS, and every step must satisfy its own policy.
+    uncertain = json.loads(json.dumps(good.report))
+    uncertain_receipt = json.loads(uncertain["tool_results"][0])
+    uncertain_receipt["status"] = "uncertain_effect"
+    uncertain_receipt["completed_step_count"] = 0
+    uncertain["tool_results"][0] = json.dumps(uncertain_receipt, ensure_ascii=False)
+    uncertain["rendered_texts"] = ["已向「打开显示设置」发送操作，但结果还没有确认，已停下。"]
+    verdict = _judge("two_step_display_settings_scale", _self_exited_record(), uncertain,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed,
+           f"an uncertain_effect receipt was passed for scenario C: {verdict.basis}")
+    _check(any("uncertain_effect" in reason for reason in verdict.failure_reasons),
+           f"the refusal must name the uncertain receipt: {verdict.failure_reasons}")
+
+    # A step whose completion basis its policy does not license must fail the
+    # scenario, even though both actions were delivered.
+    unlicensed = json.loads(json.dumps(good.report))
+    unlicensed_receipt = json.loads(unlicensed["tool_results"][0])
+    unlicensed_receipt["current_actions"][1]["completion_basis"] = None
+    unlicensed["tool_results"][0] = json.dumps(unlicensed_receipt, ensure_ascii=False)
+    verdict = _judge("two_step_display_settings_scale", _self_exited_record(), unlicensed,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed and any("corroborated" in reason
+                                      for reason in verdict.failure_reasons),
+           f"an unlicensed completion basis was accepted for scenario C: "
+           f"{verdict.failure_reasons}")
+
+    # A delivery=unknown step is not a delivered step for this scenario.
+    unknown_delivery = json.loads(json.dumps(good.report))
+    unknown_receipt_c = json.loads(unknown_delivery["tool_results"][0])
+    unknown_receipt_c["current_actions"][0]["delivery"] = "unknown"
+    unknown_delivery["tool_results"][0] = json.dumps(unknown_receipt_c, ensure_ascii=False)
+    verdict = _judge("two_step_display_settings_scale", _self_exited_record(), unknown_delivery,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed and any("delivery=unknown" in reason
+                                      for reason in verdict.failure_reasons),
+           f"delivery=unknown was accepted for scenario C: {verdict.failure_reasons}")
+
+    # Overclaiming speech is refused on a completed receipt too.
+    overclaiming = json.loads(json.dumps(good.report))
+    overclaiming["rendered_texts"] = ["已完成并确认这 2 步操作。"]
+    verdict = _judge("two_step_display_settings_scale", _self_exited_record(), overclaiming,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed,
+           f"overclaiming speech on a completed two-step receipt was accepted: "
+           f"{verdict.basis}")
+
+    return ["scenario C: two explicit steps, both delivered with delivery=sent and each "
+            "step's policy-licensed completion basis, with exact ordered /state passes; "
+            "the open_app bug signature, reordered side effects, a single-step submission, "
+            "an uncertain receipt, an unlicensed basis, delivery=unknown and overclaiming "
+            "speech are each rejected"]
 
 
 def test_judge_continuity_scenario(work_dir: Path) -> list[str]:
@@ -533,6 +619,85 @@ def test_judge_unknown_scenario(work_dir: Path) -> list[str]:
            "a receipt hiding the delivery-unknown state was accepted")
     return ["scenario unknown: delivery=unknown with one click and honest speech passes; "
             "re-click and a masked delivery state are rejected"]
+
+
+def test_exit_status_honesty_for_launched_instances(work_dir: Path) -> list[str]:
+    """The exit-code judgment: only a status the OS reported (or a documented
+    derived value with its artifact behind it) may carry a verdict.
+
+    A LaunchServices instance is not the runner's child, so the kernel reports it
+    no exit status. `returncode: 0` therefore counts only together with a
+    `returncode_basis` that starts with "derived:" and a present report artifact;
+    a null returncode or an "unavailable" basis fails closed.
+    """
+    from . import launch_services
+
+    good = _chain("single_step_right_setting", dry_run.GOOD_CHAIN_SUFFIX)
+
+    def _record(**overrides) -> dict:
+        record = {"pid": 9001, "self_exited": True, "returncode": 0, "timed_out": False}
+        record.update(overrides)
+        return {"exit_record": record}
+
+    derived = _record(report_artifact_present=True,
+                      returncode_basis=launch_services.RETURNCODE_DERIVED_BASIS)
+    verdict = _judge("single_step_right_setting", derived, good.report,
+                     good.state_before, good.state_after)
+    _check(verdict.passed,
+           f"a derived basis with the report artifact present was refused: "
+           f"{verdict.failure_reasons}")
+    _check(any("derived" in line for line in verdict.basis),
+           f"the derived basis must be quoted in the verdict: {verdict.basis}")
+
+    # ... and never without the artifact that proves the instance ran.
+    no_artifact = _record(report_artifact_present=False,
+                          returncode_basis=launch_services.RETURNCODE_DERIVED_BASIS)
+    verdict = _judge("single_step_right_setting", no_artifact, good.report,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed and any("report_artifact_present" in reason
+                                      for reason in verdict.failure_reasons),
+           f"a derived basis without the artifact was accepted: {verdict.failure_reasons}")
+
+    # The documented unavailable basis is an honest "no status", never a success.
+    unavailable = _record(report_artifact_present=False,
+                          returncode_basis=launch_services.RETURNCODE_UNAVAILABLE_BASIS)
+    verdict = _judge("single_step_right_setting", unavailable, good.report,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed and any("unavailable" in reason
+                                      for reason in verdict.failure_reasons),
+           f"the unavailable basis was accepted as success: {verdict.failure_reasons}")
+
+    # A null returncode stays null, whatever basis is recorded next to it.
+    null_status = _record(returncode=None, report_artifact_present=True,
+                          returncode_basis=launch_services.RETURNCODE_DERIVED_BASIS)
+    verdict = _judge("single_step_right_setting", null_status, good.report,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed,
+           f"a null returncode was accepted: {verdict.failure_reasons}")
+
+    # A forked child the runner parented keeps its real, kernel-reported code.
+    forked = _record(pid=4242)
+    verdict = _judge("single_step_right_setting", forked, good.report,
+                     good.state_before, good.state_after)
+    _check(verdict.passed,
+           f"a real exit code 0 was refused: {verdict.failure_reasons}")
+    nonzero = _record(returncode=3)
+    verdict = _judge("single_step_right_setting", nonzero, good.report,
+                     good.state_before, good.state_after)
+    _check(not verdict.passed, "a non-zero exit code was accepted")
+
+    # The rule lives in the shared attempt checks, so every judge inherits it.
+    for name in ("two_step_display_settings_scale", "continuity_progress_cancel",
+                 "unknown_delivery_fault_recovery"):
+        payload = _chain(name, dry_run.GOOD_CHAIN_SUFFIX)
+        verdict = _judge(name, derived, payload.report, payload.state_before,
+                         payload.state_after)
+        _check(verdict.passed,
+               f"{name} refused the derived exit status: {verdict.failure_reasons}")
+    return ["exit status: a forked child's real code 0 passes and a non-zero code fails; a "
+            "LaunchServices instance passes only on returncode=0 with a derived basis and "
+            "a present report artifact; a null returncode and the unavailable basis fail "
+            "closed, in every judge"]
 
 
 # -------------------------------------------------------------- hygiene checks
@@ -1038,6 +1203,8 @@ TESTS = (
     ("judge: two-step display settings/scale", test_judge_two_step_scenario),
     ("judge: continuity progress/cancel", test_judge_continuity_scenario),
     ("judge: unknown delivery fault", test_judge_unknown_scenario),
+    ("exit status honesty for launched instances",
+     test_exit_status_honesty_for_launched_instances),
     ("child process discipline", test_child_process_discipline),
     ("freshness gate blocks stale binary", test_freshness_gate_blocks_stale_binary),
     ("dry run full pipeline twice consistent", test_dry_run_full_pipeline_twice_consistent),
