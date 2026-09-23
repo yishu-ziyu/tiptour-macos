@@ -175,6 +175,9 @@ final class GeminiLiveSession: ObservableObject {
 
         var startupCompleted = false
         defer { if !startupCompleted { stop() } }
+        // Throws with the shared Keychain state sentence already in
+        // localizedDescription (that is what the companion panel shows), so
+        // nothing here re-maps it into a second credential vocabulary.
         let apiKey = try await fetchAPIKey()
 
         try await RetryWithExponentialBackoff.run(
@@ -544,13 +547,54 @@ final class GeminiLiveSession: ObservableObject {
 
     // MARK: - API Key Fetch
 
+    /// Gemini's key read, routed through the SAME Keychain state semantics
+    /// StepFun's voice start uses: `KeychainStore.readItem` +
+    /// `KeychainItemState`.
+    ///
+    /// WHY carry a state instead of a `String?`: "never saved", "saved but
+    /// macOS refused the read", "saved but the stored bytes are not usable
+    /// text" and "the lookup did not settle" are four different problems with
+    /// four different remedies. The old `KeychainStore.geminiAPIKey` read
+    /// collapsed all of them into one "please save your key" sentence, which
+    /// told users who had already saved a key to save it again.
+    ///
+    /// The sentence comes from the shared `KeychainItemState.userMessage`
+    /// map — the same one the settings cards, the panel and the StepFun
+    /// refusal quote — so Gemini owns no string table and no second state
+    /// mapping that could drift from them.
+    ///
+    /// This is credential-error semantics only. Gemini is being retired, so
+    /// nothing here restores or extends a product capability: what a session
+    /// does once it holds a key is unchanged.
     private func fetchAPIKey() async throws -> String {
-        guard let key = KeychainStore.geminiAPIKey, !key.isEmpty else {
-            throw NSError(domain: "GeminiLiveSession", code: -9, userInfo: [
-                NSLocalizedDescriptionKey: "Add your Gemini API key in Settings → Models to use realtime voice."
-            ])
+        let read = KeychainStore.readItem(forKey: TipTourMode.gemini.keyName)
+        switch read.state {
+        case .available:
+            // `readItem` only answers `.available` with a value this process
+            // actually decoded — non-empty by construction, so no second
+            // emptiness guard is needed here.
+            return read.value ?? ""
+        case .saved, .absent, .readDenied, .undecodable, .unavailable:
+            // WHY `.saved` shares this arm instead of being its own: `readItem`
+            // never answers `.saved` (only the attributes-only presence probe
+            // does, and it never returns bytes), but the rule stays the one
+            // StepFun's start follows — an entry that is provably stored while
+            // its value never reaches this process is a READ problem, never
+            // "未保存". The shared map already says exactly that, so the user
+            // is never asked to save a key they saved, and no session starts
+            // that would die on its first provider call.
+            //
+            // Code carries the real OSStatus behind the state (`itemExists` /
+            // `isUsable` still answer from the state), and the message carries
+            // the user-facing reason. Neither ever contains key material.
+            throw NSError(
+                domain: "GeminiLiveSession",
+                // `NSError.code` is `Int`; widening an OSStatus is lossless, so
+                // the real status survives into logs and any future caller.
+                code: Int(read.state.failureStatus),
+                userInfo: [NSLocalizedDescriptionKey: read.state.userMessage(subject: "Gemini 密钥")]
+            )
         }
-        return key
     }
 
     // MARK: - Mic Capture
@@ -776,6 +820,10 @@ final class GeminiLiveSession: ObservableObject {
             }
 
             do {
+                // Same credential read as start(): the thrown message is
+                // already the shared Keychain state sentence, so a key that is
+                // saved but unread surfaces verbatim instead of a generic
+                // "reconnect failed".
                 let apiKey = try await fetchAPIKey()
                 try await geminiClient.connect(apiKey: apiKey, systemPrompt: systemPrompt)
                 // Gemini's server-side context was lost — force the next
