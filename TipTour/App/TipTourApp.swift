@@ -38,6 +38,19 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         if VoiceRouteProbe.handleLaunch(companionManager: companionManager) { return }
         #endif
+        // Retire any other interactive Her before this one registers hotkeys
+        // or opens the microphone.
+        Task {
+            guard await SingleInstanceGuard.retireOtherInteractiveInstances() else {
+                print("🎯 Her: another interactive instance could not be stopped; exiting so only one listens")
+                NSApplication.shared.terminate(nil)
+                return
+            }
+            startInteractiveApp()
+        }
+    }
+
+    private func startInteractiveApp() {
         print("🎯 Her: Starting...")
         print("🎯 Her: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
 
