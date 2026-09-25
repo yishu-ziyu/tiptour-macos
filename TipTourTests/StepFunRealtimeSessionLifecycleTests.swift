@@ -56,7 +56,7 @@ struct RealtimeAudioPlaybackTests {
     }
 
     @Test func pcm16SamplesPreserveAmplitudeAndFrameCount() throws {
-        let player = GeminiLiveAudioPlayer()
+        let player = RealtimeAudioPlayer()
         let buffer = try #require(player.makeAudioBuffer(from:
             Data([0x00, 0x80, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x40, 0xFF, 0x7F])
         ))
@@ -70,14 +70,14 @@ struct RealtimeAudioPlaybackTests {
     }
 
     @Test func malformedOrEmptyPCMIsRejected() {
-        let player = GeminiLiveAudioPlayer()
+        let player = RealtimeAudioPlayer()
         #expect(player.makeAudioBuffer(from: Data()) == nil)
         #expect(player.makeAudioBuffer(from: Data([0xFF])) == nil)
     }
 
     @Test func playerConnectsToAudioEngine() {
         let engine = AVAudioEngine()
-        let player = GeminiLiveAudioPlayer()
+        let player = RealtimeAudioPlayer()
         player.attach(to: engine)
         player.detach()
     }

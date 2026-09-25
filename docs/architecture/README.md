@@ -5,7 +5,7 @@ Her is a macOS 14.2+ menu bar app (`LSUIElement=true`, bundle ID `com.yishuziyu.
 ```
 user voice (Ctrl+Option) / text (Ctrl+K)
         │
-CompanionManager ── provider sessions: StepFun realtime voice (default) · JEV text · Gemini (retiring)
+CompanionManager ── provider sessions: StepFun realtime voice (default) · JEV text
         │
 StepFun tool router → DesktopTaskCoordinator → DesktopTaskExecutor
         │                      (task identity, progress, uncertainty, receipts)

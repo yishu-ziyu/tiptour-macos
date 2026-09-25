@@ -78,7 +78,6 @@ struct PanelOnboardingView: View {
         switch companionManager.selectedMode {
         case .stepfun: return "她用阶跃的实时语音和你说话。密钥只存在这台 Mac 的钥匙串里。"
         case .jev: return "JEV 负责判断该点屏幕上的哪个控件。密钥只存在这台 Mac 的钥匙串里。"
-        case .gemini: return "Gemini 负责语音对话。密钥只存在这台 Mac 的钥匙串里。"
         }
     }
 

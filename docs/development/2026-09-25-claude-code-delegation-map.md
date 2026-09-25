@@ -20,7 +20,7 @@
 | # | 步骤 | 怎样算做到 | 状态 |
 | --- | --- | --- | --- |
 | 0 | 把没提交的改动收进 `main` | 用户在 Xcode 构建一次、能启动；agent 按文档、面板与首次使用、语音分组提交，提交前给用户看文件清单；语音修复在提交信息里标明未验证、已停放 | 已完成（2026-09-25）：用户构建并启动后按 6 组提交，`8577994`…`efdc9c2`，已推送 |
-| 0b | 接回云端会话里的 Gemini 删除 | 步骤 0 之后，云端会话推送 `claude/project-thread-fcyoto`；在新 `main` 上解冲突；用户在 Xcode 构建、跑 `scripts/test-jev.sh` 与 `scripts/test-stepfun-voice-lifecycle.sh` | 未开始 |
+| 0b | 删除 Gemini | 用户在 Xcode 构建并启动；`scripts/test-jev.sh`、`scripts/test-stepfun-voice-lifecycle.sh` 通过 | 云端会话找不回，2026-09-25 在本地分支 `fix/remove-gemini` 重做：本地类型检查通过，JEV 16、阶跃语音 30、阶跃决策 18 个测试通过；待用户构建 |
 
 ## 已做的决定
 

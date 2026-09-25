@@ -4,7 +4,7 @@ This file is the entry point for coding agents; `CLAUDE.md` is a symlink to it. 
 
 ## What this repository is
 
-- **Her** (`com.yishuziyu.her`, Personal Team `87DM76C54G`): a macOS 14.2+ menu bar companion. StepFun realtime voice (Ctrl+Option) is the default mode, JEV text (Ctrl+K) the fallback, Gemini is being retired.
+- **Her** (`com.yishuziyu.her`, Personal Team `87DM76C54G`): a macOS 14.2+ menu bar companion. StepFun realtime voice (Ctrl+Option) is the default mode, JEV text (Ctrl+K) the fallback. Gemini was removed on 2026-09-25.
 - `os` is the only development repository. `我的agent` is frozen at tag `archive/2026-09-23-frozen`; port from it per [`docs/lineage.md`](docs/lineage.md), never add runtimes from it.
 - The source folder, Swift module and many type names still use the historical `TipTour` namespace. Do not perform a cosmetic whole-codebase rename while consolidation is in progress.
 
@@ -47,7 +47,7 @@ A change is not finished until every current document it made wrong is corrected
 
 | When you change… | Update |
 | --- | --- |
-| Provider modes, shortcuts, onboarding, voice/VAD defaults (`TipTour/Voice/StepFun*`, `TipTour/Voice/Gemini*`, `TipTour/Jev/`, `TipTour/Core/TipTourMode.swift`, `TipTour/Utilities/TipTourDefaults.swift`, `TipTour/UI/`) | `docs/architecture/provider-modes.md`; `README.md` if a user would notice |
+| Provider modes, shortcuts, onboarding, voice/VAD defaults (`TipTour/Voice/StepFun*`, `TipTour/Voice/RealtimeAudioPlayer.swift`, `TipTour/Jev/`, `TipTour/Core/TipTourMode.swift`, `TipTour/Utilities/TipTourDefaults.swift`, `TipTour/UI/`) | `docs/architecture/provider-modes.md`; `README.md` if a user would notice |
 | Engine, workflow, actions, perception, harness, desktop task adapters | `docs/architecture/runtime.md` |
 | Completion policy or predicates in `DesktopTaskContract.swift` | `docs/architecture/step-completion.md` |
 | Task coordinator, admission, journal, continuity probe | `docs/architecture/task-continuity.md` |

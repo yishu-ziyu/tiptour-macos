@@ -14,14 +14,13 @@ Keep the approximate line counts within 50 lines of the real file; `scripts/chec
 | `TipTour/Harnesses/TipTourHarnessServer.swift` | Localhost engine API on `127.0.0.1:19474`, `/v1/agent-contract` canonical (~1183 lines) |
 | `TipTourTests/HarnessOriginIntegrationTests.swift` | Real local HTTP check for loopback access and foreign browser-origin rejection |
 | `TipTour/Perception/LocalTargetContinuity.swift` | Matches the same label/source/display across small detection bounds changes before execution (~20 lines) |
-| `TipTour/Core/TipTourMode.swift` | JEV-first mode defaults, key/shortcut metadata and permission requirements (~93 lines) |
+| `TipTour/Core/TipTourMode.swift` | StepFun voice and JEV text modes, default and retired-value restore, key/shortcut metadata and permission requirements (~101 lines) |
 | `TipTour/Core/TipTourEngine.swift` | Grounding, execution, validation and local harness facade |
 | `TipTour/Jev/JevClient.swift` | Keychain-authenticated TypeSafe API client |
 | `TipTour/Jev/JevGrounding.swift` | Bounded speculative action/target fan-out and validated decisions |
 | `TipTour/Jev/JevPointerLoop.swift` | Cancellable JEV action loop and immutable UI snapshots |
 | `TipTour/Jev/JevStepPanelView.swift` | Decision progress in the text panel |
-| `TipTour/Voice/GeminiLiveSession.swift` | Realtime session, microphone, screenshots and tool callbacks |
-| `TipTour/Voice/GeminiLiveClient.swift` | Gemini WebSocket protocol and tool declarations |
+| `TipTour/Voice/RealtimeAudioPlayer.swift` | StepFun PCM16 playback on the shared engine, odd-byte carry and underrun counts (~283 lines) |
 | `TipTour/Voice/StepFunRealtimeClient.swift` | Ordered WebSocket events, response identity filtering, deduplicated calls and task-context data (~710 lines) |
 | `TipTour/Voice/StepFunRealtimeSession.swift` | Full-duplex session, receipt speech, cancellation and production-path synthetic probe (~1300 lines) |
 | `TipTour/Voice/StepFunRealtimeTools.swift` | Strict task/step parameters, observation-bound indices, goal-declared operation gate, redundant-action normalization and model-facing expected_label guidance (~627 lines) |

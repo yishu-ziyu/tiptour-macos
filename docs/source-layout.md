@@ -3,7 +3,7 @@
 | Directory | Responsibility |
 | --- | --- |
 | `TipTour/App` | Lifecycle, hotkeys, shared state, and mode coordination |
-| `TipTour/Voice` | Gemini Live WebSocket (retiring), StepFun Realtime WebSocket, microphone, audio playback, voice sessions |
+| `TipTour/Voice` | StepFun Realtime WebSocket, microphone, audio playback, voice sessions |
 | `TipTour/Jev` | TypeSafe client, validated target decisions, bounded click loop, results view |
 | `TipTour/Core` | Shared engine, action requests, highlight source resolution, harness contract |
 | `TipTour/Actions` | Desktop input facade and CUA driver |
@@ -14,7 +14,7 @@
 | `TipTour/UI` | Menu bar, Settings, command panel, pointer and detection overlays; `UI/Panel` holds the menu bar panel's pieces |
 | `TipTour/Utilities` | Permissions, Keychain, preferences, shortcuts, logging and analytics |
 
-Gemini, JEV and StepFun use the same action engine. Keep provider networking in their respective directories, execution in the action/workflow layer, and app-specific quirks in markdown skills. Neither UI nor providers should bypass the engine's action permissions or pauses.
+JEV and StepFun use the same action engine. Keep provider networking in their respective directories, execution in the action/workflow layer, and app-specific quirks in markdown skills. Neither UI nor providers should bypass the engine's action permissions or pauses.
 
 The StepFun task contract and coordinator in `Voice` own explicit task steps and per-turn receipts.
 `DesktopTaskExecutor` adapts that contract to the existing engine; it is not another input driver.

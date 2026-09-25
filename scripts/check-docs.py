@@ -45,7 +45,7 @@ EXCLUDED_DOCUMENT_PREFIXES = ("out/", ".serena/", ".statamcp/", "TipTour/Skills/
 
 # (code path pattern, documents that describe it). Mirrors AGENTS.md.
 CODE_TO_DOCUMENT_MAPPING = [
-    (r"^TipTour/(Voice/(StepFun|Gemini)|Jev/|Core/TipTourMode\.swift|Utilities/TipTourDefaults\.swift|UI/)",
+    (r"^TipTour/(Voice/(StepFun|RealtimeAudioPlayer)|Jev/|Core/TipTourMode\.swift|Utilities/TipTourDefaults\.swift|UI/)",
      ["docs/architecture/provider-modes.md", "README.md"]),
     (r"^TipTour/(Core|Workflow|Actions|Perception|Harnesses)/|^TipTour/Voice/Desktop(TaskExecutor|ActionVerifier|DecisionPacket|ApplicationResolver|ObservedWindowIdentity)",
      ["docs/architecture/runtime.md"]),

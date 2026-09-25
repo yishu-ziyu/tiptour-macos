@@ -39,8 +39,7 @@ SWIFT
 
 cp "$project_dir/TipTour/Voice/StepFunRealtimeClient.swift" \
    "$project_dir/TipTour/Voice/StepFunRealtimeSession.swift" \
-   "$project_dir/TipTour/Voice/GeminiLiveAudioPlayer.swift" \
-   "$project_dir/TipTour/Voice/GeminiLiveClient.swift" \
+   "$project_dir/TipTour/Voice/RealtimeAudioPlayer.swift" \
    "$project_dir/TipTour/Voice/PCM16AudioConverter.swift" \
    "$project_dir/TipTour/Voice/StepFunVisionClient.swift" \
    "$project_dir/TipTour/Voice/DesktopTaskCoordinator.swift" \

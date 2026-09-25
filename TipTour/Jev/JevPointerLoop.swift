@@ -79,7 +79,7 @@ final class JevPointerLoop {
                     return finish(reason: "action_driver_disabled", message: "Enable desktop actions in Settings first.")
                 }
                 guard observation.isAutopilotEnabled else {
-                    return finish(reason: "autopilot_disabled", message: "Enable auto-click to use JEV. Gemini also supports point-only guidance.")
+                    return finish(reason: "autopilot_disabled", message: "Enable auto-click to use JEV.")
                 }
                 let list = await engine.localPerceptionTargets(refresh: true, reason: "JEV step \(step)")
                 try Task.checkCancellation()

@@ -25,7 +25,7 @@ Three kinds of document, and how to treat them:
 | Document | Answers |
 | --- | --- |
 | [architecture/README.md](architecture/README.md) | System overview and map of the architecture documents |
-| [architecture/provider-modes.md](architecture/provider-modes.md) | StepFun voice, JEV text, Gemini; onboarding; voice defaults |
+| [architecture/provider-modes.md](architecture/provider-modes.md) | StepFun voice, JEV text; onboarding; voice defaults |
 | [architecture/runtime.md](architecture/runtime.md) | Engine boundaries, grounding, perception, open_app, describe_screen |
 | [architecture/step-completion.md](architecture/step-completion.md) | The code-owned rule for when a step counts as done |
 | [architecture/task-continuity.md](architecture/task-continuity.md) | The off-by-default task continuity path |

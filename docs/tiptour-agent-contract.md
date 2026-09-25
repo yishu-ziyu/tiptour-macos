@@ -1,6 +1,6 @@
 # Local harness
 
-TipTour listens only on `127.0.0.1:19474`. This developer interface shares the same grounding, action permissions, and workflow validation as Gemini and JEV. No external orchestrator is bundled.
+TipTour listens only on `127.0.0.1:19474`. This developer interface shares the same grounding, action permissions, and workflow validation as StepFun voice and JEV. No external orchestrator is bundled.
 Requests must use a loopback `Host` header. Browser requests with an `Origin` header are accepted only when that origin matches the harness itself; other origins receive HTTP 403 before an endpoint runs. Local command-line clients using `127.0.0.1:19474` need no new credential. This does not authenticate other processes on the same Mac.
 Requests over 1 MiB receive HTTP 413 before an endpoint runs.
 

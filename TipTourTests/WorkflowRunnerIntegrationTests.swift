@@ -135,27 +135,6 @@ final class WorkflowRunnerIntegrationTests: XCTestCase {
         XCTAssertFalse(runner.isBusy)
     }
 
-    func testLegacyToolCannotTakeTheDesktopFromAPersistentTask() async throws {
-        let coordinator = DesktopTaskCoordinator(observe: { DesktopTaskObservation(app: "fixture", targets: []) },
-            decide: { _, _, _, _ in DesktopTaskDecision(targetID: nil, action: "none", completed: false, reason: "unused") },
-            executeStep: { _, _, _, _ in
-                DesktopTaskActionResult(delivery: .notSent, outcomeEvidence: .notObserved,
-                    detail: "fixture not delivered")
-            })
-        coordinator.beginUserTurn("owner")
-        let admitted = await coordinator.submit(DesktopTaskSubmission(goal: "retained task",
-            steps: [DesktopActionStep(action: .openApp, application: "Fixture")], turnID: "owner"))
-        await coordinator.waitUntilSettled()
-        // Construct only; do not start monitors, UI, microphone or providers.
-        let manager = CompanionManager()
-        let rejection = manager.rejectIfToolCallShouldNotRun(id: "legacy-note", toolName: "create_note")
-        XCTAssertEqual(rejection?["reason"] as? String, "desktop_task_busy")
-        XCTAssertEqual(coordinator.lastReceipt?.taskID, admitted.taskID)
-        _ = coordinator.cancelTask(taskID: admitted.taskID, targetVersion: admitted.targetVersion, turnID: "owner")
-        XCTAssertNil(manager.rejectIfToolCallShouldNotRun(id: "legacy-note", toolName: "create_note"),
-            "Rejected work must not consume the next authorized utterance's tool slot")
-    }
-
     func testPointerEntryRejectsBusyDesktopBeforePerception() async {
         let runner = WorkflowRunner.shared
         defer { runner.stop() }

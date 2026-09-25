@@ -182,7 +182,7 @@ struct TipTourSettingsView: View {
             settingsRow(
                 title: "Remote Screenshots",
                 subtitle: companionManager.isScreenshotStreamingEnabled
-                    ? "Gemini can receive screen context when you ask for help."
+                    ? "She can send a screenshot to StepFun when you ask about the screen."
                     : "Remote visual context is off; local grounding can still run.",
                 systemImage: companionManager.isScreenshotStreamingEnabled ? "eye" : "eye.slash",
                 isOn: Binding(

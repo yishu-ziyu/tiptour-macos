@@ -46,5 +46,5 @@ Definitions and targets: [PRODUCT.md](PRODUCT.md).
 | 验收任务 | the ten user sentences every stage is accepted against | [PRODUCT.md](PRODUCT.md) |
 | 失败分析 | the user reads real runs, notes what went wrong in free text, then groups the notes into failure categories | — |
 | 回执 | the per-turn receipt of what was delivered and verified | `DesktopTaskReceipt` |
-| 提供方模式 | StepFun voice / JEV text / Gemini | `TipTourMode` |
+| 提供方模式 | StepFun voice / JEV text（Gemini 已于 2026-09-25 删除） | `TipTourMode` |
 | 冻结仓库 | 我的agent at tag `archive/2026-09-23-frozen` | [lineage.md](lineage.md) |

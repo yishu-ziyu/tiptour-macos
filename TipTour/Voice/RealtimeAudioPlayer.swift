@@ -1,8 +1,8 @@
 //
-//  GeminiLiveAudioPlayer.swift
+//  RealtimeAudioPlayer.swift
 //  TipTour
 //
-//  Streams PCM16 24kHz audio chunks (Gemini Live or OpenAI Realtime) to the
+//  Streams PCM16 24kHz audio chunks from the realtime voice session to the
 //  speakers in real time. Owns an AVAudioPlayerNode but NOT an AVAudioEngine
 //  — the session passes in a shared engine so mic capture and playback both
 //  run on the same engine. That's a hard requirement for Apple's voice
@@ -40,7 +40,7 @@ struct AudioPlaybackQueueState {
 }
 
 @MainActor
-final class GeminiLiveAudioPlayer {
+final class RealtimeAudioPlayer {
 
     // MARK: - State
 
@@ -94,11 +94,11 @@ final class GeminiLiveAudioPlayer {
     init() {
         guard let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: GeminiLiveClient.outputSampleRate,
+            sampleRate: StepFunRealtimeClient.audioSampleRate,
             channels: 1,
             interleaved: false
         ) else {
-            fatalError("[GeminiLiveAudio] Could not create 24kHz Float32 format — this should never happen")
+            fatalError("[RealtimeAudio] Could not create 24kHz Float32 format — this should never happen")
         }
         self.playbackAudioFormat = format
     }
@@ -126,7 +126,7 @@ final class GeminiLiveAudioPlayer {
         engine.connect(playerNode, to: engine.mainMixerNode, format: playbackAudioFormat)
         sharedEngine = engine
         isAttachedAndConnected = true
-        print("[GeminiLiveAudio] player node attached to shared engine")
+        print("[RealtimeAudio] player node attached to shared engine")
     }
 
     /// Detach the player from its current engine. Called by the session
@@ -142,7 +142,7 @@ final class GeminiLiveAudioPlayer {
         engine.detach(playerNode)
         sharedEngine = nil
         isAttachedAndConnected = false
-        print("[GeminiLiveAudio] player node detached")
+        print("[RealtimeAudio] player node detached")
     }
 
     /// Start the player node. The session must have already started the
@@ -168,7 +168,7 @@ final class GeminiLiveAudioPlayer {
         if let engine = sharedEngine, engine.isRunning {
             playerNode.play()
         }
-        print("[GeminiLiveAudio] Audio queue cleared")
+        print("[RealtimeAudio] Audio queue cleared")
     }
 
     // MARK: - Audio Chunk Playback
@@ -179,11 +179,11 @@ final class GeminiLiveAudioPlayer {
     /// `startPlaying()` separately.
     func enqueueAudioChunk(_ pcm16Data: Data) {
         guard isAttachedAndConnected else {
-            print("[GeminiLiveAudio] dropped chunk — player not attached to an engine yet")
+            print("[RealtimeAudio] dropped chunk — player not attached to an engine yet")
             return
         }
         guard let engine = sharedEngine, engine.isRunning else {
-            print("[GeminiLiveAudio] dropped chunk — shared engine not running")
+            print("[RealtimeAudio] dropped chunk — shared engine not running")
             return
         }
 
@@ -204,7 +204,7 @@ final class GeminiLiveAudioPlayer {
         guard !wholeSampleData.isEmpty else { return }
 
         guard let audioBuffer = makeAudioBuffer(from: wholeSampleData) else {
-            print("[GeminiLiveAudio] Could not create buffer from \(wholeSampleData.count)-byte chunk")
+            print("[RealtimeAudio] Could not create buffer from \(wholeSampleData.count)-byte chunk")
             return
         }
 
@@ -234,7 +234,7 @@ final class GeminiLiveAudioPlayer {
         // bytes would produce scrambled audio or a silently-dropped
         // buffer. Reject and log instead of schedule-and-hope.
         guard pcm16Data.count % bytesPerFrame == 0 else {
-            print("[GeminiLiveAudio] ⚠ dropped \(pcm16Data.count)-byte chunk — not a multiple of \(bytesPerFrame) bytes/frame. Audio format may have changed upstream.")
+            print("[RealtimeAudio] ⚠ dropped \(pcm16Data.count)-byte chunk — not a multiple of \(bytesPerFrame) bytes/frame. Audio format may have changed upstream.")
             return nil
         }
         let frameCount = pcm16Data.count / bytesPerFrame
