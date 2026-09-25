@@ -10,6 +10,8 @@ import AppKit
 
 extension Notification.Name {
     static let tipTourDismissPanel = Notification.Name("tipTourDismissPanel")
+    /// Posted each time the panel is shown, so the panel can replay its reveal.
+    static let tipTourPanelDidShow = Notification.Name("tipTourPanelDidShow")
     static let tipTourOpenSettings = Notification.Name("tipTourOpenSettings")
     static let tipTourOpenLogs = Notification.Name("tipTourOpenLogs")
     static let tipTourPanelPinStateChanged = Notification.Name("tipTourPanelPinStateChanged")
@@ -28,7 +30,7 @@ final class MenuBarPanelManager: NSObject {
     private var pinStateChangedObserver: NSObjectProtocol?
 
     private let companionManager: CompanionManager
-    private let panelWidth: CGFloat = 320
+    private let panelWidth: CGFloat = PanelStyle.width
     private let panelHeight: CGFloat = 380
 
     init(companionManager: CompanionManager) {
@@ -144,6 +146,12 @@ final class MenuBarPanelManager: NSObject {
         }
 
         panel?.showAnchoredToStatusItem()
+        NotificationCenter.default.post(name: .tipTourPanelDidShow, object: nil)
+        // The window shadow is computed from the panel's visible shape; recompute
+        // it once the pill-to-panel reveal (95 + 480 ms) has settled.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) { [weak self] in
+            self?.panel?.invalidateShadow()
+        }
     }
 
     private func hidePanel() {
@@ -165,6 +173,9 @@ final class MenuBarPanelManager: NSObject {
         ) {
             CompanionPanelView(companionManager: companionManager)
         }
+        // The panel view draws a clipped material, so the window supplies the
+        // drop shadow; it follows the visible shape once the reveal settles.
+        panel?.hasShadow = true
     }
 
     private func installPanelObservers() {

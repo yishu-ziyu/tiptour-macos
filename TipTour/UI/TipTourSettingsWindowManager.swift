@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CryptoKit
 import SwiftUI
 
 @MainActor
@@ -319,6 +320,22 @@ struct PipelineLogEvent: Codable, Identifiable, Equatable {
 final class PipelineLogStore: ObservableObject {
     static let shared = PipelineLogStore()
 
+    private static let diagnosticMetadataKeys: Set<String> = [
+        "trace_id", "task_id", "tool_call_id", "operation_token",
+        "step_count", "active_step_index",
+        "total_steps", "step_index", "accepted_steps", "ignored_steps",
+        "target_count", "latest_target_count", "candidate_count",
+        "before_target_count", "after_target_count", "target_count_after_action",
+        "body_bytes", "response_bytes", "status_code", "port", "wait_ms",
+        "submission_ok", "state_changed", "paused", "resolving"
+    ]
+    private static let identifierMetadataKeys: Set<String> = [
+        "trace_id", "task_id", "tool_call_id", "operation_token"
+    ]
+    private static let booleanMetadataKeys: Set<String> = [
+        "submission_ok", "state_changed", "paused", "resolving"
+    ]
+
     @Published private(set) var events: [PipelineLogEvent] = []
     @Published private(set) var currentLogFilePath: String = ""
 
@@ -342,21 +359,12 @@ final class PipelineLogStore: ObservableObject {
         message: String? = nil,
         metadata: [String: String] = [:]
     ) {
-        var enrichedMetadata = metadata
-        if let frontmostApplication = NSWorkspace.shared.frontmostApplication {
-            enrichedMetadata["frontmost_app"] = frontmostApplication.localizedName ?? "unknown"
-            enrichedMetadata["frontmost_bundle"] = frontmostApplication.bundleIdentifier ?? "unknown"
-            enrichedMetadata["frontmost_pid"] = String(frontmostApplication.processIdentifier)
-        }
-
-        let event = PipelineLogEvent(
-            id: UUID().uuidString,
-            timestamp: Self.iso8601Formatter.string(from: Date()),
+        let event = Self.diagnosticEvent(
             category: category,
             name: name,
             status: status,
             message: message,
-            metadata: enrichedMetadata
+            metadata: metadata
         )
 
         events.append(event)
@@ -364,6 +372,37 @@ final class PipelineLogStore: ObservableObject {
             events.removeFirst(events.count - maximumInMemoryEvents)
         }
         appendToDisk(event)
+    }
+
+    static func diagnosticEvent(
+        category: String,
+        name: String,
+        status: String,
+        message: String?,
+        metadata: [String: String]
+    ) -> PipelineLogEvent {
+        // Free-form messages and metadata may contain speech, typed text or URLs.
+        PipelineLogEvent(
+            id: UUID().uuidString,
+            timestamp: Self.iso8601Formatter.string(from: Date()),
+            category: category,
+            name: name,
+            status: status,
+            message: nil,
+            metadata: metadata.reduce(into: [String: String]()) { safeMetadata, entry in
+                guard diagnosticMetadataKeys.contains(entry.key) else { return }
+                if identifierMetadataKeys.contains(entry.key) {
+                    let digest = SHA256.hash(data: Data(entry.value.utf8))
+                    safeMetadata[entry.key] = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+                } else if booleanMetadataKeys.contains(entry.key) {
+                    if entry.value == "true" || entry.value == "false" {
+                        safeMetadata[entry.key] = entry.value
+                    }
+                } else if let number = Int(entry.value), number >= 0 {
+                    safeMetadata[entry.key] = String(number)
+                }
+            }
+        )
     }
 
     func reloadFromDisk() {

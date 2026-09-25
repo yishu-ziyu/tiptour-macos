@@ -38,8 +38,61 @@ enum TipTourDefaults {
         /// credits apply.
         static let visionModel = "step-3.7-flash"
 
-        /// User's custom StepFun voice, also used by By-Your-Side.
-        static let realtimeVoice = "voice-tone-T3kZb9MwL2"
+        /// Official StepFun voice 温柔熟女, the default since the user's 2026-09-23
+        /// listening test of every official voice the realtime model accepts
+        /// (docs/development/2026-09-23-voice-conversation-quality.md). It replaced `linjiajiejie`.
+        static let defaultRealtimeVoice = "wenroushunv"
+
+        /// User's custom clone, also used by By-Your-Side. Selectable, but it
+        /// changed speaker between replies of one session in the consistency probe.
+        static let customCloneRealtimeVoice = "voice-tone-T3kZb9MwL2"
+
+        /// The voices offered in Settings, in display order. The realtime model
+        /// rejects some voices the TTS models accept, so only voices it was
+        /// observed to accept belong here.
+        static let selectableRealtimeVoices: [RealtimeVoiceOption] = [
+            RealtimeVoiceOption(voiceIdentifier: defaultRealtimeVoice, displayName: "温柔熟女",
+                caveat: nil),
+            RealtimeVoiceOption(voiceIdentifier: "qingchunshaonv", displayName: "清纯少女",
+                caveat: nil),
+            RealtimeVoiceOption(voiceIdentifier: "jingdiannvsheng", displayName: "经典女声",
+                caveat: nil),
+            RealtimeVoiceOption(voiceIdentifier: customCloneRealtimeVoice, displayName: "你的克隆音色",
+                caveat: "多轮对话里可能突然换成别的声音"),
+        ]
+
+        /// Server VAD "energy awakeness" (0–5000, provider default 2500): audio
+        /// above it counts as the user speaking. Under investigation because the
+        /// 2026-09-23 14:33 session saw 4.5–5.6 s between the user's last loud
+        /// mic buffer and `speech_stopped`, and a barge-in on a −38 dBFS mic.
+        /// `defaults write com.yishuziyu.her stepfunVADEnergyThreshold -int <n>`
+        /// changes it without a rebuild; `--vad-probe` measures candidates.
+        static var serverVADEnergyThreshold: Int {
+            let storedThreshold = UserDefaults.standard.integer(forKey: "stepfunVADEnergyThreshold")
+            return (1...5000).contains(storedThreshold) ? storedThreshold : 2500
+        }
+
+        /// The voice for the next session. Settings writes the same key that
+        /// `defaults write com.yishuziyu.her stepfunRealtimeVoice <voice>` sets,
+        /// so a voice chosen from the terminal for A/B tests still applies.
+        static var realtimeVoice: String {
+            get {
+                let storedVoice = UserDefaults.standard.string(forKey: realtimeVoiceKey)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return storedVoice.isEmpty ? defaultRealtimeVoice : storedVoice
+            }
+            set { UserDefaults.standard.set(newValue, forKey: realtimeVoiceKey) }
+        }
+
+        private static let realtimeVoiceKey = "stepfunRealtimeVoice"
+    }
+
+    struct RealtimeVoiceOption: Identifiable, Equatable {
+        let voiceIdentifier: String
+        let displayName: String
+        /// Shown under the option when the voice has a known problem.
+        let caveat: String?
+        var id: String { voiceIdentifier }
     }
 
     static func registerDefaults() {
@@ -62,6 +115,24 @@ enum TipTourDefaults {
         get { TipTourMode.restored(from: UserDefaults.standard.string(forKey: "selectedMode")) }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "selectedMode") }
     }
+
+    /// The name the user gave her. Empty means she has not been named yet.
+    ///
+    /// Read through `UserDefaults.standard`, so a `-companionName <name>` launch
+    /// argument overrides it for one run without persisting (used by the voice probe).
+    static var companionName: String {
+        get { UserDefaults.standard.string(forKey: companionNameKey) ?? "" }
+        set { UserDefaults.standard.set(sanitizedCompanionName(newValue), forKey: companionNameKey) }
+    }
+
+    /// The name is inserted into the voice session's instructions, so it is kept
+    /// to one short line: no line breaks and at most 20 characters.
+    static func sanitizedCompanionName(_ rawName: String) -> String {
+        let singleLineName = rawName.components(separatedBy: .newlines).joined(separator: " ")
+        return String(singleLineName.trimmingCharacters(in: .whitespaces).prefix(20))
+    }
+
+    private static let companionNameKey = "companionName"
 
     static var hasCompletedOnboarding: Bool {
         get { bool(for: .hasCompletedOnboarding) }

@@ -7,10 +7,13 @@ import Foundation
 /// `stepfun` replaces `gemini` as the voice provider. Gemini's API key is not
 /// obtainable in this region, so its code path is being retired — it is kept
 /// temporarily only so the app compiles while the StepFun session takes over.
+///
+/// Declaration order is the order the mode picker lists them: voice first
+/// (docs/PRODUCT.md), JEV text as the fallback entry.
 nonisolated enum TipTourMode: String, CaseIterable, Identifiable {
+    case stepfun
     case jev
     case gemini
-    case stepfun
 
     var id: String { rawValue }
     var title: String {
@@ -35,6 +38,21 @@ nonisolated enum TipTourMode: String, CaseIterable, Identifiable {
         case .jev: return "jevAPIKey"
         case .gemini: return "geminiAPIKey"
         case .stepfun: return "stepfunAPIKey"
+        }
+    }
+    /// Where a user without a key gets one; shown under the key field.
+    var keyPortalURL: URL? {
+        switch self {
+        case .stepfun: return URL(string: "https://platform.stepfun.com/")
+        case .jev: return URL(string: "https://console.typesafe.ai/settings/keys")
+        case .gemini: return URL(string: "https://aistudio.google.com/apikey")
+        }
+    }
+    var keyPortalName: String {
+        switch self {
+        case .stepfun: return "阶跃开放平台"
+        case .jev: return "TypeSafe 控制台"
+        case .gemini: return "Google AI Studio"
         }
     }
     var shortcut: String {
@@ -81,8 +99,10 @@ nonisolated enum TipTourMode: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Only a missing or unknown stored value falls back to the default, so an
+    /// existing user's saved choice is never switched underneath them.
     static func restored(from value: String?) -> Self {
-        value.flatMap(Self.init(rawValue:)) ?? .jev
+        value.flatMap(Self.init(rawValue:)) ?? .stepfun
     }
 
     /// Both voice providers need the microphone; JEV does not. Desktop permission

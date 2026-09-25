@@ -40,7 +40,7 @@ struct TipTourSettingsView: View {
                     .fill(DS.Colors.textSecondary)
                     .frame(width: 18, height: 18)
 
-                Text("TipTour")
+                Text("Her")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(DS.Colors.textPrimary)
             }
@@ -128,6 +128,20 @@ struct TipTourSettingsView: View {
 
     private var voiceSection: some View {
         VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 9) {
+                Text("她的名字")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(DS.Colors.textPrimary)
+                CompanionNameField(companionManager: companionManager)
+            }
+            if companionManager.selectedMode == .stepfun {
+                VStack(alignment: .leading, spacing: 9) {
+                    Text("她的声音")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(DS.Colors.textPrimary)
+                    RealtimeVoicePicker(companionManager: companionManager)
+                }
+            }
             ProviderSetupView(companionManager: companionManager)
         }
     }
@@ -143,6 +157,20 @@ struct TipTourSettingsView: View {
                 isOn: Binding(
                     get: { companionManager.isCuaActionDriverEnabled },
                     set: { companionManager.setCuaActionDriverEnabled($0) }
+                )
+            )
+
+            // Moved here from the panel on 2026-09-23: the panel keeps only what
+            // a user needs to start a conversation.
+            settingsRow(
+                title: "自动点击",
+                subtitle: companionManager.isAutopilotEnabled
+                    ? "找到目标后由她直接点击。"
+                    : "只指出目标位置，由你自己点击（JEV 需要自动点击）。",
+                systemImage: companionManager.isAutopilotEnabled ? "wand.and.stars" : "hand.tap",
+                isOn: Binding(
+                    get: { companionManager.isAutopilotEnabled },
+                    set: { companionManager.setAutopilotEnabled($0) }
                 )
             )
 
@@ -231,6 +259,28 @@ struct TipTourSettingsView: View {
 
     private var advancedSection: some View {
         VStack(alignment: .leading, spacing: 10) {
+            settingsRow(
+                title: "固定面板",
+                subtitle: "打开后，点击面板以外的地方也不会收起面板。",
+                systemImage: companionManager.isPanelPinned ? "pin.fill" : "pin",
+                isOn: Binding(
+                    get: { companionManager.isPanelPinned },
+                    set: { companionManager.setPanelPinned($0) }
+                )
+            )
+
+            Button {
+                NotificationCenter.default.post(name: .tipTourOpenLogs, object: nil)
+            } label: {
+                settingsActionLabel(
+                    title: "查看日志",
+                    subtitle: "打开本机运行日志窗口，排查问题时用。",
+                    systemImage: "doc.text.magnifyingglass"
+                )
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+
             settingsRow(
                 title: "Neko Mode",
                 subtitle: "Use the pixel-art cursor instead of the standard pointer.",
@@ -412,7 +462,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .models:
-            return "选择使用方式；阶跃语音和可选的 JEV 决策密钥可分别配置。"
+            return "给她起名，选择使用方式；阶跃语音和可选的 JEV 决策密钥可分别配置。"
         case .connections:
             return "Local harnesses and desktop action integrations."
         case .privacy:

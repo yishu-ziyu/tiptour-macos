@@ -587,7 +587,8 @@ struct BlueCursorView: View {
             )
 
             BlueCursorWaveformView(
-                audioPowerLevel: companionManager.currentAudioPowerLevel,
+                orbState: ThinkingOrbState(voiceState: companionManager.voiceState),
+                isOrbPaused: !waveformIsVisible,
                 transcript: companionManager.lastTranscript
             )
                 .fixedSize()
@@ -597,9 +598,10 @@ struct BlueCursorView: View {
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: waveformPosition)
                 .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
 
-            // Blue spinner — shown while the AI is processing or JEV is choosing an action
-            BlueCursorSpinnerView()
-                .opacity(buddyIsVisibleOnThisScreen && companionManager.voiceState == .processing ? cursorOpacity : 0)
+            // Connecting orb — shown while the voice session connects or JEV is choosing an action
+            let connectingOrbIsVisible = buddyIsVisibleOnThisScreen && companionManager.voiceState == .processing
+            BlueCursorConnectingOrbView(isPaused: !connectingOrbIsVisible)
+                .opacity(connectingOrbIsVisible ? cursorOpacity : 0)
                 .position(cursorPosition)
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                 .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
@@ -1523,10 +1525,11 @@ struct CursorStreakTrailView: View {
 
 // MARK: - Blue Cursor Waveform
 
-/// Light-blue speech pill that shows a compact audio animation plus
-/// Gemini Live's incremental user transcript.
+/// Light-blue speech pill: her thinking orb (listening vs. responding) plus
+/// the latest transcript.
 private struct BlueCursorWaveformView: View {
-    let audioPowerLevel: CGFloat
+    let orbState: ThinkingOrbState
+    let isOrbPaused: Bool
     let transcript: String?
 
     private var displayTranscript: String {
@@ -1547,7 +1550,7 @@ private struct BlueCursorWaveformView: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 9) {
-            MiniAudioGlyph(audioPowerLevel: audioPowerLevel)
+            ThinkingOrbView(state: orbState, size: 20, isOnDarkSurface: false, isPaused: isOrbPaused)
 
             Text(displayTranscript)
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
@@ -1568,74 +1571,27 @@ private struct BlueCursorWaveformView: View {
                 .stroke(DS.Colors.overlayCursorBlue, lineWidth: 1.4)
         )
         .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.16), radius: 8, x: 0, y: 3)
-        .animation(.linear(duration: 0.08), value: audioPowerLevel)
     }
 }
 
-private struct MiniAudioGlyph: View {
-    let audioPowerLevel: CGFloat
+// MARK: - Blue Cursor Connecting Orb
 
-    private let barProfile: [CGFloat] = [0.45, 1.0, 0.78]
-    @State private var isPulsing = false
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 3) {
-            ForEach(0..<3, id: \.self) { barIndex in
-                Capsule(style: .continuous)
-                    .fill(DS.Colors.overlayCursorBlue.opacity(barIndex == 0 ? 0.42 : 1.0))
-                    .frame(
-                        width: 3,
-                        height: barHeight(for: barIndex)
-                    )
-            }
-        }
-        .frame(width: 18, height: 18)
-        .onAppear {
-            withAnimation(.easeInOut(duration: 0.48).repeatForever(autoreverses: true)) {
-                isPulsing = true
-            }
-        }
-    }
-
-    private func barHeight(for barIndex: Int) -> CGFloat {
-        let normalizedAudioPowerLevel = max(audioPowerLevel - 0.008, 0)
-        let easedAudioPowerLevel = pow(min(normalizedAudioPowerLevel * 2.85, 1), 0.76)
-        let reactiveHeight = easedAudioPowerLevel * 11 * barProfile[barIndex]
-        let idlePulse = isPulsing
-            ? CGFloat([1.0, 0.15, 0.65][barIndex]) * 1.8
-            : CGFloat([0.15, 1.0, 0.35][barIndex]) * 1.8
-        return 3 + reactiveHeight + idlePulse
-    }
-}
-
-// MARK: - Blue Cursor Spinner
-
-/// A small blue spinning indicator that replaces the triangle cursor
-/// while the AI is processing a voice input.
-private struct BlueCursorSpinnerView: View {
-    @State private var isSpinning = false
+/// Replaces the triangle cursor while the voice session connects or JEV is
+/// choosing. The light disc behind it matches the speech pill, so the dotted
+/// orb stays legible over any page underneath.
+private struct BlueCursorConnectingOrbView: View {
+    let isPaused: Bool
 
     var body: some View {
-        Circle()
-            .trim(from: 0.15, to: 0.85)
-            .stroke(
-                AngularGradient(
-                    colors: [
-                        DS.Colors.overlayCursorBlue.opacity(0.0),
-                        DS.Colors.overlayCursorBlue
-                    ],
-                    center: .center
-                ),
-                style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
+        ThinkingOrbView(state: .connecting, size: 20, isOnDarkSurface: false, isPaused: isPaused)
+            .padding(5)
+            .background(
+                Circle().fill(Color(red: 0.90, green: 0.94, blue: 1.0).opacity(0.96))
             )
-            .frame(width: 14, height: 14)
-            .rotationEffect(.degrees(isSpinning ? 360 : 0))
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
-            .onAppear {
-                withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) {
-                    isSpinning = true
-                }
-            }
+            .overlay(
+                Circle().stroke(DS.Colors.overlayCursorBlue, lineWidth: 1.4)
+            )
+            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.16), radius: 8, x: 0, y: 3)
     }
 }
 

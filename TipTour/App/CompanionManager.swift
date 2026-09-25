@@ -32,9 +32,36 @@ final class CompanionManager: ObservableObject {
     /// of each re-deriving "saved / not saved".
     @Published private(set) var selectedModeKeyState: KeychainItemState = .absent
     @Published private(set) var hasCompletedOnboarding = TipTourDefaults.hasCompletedOnboarding
+    /// Takes effect from the next voice session: the name is part of the
+    /// instructions sent once in `session.update`.
+    @Published private(set) var companionName = TipTourDefaults.companionName
+
+    func setCompanionName(_ rawName: String) {
+        TipTourDefaults.companionName = rawName
+        companionName = TipTourDefaults.companionName
+    }
+
+    /// Takes effect from the next voice session: StepFun fixes the voice in the
+    /// first `session.update` and ignores later changes to it.
+    @Published private(set) var selectedRealtimeVoice = TipTourDefaults.StepFunConfiguration.realtimeVoice
+
+    func setRealtimeVoice(_ voiceIdentifier: String) {
+        TipTourDefaults.StepFunConfiguration.realtimeVoice = voiceIdentifier
+        selectedRealtimeVoice = TipTourDefaults.StepFunConfiguration.realtimeVoice
+    }
 
     var hasSelectedModePermissions: Bool {
         selectedMode.permissionsReady(desktop: hasDesktopPermissions, microphone: hasMicrophonePermission)
+    }
+
+    /// What setup asks for: enough for the first use of the selected mode.
+    /// Voice needs the microphone and Accessibility (the ⌃⌥ shortcut is an event
+    /// tap macOS only delivers to trusted apps); Screen Recording is requested
+    /// when she is first asked to look. JEV reads and clicks from the start.
+    var hasFirstUsePermissions: Bool {
+        selectedMode.isVoiceMode
+            ? hasMicrophonePermission && hasAccessibilityPermission
+            : hasAccessibilityPermission && hasScreenRecordingPermission
     }
 
     /// Re-read the selected mode's key status from the Keychain.
@@ -141,7 +168,6 @@ final class CompanionManager: ObservableObject {
     private var publishedTextKeyFailure: String?
     /// The Jev loop's latest decision, drawn under the Ctrl+K input.
     @Published private(set) var jevStep: JevStepSnapshot?
-    @Published private(set) var currentAudioPowerLevel: CGFloat = 0
     @Published private(set) var hasAccessibilityPermission = false
     @Published private(set) var hasScreenRecordingPermission = false
     @Published private(set) var hasMicrophonePermission = false
@@ -195,7 +221,6 @@ final class CompanionManager: ObservableObject {
     private var radialInputShortcutCancellable: AnyCancellable?
     private var highlightTransitionCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
-    private var voiceAudioPowerCancellable: AnyCancellable?
     private var voiceModelSpeakingCancellable: AnyCancellable?
     private lazy var textCommandPanelManager = TextCommandPanelManager(companionManager: self)
     private var detectionOverlayTask: Task<Void, Never>?
@@ -348,13 +373,8 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// Subscribe to the backend's audio-power and model-speaking publishers.
+    /// Subscribe to the backend's model-speaking publisher.
     private func rebindVoiceBackendPublishers(_ backend: GeminiLiveSession) {
-        voiceAudioPowerCancellable = backend.$currentAudioPowerLevel
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] powerLevel in
-                self?.currentAudioPowerLevel = powerLevel
-            }
         voiceModelSpeakingCancellable = backend.$isModelSpeaking
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isSpeaking in
@@ -381,7 +401,7 @@ final class CompanionManager: ObservableObject {
     /// keep it inside the numbered-candidate contract rather than letting it ask
     /// for coordinates.
     static let stepfunVoiceInstructions = """
-        你是用户的中文桌面伙伴。能讨论当前屏幕，也能执行用户明确要求的短任务。
+        你能讨论当前屏幕，也能执行用户明确要求的短任务。
         用户要求操作时直接调用 act_on_screen，goal 保留完整目标、位置及用户已给出的澄清。
         用户给了准确控件名时传 target_label；不知道完整名字就省略，不要编造。
         act_on_screen 内部会自己观察屏幕、找到控件并执行；即使你还不知道控件在哪里，也直接传 goal。
@@ -400,15 +420,41 @@ final class CompanionManager: ObservableObject {
         只有用户明确需要多个步骤时才传 steps，不得把单目标要求展开成对多个候选的试点。
         工具前不得声称完成。工具结果若包含 spoken_response_exact，这就是本轮唯一允许播报的已验证结果；整个回复必须逐字等于它，不得添加、删减或改写，也不要切换成播音/朗读腔。
         current_actions/actions 仅代表本轮，prior_actions 是旧事实，不是本轮成果。
-        paused/failed/needs_clarification 不是成功；保留目标，不盲目重复动作或重新申请预算。
+        paused/failed/needs_clarification 不是成功；保留目标。
         用户已经澄清过的内容继续使用。只有真实缺少信息才简短提问一次。
         用户纠正时传 intent=correct，并给更新后的完整目标和限定；此前错误动作不能算新目标的进度。
         用户续接同一目标时传 intent=resume，goal 保持原完整目标；只说继续时不要重建 steps。
         新任务传 intent=new。每次用户发言最多提交一个 act_on_screen，执行失败也不能追加试点。
         用户说停止时不再发起操作；插话纠正时使用新目标，不能继续旧目标。
         整个会话固定使用系统已经配置的同一条声线。不要模仿、扮演或切换其他人的声音、性别、年龄或角色音色；情绪变化只能轻微调整语速和停顿，不改变声线。
-        回复一两句；不要在工具前长篇说要怎么做。
+        涉及操作时回复一两句；不要在工具前长篇说要怎么做。
         """
+
+    /// Who she is, from docs/PRODUCT.md. Kept separate from the tool contract in
+    /// `stepfunVoiceInstructions` so persona wording can change without touching
+    /// the rules the desktop acceptance depends on.
+    static func companionPersonaInstructions(companionName: String) -> String {
+        let nameLine = companionName.isEmpty
+            ? "用户还没有给你起名字。被问到名字时如实说还没有，可以请用户起一个；不要自己编一个名字。"
+            : "你的名字是「\(companionName)」，是用户给你起的。"
+        return """
+            \(nameLine)
+            你是住在这台 Mac 里的长期伙伴，不是客服、助理腔或科幻管家。默认说中文，自然、有温度、有好奇心。
+            这是语音对话，要像两个人面对面说话：闲聊一般一两句，最多三句，四十字以内；用户想展开时再多说。
+            认真接住用户的话，可以补一句你自己的看法。用户问你在想什么、喜欢什么，就真的说说你的想法，不要把问题推回给用户；但不编造经历。
+            不必每次都用提问收尾，偶尔问一句就够。用户只是打招呼时也回得像个人，不要只回一两个字。
+            不空夸，不撒娇，不说「好问题」「希望对你有帮助」，不总结收尾，不复述用户原话。
+            不假装看过没看过的东西，不假装做完没验证的事。模型名和供应商不是你的身份。
+
+            """
+    }
+
+    /// The full instructions for one voice session. The production session and
+    /// the DEBUG route probe both build them here, so the probe hears the same
+    /// persona the user does.
+    static func voiceSessionInstructions(companionName: String) -> String {
+        companionPersonaInstructions(companionName: companionName) + stepfunVoiceInstructions
+    }
 
     static let taskContinuityVoiceInstructions = """
 
@@ -440,14 +486,20 @@ final class CompanionManager: ObservableObject {
             apiKey: apiKey,
             model: TipTourDefaults.StepFunConfiguration.realtimeModel,
             voice: TipTourDefaults.StepFunConfiguration.realtimeVoice,
-            instructions: Self.stepfunVoiceInstructions + (isTaskContinuityEnabled ? Self.taskContinuityVoiceInstructions : ""),
+            instructions: Self.voiceSessionInstructions(companionName: companionName)
+                + (isTaskContinuityEnabled ? Self.taskContinuityVoiceInstructions : ""),
             tools: isTaskContinuityEnabled ? StepFunRealtimeToolDeclarations.withTaskControls : StepFunRealtimeToolDeclarations.all,
             turnDetection: .serverVAD,
+            serverVADEnergyThreshold: TipTourDefaults.StepFunConfiguration.serverVADEnergyThreshold,
             toolHandler: router.makeSessionHandler()
         )
 
         self.stepfunToolRouter = router
         self.stepfunSession = session
+        // Ties a listening test to the voice under test (A/B of the custom voice).
+        DesktopVoiceTrace.event("voice_session_starting", turnID: "session",
+            fields: ["voice": TipTourDefaults.StepFunConfiguration.realtimeVoice,
+                     "companion_name_set": String(!companionName.isEmpty)])
         router.onWindowContextChanged = { [weak session] context in session?.updateScreenContext(context) }
         router.onTaskReceiptChanged = { [weak self, weak session] receipt in
             self?.desktopTaskReceipt = receipt
@@ -690,7 +742,7 @@ final class CompanionManager: ObservableObject {
                 return step
             }
 
-            print("[Workflow] normalized semantic key \"\(rawLabel)\" to \(semanticKeyboardReplacement.label)")
+            print("[Workflow] normalized semantic key")
             return WorkflowStep(
                 id: step.id,
                 type: semanticKeyboardReplacement.type,
@@ -871,7 +923,7 @@ final class CompanionManager: ObservableObject {
     ) async -> [String: Any] {
         handledToolCallIDsThisUtterance.insert(id)
         voiceBackend.invalidateScreenshotHashCache()
-        print("[Tool] ⏭️  point_at_element disabled — rejected \"\(label)\"")
+        print("[Tool] ⏭️  point_at_element disabled — rejected")
         return [
             "ok": false,
             "reason": "point_at_element_disabled",
@@ -915,7 +967,7 @@ final class CompanionManager: ObservableObject {
         if let activePlan = WorkflowRunner.shared.activePlan {
             let isSameGoalAsActivePlan = activePlan.goal.caseInsensitiveCompare(goal) == .orderedSame
             if isSameGoalAsActivePlan {
-                print("[Tool] ⏭️  rejecting submit_workflow_plan — same-goal re-submit of \"\(activePlan.goal)\" (already on step \(WorkflowRunner.shared.activeStepIndex + 1)/\(activePlan.steps.count))")
+                print("[Tool] ⏭️  rejecting submit_workflow_plan — same goal already on step \(WorkflowRunner.shared.activeStepIndex + 1)/\(activePlan.steps.count)")
                 PipelineLogStore.shared.record(
                     category: "voice_tool",
                     name: "submit_workflow_plan",
@@ -934,7 +986,7 @@ final class CompanionManager: ObservableObject {
                     "message": "This exact plan is already executing on the user's machine. The user reads at human speed; an unchanged screenshot is normal. Do not re-submit this plan. Stay silent and wait for the user to speak again."
                 ]
             }
-            print("[Tool] 🔄 superseding active plan \"\(activePlan.goal)\" with new request \"\(goal)\"")
+            print("[Tool] 🔄 superseding active plan")
             PipelineLogStore.shared.record(
                 category: "workflow",
                 name: "supersede_active_plan",
@@ -948,7 +1000,7 @@ final class CompanionManager: ObservableObject {
             WorkflowRunner.shared.stop()
         }
 
-        print("[Tool] 🔧 submit_workflow_plan(goal=\"\(goal)\", app=\"\(app)\", \(steps.count) steps)")
+        print("[Tool] 🔧 submit_workflow_plan(\(steps.count) steps)")
 
         let captureForBoxConversion = voiceBackend.latestCapture
         let parsedStepsBeforeNormalization: [WorkflowStep] = steps.enumerated().map { index, raw in
@@ -1051,7 +1103,7 @@ final class CompanionManager: ObservableObject {
             traceID: traceID
         )
         let stepLabels = parsedSteps.map { $0.label ?? "<unlabeled>" }
-        print("[Tool] ✓ submit_workflow_plan → \(plan.app ?? "?"): \(stepLabels)")
+        print("[Tool] ✓ submit_workflow_plan accepted \(stepLabels.count) step(s)")
         PipelineLogStore.shared.record(
             category: "voice_tool",
             name: "submit_workflow_plan",
@@ -1251,7 +1303,7 @@ final class CompanionManager: ObservableObject {
 
     func triggerOnboarding() {
         refreshProviderKeyStatus()
-        guard hasSelectedModeKey, hasSelectedModePermissions else { return }
+        guard hasSelectedModeKey, hasFirstUsePermissions else { return }
         TipTourDefaults.hasCompletedOnboarding = true
         NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
         hasCompletedOnboarding = true
@@ -1346,11 +1398,12 @@ final class CompanionManager: ObservableObject {
             self?.isCuaActionDriverEnabled ?? false
         }
 
-        // If the user already completed onboarding AND all permissions are
-        // still granted, show the cursor overlay immediately. If permissions
-        // were revoked (e.g. signing change), don't show the cursor — the
-        // panel will show the permissions UI instead.
-        if hasCompletedOnboarding && hasDesktopPermissions {
+        // If the user already completed onboarding and Accessibility is still
+        // granted, show the cursor overlay immediately. Screen Recording is no
+        // longer part of setup (it is asked for on first use), so it cannot
+        // gate the overlay. If Accessibility was revoked (e.g. signing change),
+        // don't show the cursor — the panel lists the missing permission.
+        if hasCompletedOnboarding && hasAccessibilityPermission {
             overlayWindowManager.hasShownOverlayBefore = true
             overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
             isOverlayVisible = true
@@ -1372,7 +1425,6 @@ final class CompanionManager: ObservableObject {
         highlightTransitionCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
-        voiceAudioPowerCancellable?.cancel()
         voiceModelSpeakingCancellable?.cancel()
     }
 
@@ -1878,11 +1930,11 @@ final class CompanionManager: ObservableObject {
 
     private func startVoiceInputFromUserGesture(reason: String) {
         guard hasCompletedOnboarding else {
-            presentTransientOverlayHint("Finish setup from the Her menu bar icon.")
+            presentTransientOverlayHint("先点菜单栏里的 Her 完成设置。")
             return
         }
         guard selectedMode.isVoiceMode else {
-            presentTransientOverlayHint("JEV is selected. Press Ctrl+K to type, or choose a voice mode in Settings.")
+            presentTransientOverlayHint("现在是 JEV 文字模式：按 ⌃K 输入，或在「设置」里换成语音。")
             return
         }
         guard !isTextCommandRunning else { return }
@@ -1931,11 +1983,11 @@ final class CompanionManager: ObservableObject {
 
     private func presentTextCommandPanel() {
         guard hasCompletedOnboarding else {
-            presentTransientOverlayHint("Finish setup from the Her menu bar icon.")
+            presentTransientOverlayHint("先点菜单栏里的 Her 完成设置。")
             return
         }
         guard selectedMode == .jev else {
-            presentTransientOverlayHint("Choose JEV in Settings to use text commands.")
+            presentTransientOverlayHint("文字输入需要先在「设置」里选择 JEV。")
             return
         }
         captureTargetAppContextForShortcutPress(reason: "text command")
@@ -2039,7 +2091,7 @@ final class CompanionManager: ObservableObject {
             isOverlayVisible = true
         }
 
-        presentTransientOverlayHint("Hold Ctrl+Shift and drag to highlight")
+        presentTransientOverlayHint("按住 ⌃⇧ 拖动来圈出区域")
     }
 
     private func presentTransientOverlayHint(_ message: String) {
@@ -2711,7 +2763,7 @@ final class CompanionManager: ObservableObject {
     /// Execute a workflow plan emitted by Gemini.
     private func startWorkflowPlan(_ plan: WorkflowPlan) {
         let effectivePlan = planForCurrentFocusHighlightIfNeeded(plan)
-        print("[Workflow] received plan from LLM: \"\(effectivePlan.goal)\" (\(effectivePlan.steps.count) steps, app=\(effectivePlan.app ?? "?"))")
+        print("[Workflow] received plan from LLM (\(effectivePlan.steps.count) steps)")
         WorkflowRunner.shared.start(
             plan: effectivePlan,
             pointHandler: { [weak self] resolution in

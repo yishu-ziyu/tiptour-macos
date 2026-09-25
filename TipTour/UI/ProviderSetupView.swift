@@ -69,6 +69,112 @@ struct ProviderSetupView: View {
     }
 }
 
+/// The one place the user names her, shared by onboarding and Settings.
+///
+/// Edits a local draft and saves every change, so the saved name is always
+/// current without writing the trimmed value back into the field (which would
+/// swallow a space the user is in the middle of typing).
+struct CompanionNameField: View {
+    @ObservedObject var companionManager: CompanionManager
+    @State private var nameDraft = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("例如：小满", text: $nameDraft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundColor(DS.Colors.textPrimary)
+                .tint(DS.Colors.accentText)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(DS.Colors.surface2))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(DS.Colors.borderStrong))
+                .accessibilityLabel("她的名字")
+                .onChange(of: nameDraft) { _, newNameDraft in
+                    companionManager.setCompanionName(newNameDraft)
+                }
+            Text("她会用这个名字回应你，从下一次语音会话开始生效。可以先空着，之后在「设置」里起。")
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .onAppear { nameDraft = companionManager.companionName }
+    }
+}
+
+/// Chooses her StepFun realtime voice from the voices the realtime model accepts.
+struct RealtimeVoicePicker: View {
+    @ObservedObject var companionManager: CompanionManager
+    @State private var hoveredVoiceIdentifier: String?
+
+    private var voiceOptions: [TipTourDefaults.RealtimeVoiceOption] {
+        TipTourDefaults.StepFunConfiguration.selectableRealtimeVoices
+    }
+
+    /// A voice set from the terminal for an A/B test is not in the list; say so
+    /// instead of showing no selection without explanation.
+    private var isSelectedVoiceOutsideList: Bool {
+        !voiceOptions.contains { $0.voiceIdentifier == companionManager.selectedRealtimeVoice }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            VStack(spacing: 6) {
+                ForEach(voiceOptions) { voiceOption in
+                    voiceOptionButton(voiceOption)
+                }
+            }
+            if isSelectedVoiceOutsideList {
+                Text("当前使用终端设置的「\(companionManager.selectedRealtimeVoice)」。选上面任意一个即可替换。")
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("从下一次语音会话开始生效。")
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.textSecondary)
+        }
+    }
+
+    private func voiceOptionButton(_ voiceOption: TipTourDefaults.RealtimeVoiceOption) -> some View {
+        let isSelected = companionManager.selectedRealtimeVoice == voiceOption.voiceIdentifier
+        let isHovered = hoveredVoiceIdentifier == voiceOption.voiceIdentifier
+        return Button { companionManager.setRealtimeVoice(voiceOption.voiceIdentifier) } label: {
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(voiceOption.displayName)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(isSelected ? DS.Colors.accentText : DS.Colors.textPrimary)
+                    if let caveat = voiceOption.caveat {
+                        Text(caveat)
+                            .font(.system(size: 11))
+                            .foregroundColor(DS.Colors.warningText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(isSelected ? DS.Colors.accentText : DS.Colors.textSecondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected
+                    ? DS.Colors.blue950.opacity(0.55)
+                    : (isHovered ? DS.Colors.surface2 : DS.Colors.surface1)))
+            .overlay(RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(isSelected ? DS.Colors.accentText.opacity(0.65) : DS.Colors.borderSubtle))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering in hoveredVoiceIdentifier = isHovering ? voiceOption.voiceIdentifier : nil }
+        .pointerCursor()
+        .accessibilityLabel("她的声音：\(voiceOption.displayName)")
+        .accessibilityValue(isSelected ? "已选择" : "未选择")
+    }
+}
+
 struct ModeSelectionView: View {
     @ObservedObject var companionManager: CompanionManager
     var compact = false
