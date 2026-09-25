@@ -180,10 +180,10 @@ struct TipTourSettingsView: View {
     private var privacySection: some View {
         VStack(alignment: .leading, spacing: 10) {
             settingsRow(
-                title: "Remote Screenshots",
+                title: "发送截图",
                 subtitle: companionManager.isScreenshotStreamingEnabled
-                    ? "She can send a screenshot to StepFun when you ask about the screen."
-                    : "Remote visual context is off; local grounding can still run.",
+                    ? "你问起屏幕时，她会把一张截图发给阶跃。"
+                    : "截图不会发出去，本机定位照常进行。",
                 systemImage: companionManager.isScreenshotStreamingEnabled ? "eye" : "eye.slash",
                 isOn: Binding(
                     get: { companionManager.isScreenshotStreamingEnabled },
@@ -192,10 +192,10 @@ struct TipTourSettingsView: View {
             )
 
             settingsRow(
-                title: "Accurate Grounding",
+                title: "精准定位",
                 subtitle: companionManager.isAccurateGroundingEnabled
-                    ? "Local YOLO/OCR targets improve grounding before LLM coordinates."
-                    : "Use AX/DOM and standard local resolvers.",
+                    ? "先用本机的图像和文字识别找目标，再参考模型给的坐标。"
+                    : "只用辅助功能信息和网页结构找目标。",
                 systemImage: "scope",
                 isOn: Binding(
                     get: { companionManager.isAccurateGroundingEnabled },
@@ -203,7 +203,7 @@ struct TipTourSettingsView: View {
                 )
             )
 
-            note("Screenshots only controls remote visual context. TipTour still uses local screen understanding for grounding and safety when enabled.")
+            note("「发送截图」只决定画面会不会发出去；本机看屏幕、定位目标和安全检查不受影响。")
         }
     }
 
@@ -282,8 +282,8 @@ struct TipTourSettingsView: View {
             .pointerCursor()
 
             settingsRow(
-                title: "Neko Mode",
-                subtitle: "Use the pixel-art cursor instead of the standard pointer.",
+                title: "小猫光标",
+                subtitle: "用像素小猫代替普通指针。",
                 systemImage: "cat.fill",
                 isOn: Binding(
                     get: { companionManager.isNekoModeEnabled },
@@ -293,8 +293,8 @@ struct TipTourSettingsView: View {
 
             #if DEBUG
             settingsRow(
-                title: "Detection Overlay",
-                subtitle: "Show local CoreML and OCR boxes for debugging.",
+                title: "识别框",
+                subtitle: "显示本机 CoreML 和 OCR 识别到的框，调试时用。",
                 systemImage: "viewfinder",
                 isOn: Binding(
                     get: { companionManager.isDetectionOverlayEnabled },
@@ -308,11 +308,11 @@ struct TipTourSettingsView: View {
                     CGPoint(x: $0.frame.midX, y: $0.frame.midY)
                 }
                 companionManager.detectedElementDisplayFrame = screen?.frame
-                companionManager.detectedElementBubbleText = "Test"
+                companionManager.detectedElementBubbleText = "测试"
             } label: {
                 settingsActionLabel(
-                    title: "Test Cursor Flight",
-                    subtitle: "Send the overlay pointer to the center of the main screen.",
+                    title: "测试指针飞行",
+                    subtitle: "让她的指针飞到主屏幕中央。",
                     systemImage: "arrow.up.right"
                 )
             }
@@ -453,9 +453,9 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .models: return "Models"
         case .connections: return "Desktop actions"
-        case .privacy: return "Privacy"
+        case .privacy: return "隐私"
         case .permissions: return "Permissions"
-        case .advanced: return "Advanced"
+        case .advanced: return "高级"
         }
     }
 
@@ -466,11 +466,11 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .connections:
             return "Local harnesses and desktop action integrations."
         case .privacy:
-            return "Control what can leave the Mac and how local grounding runs."
+            return "决定哪些内容会离开这台 Mac，以及本机怎样定位目标。"
         case .permissions:
             return "macOS access TipTour needs to hear, see, and act."
         case .advanced:
-            return "Experimental visuals and development controls."
+            return "实验性外观和开发调试选项。"
         }
     }
 
