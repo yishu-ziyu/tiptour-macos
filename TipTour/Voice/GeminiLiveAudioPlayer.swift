@@ -73,6 +73,24 @@ final class GeminiLiveAudioPlayer {
     private var playbackQueueState = AudioPlaybackQueueState()
     private let pendingBufferLock = NSLock()
 
+    /// A PCM16 sample can be split across two network chunks. The odd trailing
+    /// byte is held for the next chunk instead of discarding the whole chunk,
+    /// which was an audible dropout.
+    private var carriedOddByte: UInt8?
+
+    /// Per-response playback facts for telemetry, reset by the session at each
+    /// `response.created`. An underrun is a chunk that arrived after the queue
+    /// had already played out: the user heard a gap inside her reply.
+    private(set) var underrunCountSinceReset = 0
+    private(set) var oddByteChunkCountSinceReset = 0
+    private var hasScheduledSinceReset = false
+
+    func resetPlaybackStatistics() {
+        underrunCountSinceReset = 0
+        oddByteChunkCountSinceReset = 0
+        hasScheduledSinceReset = false
+    }
+
     init() {
         guard let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -119,6 +137,7 @@ final class GeminiLiveAudioPlayer {
             return
         }
         pendingBufferLock.withLock { playbackQueueState.reset() }
+        carriedOddByte = nil
         playerNode.stop()
         engine.detach(playerNode)
         sharedEngine = nil
@@ -144,6 +163,7 @@ final class GeminiLiveAudioPlayer {
     func clearQueuedAudio() {
         guard isAttachedAndConnected else { return }
         pendingBufferLock.withLock { playbackQueueState.reset() }
+        carriedOddByte = nil
         playerNode.stop()
         if let engine = sharedEngine, engine.isRunning {
             playerNode.play()
@@ -171,15 +191,31 @@ final class GeminiLiveAudioPlayer {
             playerNode.play()
         }
 
-        guard let audioBuffer = makeAudioBuffer(from: pcm16Data) else {
-            print("[GeminiLiveAudio] Could not create buffer from \(pcm16Data.count)-byte chunk")
+        var wholeSampleData = Data()
+        if let carriedOddByte {
+            wholeSampleData.append(carriedOddByte)
+            self.carriedOddByte = nil
+        }
+        wholeSampleData.append(pcm16Data)
+        if pcm16Data.count % 2 != 0 { oddByteChunkCountSinceReset += 1 }
+        if wholeSampleData.count % 2 != 0 {
+            carriedOddByte = wholeSampleData.removeLast()
+        }
+        guard !wholeSampleData.isEmpty else { return }
+
+        guard let audioBuffer = makeAudioBuffer(from: wholeSampleData) else {
+            print("[GeminiLiveAudio] Could not create buffer from \(wholeSampleData.count)-byte chunk")
             return
         }
 
         // Track this buffer through render so the session can detect
         // when audio actually finishes playing. The completion handler
         // runs on a real-time audio thread — keep it cheap and lock-safe.
-        let generation = pendingBufferLock.withLock { playbackQueueState.schedule() }
+        let (generation, queueHadPlayedOut) = pendingBufferLock.withLock {
+            (playbackQueueState.schedule(), playbackQueueState.pendingCount == 1)
+        }
+        if hasScheduledSinceReset && queueHadPlayedOut { underrunCountSinceReset += 1 }
+        hasScheduledSinceReset = true
         // The default callback reports data consumption, before audible playback
         // finishes. Tool follow-ups must wait until the user has heard the reply.
         playerNode.scheduleBuffer(audioBuffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in

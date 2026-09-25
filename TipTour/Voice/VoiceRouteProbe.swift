@@ -98,6 +98,41 @@ final class VoiceRouteProbe {
             }
             return true
         }
+        if let index = arguments.firstIndex(of: "--voice-consistency-probe"), arguments.count > index + 3 {
+            SecKeychainSetUserInteractionAllowed(false)
+            Task {
+                let outputDirectory = URL(fileURLWithPath: arguments[index + 2])
+                let turnAudioURLs = arguments[(index + 3)...]
+                    .prefix { !$0.hasPrefix("-") }
+                    .map { URL(fileURLWithPath: $0) }
+                do {
+                    try await VoiceConsistencyProbe().run(voice: arguments[index + 1],
+                        outputDirectory: outputDirectory, turnAudioURLs: Array(turnAudioURLs))
+                    print("[VoiceConsistencyProbe] Finished: \(outputDirectory.path)")
+                } catch {
+                    print("[VoiceConsistencyProbe] Failed: \(error.localizedDescription)")
+                }
+                NSApplication.shared.terminate(nil)
+            }
+            return true
+        }
+        if let index = arguments.firstIndex(of: "--vad-probe"), arguments.count > index + 4 {
+            SecKeychainSetUserInteractionAllowed(false)
+            Task {
+                do {
+                    try await ServerVADProbe().run(
+                        outputURL: URL(fileURLWithPath: arguments[index + 1]),
+                        speechURL: URL(fileURLWithPath: arguments[index + 2]),
+                        noiseDecibelsFullScale: Double(arguments[index + 3]) ?? -60,
+                        tailSeconds: Double(arguments[index + 4]) ?? 6)
+                    print("[ServerVADProbe] Finished: \(arguments[index + 1])")
+                } catch {
+                    print("[ServerVADProbe] Failed: \(error.localizedDescription)")
+                }
+                NSApplication.shared.terminate(nil)
+            }
+            return true
+        }
         let flags = ["--voice-route-probe", "--voice-task-probe", "--desktop-task-probe"]
         guard let index = arguments.firstIndex(where: { flags.contains($0) }) else { return false }
         // A diagnostic must fail clearly rather than resume a desktop action
@@ -217,7 +252,7 @@ final class VoiceRouteProbe {
             let session = StepFunRealtimeSession(apiKey: key,
                 model: TipTourDefaults.StepFunConfiguration.realtimeModel,
                 voice: TipTourDefaults.StepFunConfiguration.realtimeVoice,
-                instructions: CompanionManager.stepfunVoiceInstructions,
+                instructions: CompanionManager.voiceSessionInstructions(companionName: TipTourDefaults.companionName),
                 tools: StepFunRealtimeToolDeclarations.all, turnDetection: .manual,
                 toolHandler: recordingTools)
             let startedAt = Date()
@@ -239,7 +274,7 @@ final class VoiceRouteProbe {
         let client = StepFunRealtimeClient(
             apiKey: key, model: TipTourDefaults.StepFunConfiguration.realtimeModel,
             voice: TipTourDefaults.StepFunConfiguration.realtimeVoice,
-            instructions: CompanionManager.stepfunVoiceInstructions,
+            instructions: CompanionManager.voiceSessionInstructions(companionName: TipTourDefaults.companionName),
             tools: StepFunRealtimeToolDeclarations.all, turnDetection: .manual
         ) { [weak self] event in self?.receive(event) }
         defer { client.disconnect() }

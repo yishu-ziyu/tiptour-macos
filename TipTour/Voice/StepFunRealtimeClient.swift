@@ -67,7 +67,7 @@ enum StepFunRealtimeEvent {
     /// The server started generating a response. This is the point where an
     /// interrupted response is definitively superseded, so the session stops
     /// waiting for the cancelled response's completion.
-    case responseCreated
+    case responseCreated(responseID: String?)
 
     /// The model asked for a tool. Arguments are the complete JSON string once
     /// `response.function_call_arguments.done` arrives — the deltas are only
@@ -81,7 +81,7 @@ enum StepFunRealtimeEvent {
     /// The server began hearing the user — the cue to stop playing audio.
     case userStartedSpeaking
     case userStoppedSpeaking
-    case responseAborted
+    case responseAborted(responseID: String?, status: String)
 
     /// The socket closed without the app asking. Reconnectable.
     case unexpectedDisconnect(Error)
@@ -127,6 +127,8 @@ final class StepFunRealtimeClient {
     private let instructions: String
     private let tools: [[String: Any]]
     private let turnDetection: StepFunTurnDetection
+    /// Server VAD `energy_awakeness_threshold` (0–5000; provider default 2500).
+    let serverVADEnergyThreshold: Int
     /// Mutable so a session can bind its handler after its own stored
     /// properties are initialized — a closure that captures the session cannot be
     /// passed while the session's `let client` is still being constructed.
@@ -181,6 +183,7 @@ final class StepFunRealtimeClient {
         instructions: String,
         tools: [[String: Any]] = [],
         turnDetection: StepFunTurnDetection,
+        serverVADEnergyThreshold: Int = 2500,
         eventHandler: @escaping @MainActor (StepFunRealtimeEvent) -> Void = { _ in }
     ) {
         self.apiKey = apiKey
@@ -189,6 +192,7 @@ final class StepFunRealtimeClient {
         self.instructions = instructions
         self.tools = tools
         self.turnDetection = turnDetection
+        self.serverVADEnergyThreshold = serverVADEnergyThreshold
         self.eventHandler = eventHandler
 
         let configuration = URLSessionConfiguration.default
@@ -409,11 +413,18 @@ final class StepFunRealtimeClient {
         ]])
     }
 
-    /// Stop the current spoken response — the barge-in path.
-    func cancelCurrentResponse() {
-        stateLock.withLock { responseBoundary.cancel() }
-        guard stateLock.withLock({ isReadyForInput }) else { return }
+    /// Stop the current spoken response — the barge-in path. Returns the id of
+    /// the response the client believed was active, for diagnostics only.
+    @discardableResult
+    func cancelCurrentResponse() -> String? {
+        let activeID = stateLock.withLock { () -> String? in
+            let id = responseBoundary.activeID
+            responseBoundary.cancel()
+            return id
+        }
+        guard stateLock.withLock({ isReadyForInput }) else { return activeID }
         enqueueOutbound(["type": "response.cancel"])
+        return activeID
     }
 
     /// Discard buffered input audio that has not been committed yet.
@@ -503,7 +514,7 @@ final class StepFunRealtimeClient {
                 "type": "server_vad",
                 "prefix_padding_ms": 500,
                 "silence_duration_ms": 100,
-                "energy_awakeness_threshold": 2500,
+                "energy_awakeness_threshold": serverVADEnergyThreshold,
             ]
         case .manual:
             // Omitting the field leaves VAD on — it has to be turned off
@@ -618,7 +629,7 @@ final class StepFunRealtimeClient {
 
         case "response.created":
             guard stateLock.withLock({ responseBoundary.begin(id: responseID) }) else { return }
-            await emit(.responseCreated)
+            await emit(.responseCreated(responseID: responseID))
 
         case "conversation.item.input_audio_transcription.completed":
             if let transcript = payload["transcript"] as? String {
@@ -644,7 +655,7 @@ final class StepFunRealtimeClient {
                let status = response["status"] as? String,
                ["cancelled", "canceled", "failed", "incomplete"].contains(status) {
                 stateLock.withLock { responseBoundary.cancel() }
-                await emit(.responseAborted)
+                await emit(.responseAborted(responseID: responseID, status: status))
                 return
             }
             // Recover a complete call from the response manifest when a delta

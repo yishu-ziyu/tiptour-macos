@@ -265,6 +265,109 @@ struct StepFunTurnLifecycle {
     }
 }
 
+// MARK: - Barge-in onset estimate
+
+/// Estimates, from the echo-cancelled microphone, when the user started talking
+/// over her and when the user last made sound, so both presence latencies can be
+/// measured from the user's side rather than from the server's VAD events.
+///
+/// Local playback already stops the instant `speech_started` arrives; the delay
+/// the user feels is the server's detection time. Likewise `speech_stopped`
+/// only fires after the server's silence window, which the user also waits
+/// through. The onset is the first of `requiredConsecutiveBuffers` buffers
+/// above `loudThresholdRMS` after she began speaking. Background noise can trip
+/// either estimate, so they are bounds, never precise values.
+///
+/// `observe` runs on the audio render thread; the lock is the only shared state.
+nonisolated final class BargeInOnsetEstimator: @unchecked Sendable {
+    /// About −45 dBFS. −35 dBFS never fired in the 2026-09-23 session, including
+    /// two 5–6 s interruptions: voice processing attenuates the near end while
+    /// she is playing. `peakRMSWhileArmed` is reported so this can be calibrated.
+    private static let loudThresholdRMS: Float = 0.0056
+    /// Roughly 60–70 ms at common device rates with 1024-frame buffers; ignores clicks.
+    private static let requiredConsecutiveBuffers = 3
+
+    struct BargeInObservation {
+        let onsetAt: Date?
+        let peakDecibelsFullScaleWhileArmed: Int?
+    }
+
+    private let lock = NSLock()
+    private var isArmed = false
+    private var firstLoudBufferAt: Date?
+    private var consecutiveLoudBuffers = 0
+    private var confirmedOnsetAt: Date?
+    private var peakRMSWhileArmed: Float = 0
+    private var lastLoudBufferAt: Date?
+    /// Slow average of every buffer's RMS: the room level the server hears
+    /// between words (about a 0.3 s time constant at 1024-frame buffers).
+    private var smoothedRMS: Float = 0
+
+    /// Called when she starts speaking a response; forgets any earlier onset.
+    func arm() {
+        lock.withLock {
+            isArmed = true
+            firstLoudBufferAt = nil
+            consecutiveLoudBuffers = 0
+            confirmedOnsetAt = nil
+            peakRMSWhileArmed = 0
+        }
+    }
+
+    /// Returns what was seen since `arm()` and stops watching for an onset.
+    func takeBargeInObservationAndDisarm() -> BargeInObservation {
+        lock.withLock {
+            let observation = BargeInObservation(
+                onsetAt: confirmedOnsetAt,
+                peakDecibelsFullScaleWhileArmed: isArmed && peakRMSWhileArmed > 0
+                    ? Int((20 * log10(peakRMSWhileArmed)).rounded()) : nil
+            )
+            isArmed = false
+            firstLoudBufferAt = nil
+            consecutiveLoudBuffers = 0
+            confirmedOnsetAt = nil
+            peakRMSWhileArmed = 0
+            return observation
+        }
+    }
+
+    /// The last microphone buffer above the loudness threshold, armed or not.
+    var mostRecentLoudBufferAt: Date? {
+        lock.withLock { lastLoudBufferAt }
+    }
+
+    var smoothedDecibelsFullScale: Int? {
+        lock.withLock { smoothedRMS > 0 ? Int((20 * log10(smoothedRMS)).rounded()) : nil }
+    }
+
+    func observe(_ buffer: AVAudioPCMBuffer) {
+        guard let samples = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
+        var sumOfSquares: Float = 0
+        for sampleIndex in 0..<Int(buffer.frameLength) {
+            sumOfSquares += samples[sampleIndex] * samples[sampleIndex]
+        }
+        let rootMeanSquare = (sumOfSquares / Float(buffer.frameLength)).squareRoot()
+        let bufferArrivedAt = Date()
+        lock.withLock {
+            smoothedRMS = smoothedRMS == 0 ? rootMeanSquare : smoothedRMS * 0.93 + rootMeanSquare * 0.07
+            if rootMeanSquare >= Self.loudThresholdRMS { lastLoudBufferAt = bufferArrivedAt }
+            guard isArmed else { return }
+            peakRMSWhileArmed = max(peakRMSWhileArmed, rootMeanSquare)
+            guard confirmedOnsetAt == nil else { return }
+            guard rootMeanSquare >= Self.loudThresholdRMS else {
+                firstLoudBufferAt = nil
+                consecutiveLoudBuffers = 0
+                return
+            }
+            if firstLoudBufferAt == nil { firstLoudBufferAt = bufferArrivedAt }
+            consecutiveLoudBuffers += 1
+            if consecutiveLoudBuffers >= Self.requiredConsecutiveBuffers {
+                confirmedOnsetAt = firstLoudBufferAt
+            }
+        }
+    }
+}
+
 // MARK: - Session
 
 @MainActor
@@ -281,6 +384,7 @@ final class StepFunRealtimeSession {
 
     private var audioEngine = AVAudioEngine()
     private let audioPlayer = GeminiLiveAudioPlayer()
+    private let bargeInOnsetEstimator = BargeInOnsetEstimator()
     private let pcm16Converter: BuddyPCM16AudioConverter
 
     private var turnLifecycle = StepFunTurnLifecycle()
@@ -294,6 +398,9 @@ final class StepFunRealtimeSession {
     private var suppressAudioForCurrentResponse = false
     private var didTraceSuppressedAudioForCurrentResponse = false
     private var currentUserSpeechStoppedAt: Date?
+    private var currentUserTurnStartedAt = Date.distantPast
+    /// Last loud mic buffer of this utterance; see `BargeInOnsetEstimator`.
+    private var estimatedUserSpeechEndAt: Date?
     private var currentResponseCreatedAt: Date?
     private var currentTurnID = UUID().uuidString
     private var inputTurnIDs: [String: String] = [:]
@@ -314,6 +421,18 @@ final class StepFunRealtimeSession {
 
     private var isMicrophoneTapInstalled = false
 
+    /// macOS stops the engine on its own when the audio configuration changes
+    /// (for example right after voice processing rebuilds the aggregate device)
+    /// and only posts a notification. Without an observer the session keeps
+    /// looking live while the microphone and the speaker are both dead.
+    private var audioConfigurationObserver: NSObjectProtocol?
+    private var audioRestartTimes: [Date] = []
+    /// A restart builds a fresh engine and re-enables voice processing, which can
+    /// itself change the configuration again. Past this budget the session stops
+    /// and says so instead of looping.
+    private static let audioRestartLimit = 3
+    private static let audioRestartWindow: TimeInterval = 30
+
     /// The player reports a buffer as rendered when it is consumed, but the last
     /// few milliseconds are still inside the output hardware buffer. This margin
     /// keeps the follow-up response from clipping the final syllable.
@@ -329,6 +448,7 @@ final class StepFunRealtimeSession {
         instructions: String,
         tools: [[String: Any]],
         turnDetection: StepFunTurnDetection,
+        serverVADEnergyThreshold: Int = 2500,
         toolHandler: StepFunRealtimeToolHandling
     ) {
         self.toolHandler = toolHandler
@@ -342,7 +462,8 @@ final class StepFunRealtimeSession {
             voice: voice,
             instructions: instructions,
             tools: tools,
-            turnDetection: turnDetection
+            turnDetection: turnDetection,
+            serverVADEnergyThreshold: serverVADEnergyThreshold
         )
         // Bound only after every stored property exists: the closure captures the
         // session, which is not fully initialized while `client` is being built.
@@ -576,10 +697,20 @@ final class StepFunRealtimeSession {
             // instead would make a barge-in undetectable and would leave the
             // microphone dead for the rest of the session if a turn ever failed
             // to complete.
+            self.bargeInOnsetEstimator.observe(buffer)
             guard let pcm16Data = self.pcm16Converter.convertToPCM16Data(from: buffer) else { return }
             self.client.sendAudioChunk(pcm16Data)
         }
         isMicrophoneTapInstalled = true
+
+        let engineID = ObjectIdentifier(audioEngine)
+        audioConfigurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: audioEngine, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleAudioConfigurationChange(ofEngine: engineID)
+            }
+        }
 
         audioEngine.prepare()
         try audioEngine.start()
@@ -588,6 +719,10 @@ final class StepFunRealtimeSession {
     }
 
     private func stopMicrophoneCapture() {
+        if let audioConfigurationObserver {
+            NotificationCenter.default.removeObserver(audioConfigurationObserver)
+            self.audioConfigurationObserver = nil
+        }
         // Only remove a tap that was actually installed: removeTap without one
         // raises an Objective-C exception, which would turn a failed start into
         // a crash on the way out.
@@ -597,6 +732,55 @@ final class StepFunRealtimeSession {
         }
         if audioEngine.isRunning {
             audioEngine.stop()
+        }
+    }
+
+    /// Rebuilds capture and playback on a fresh engine after macOS stopped the
+    /// old one. Speech that was playing at that moment is already lost; the
+    /// queue is cleared so a drain wait does not wait for it.
+    private func handleAudioConfigurationChange(ofEngine engineID: ObjectIdentifier) {
+        guard engineID == ObjectIdentifier(audioEngine), state.isSessionActive else { return }
+        let now = Date()
+        audioRestartTimes = audioRestartTimes.filter { now.timeIntervalSince($0) < Self.audioRestartWindow }
+        guard audioRestartTimes.count < Self.audioRestartLimit else {
+            DesktopVoiceTrace.event("microphone_restart_gave_up", turnID: currentTurnID,
+                fields: ["restarts_in_window": String(audioRestartTimes.count)])
+            state.errorMessage = "麦克风设备反复变化，已停止语音会话。再次按下快捷键即可重试。"
+            Task { await stop() }
+            return
+        }
+        audioRestartTimes.append(now)
+        DesktopVoiceTrace.event("audio_configuration_changed", turnID: currentTurnID,
+            fields: ["engine_was_running": String(audioEngine.isRunning)])
+
+        // Measured 2026-09-25 on the built-in mic: enabling voice processing
+        // stops the engine once, about 0.2 s after start. Starting the same
+        // engine again keeps voice processing and the tap and stays running.
+        // A fresh engine re-enables voice processing and triggers the same stop
+        // again, so it is only the fallback.
+        audioPlayer.clearQueuedAudio()
+        do {
+            try audioEngine.start()
+            audioPlayer.startPlaying()
+            DesktopVoiceTrace.event("microphone_restarted", turnID: currentTurnID,
+                fields: ["restarts_in_window": String(audioRestartTimes.count), "mode": "same_engine"])
+            return
+        } catch {
+            DesktopVoiceTrace.event("microphone_same_engine_restart_failed", turnID: currentTurnID)
+        }
+
+        stopMicrophoneCapture()
+        audioPlayer.clearQueuedAudio()
+        audioPlayer.detach()
+        do {
+            try startMicrophoneCapture()
+            audioPlayer.startPlaying()
+            DesktopVoiceTrace.event("microphone_restarted", turnID: currentTurnID,
+                fields: ["restarts_in_window": String(audioRestartTimes.count), "mode": "fresh_engine"])
+        } catch {
+            DesktopVoiceTrace.event("microphone_restart_failed", turnID: currentTurnID)
+            state.errorMessage = "麦克风重新启动失败：\(error.localizedDescription)"
+            Task { await stop() }
         }
     }
 
@@ -652,9 +836,14 @@ final class StepFunRealtimeSession {
             }
             if !didReceiveAudioForCurrentResponse {
                 didReceiveAudioForCurrentResponse = true
+                bargeInOnsetEstimator.arm()
                 var fields = ["buffered_receipt": String(expectedSpokenReceipt != nil)]
                 if let currentUserSpeechStoppedAt {
                     fields["ms_since_speech_stopped"] = String(Int(Date().timeIntervalSince(currentUserSpeechStoppedAt) * 1000))
+                }
+                if let estimatedUserSpeechEndAt {
+                    fields["ms_since_estimated_user_speech_end"] =
+                        String(Int(Date().timeIntervalSince(estimatedUserSpeechEndAt) * 1000))
                 }
                 if let currentResponseCreatedAt {
                     fields["ms_since_response_created"] = String(Int(Date().timeIntervalSince(currentResponseCreatedAt) * 1000))
@@ -689,13 +878,17 @@ final class StepFunRealtimeSession {
         case .outputTranscriptFinal(let text):
             guard turnLifecycle.phase != .interrupted else { return }
             if suppressAudioForCurrentResponse, expectedSpokenReceipt == nil { return }
+            // Her words go only to the opt-in DEBUG diagnostics file, never the public log.
+            DesktopVoiceTrace.event("output_transcript_final", turnID: currentTurnID,
+                fields: ["receipt": String(expectedSpokenReceipt != nil)],
+                privateFields: ["transcript": text])
             if expectedSpokenReceipt != nil {
                 pendingReceiptTranscript = text
             } else {
                 state.lastOutputTranscript = text
             }
 
-        case .responseCreated:
+        case .responseCreated(let responseID):
             #if DEBUG
             syntheticProbeResponseCount += 1
             #endif
@@ -704,8 +897,10 @@ final class StepFunRealtimeSession {
             suppressAudioForCurrentResponse = false
             didTraceSuppressedAudioForCurrentResponse = false
             currentResponseCreatedAt = Date()
+            audioPlayer.resetPlaybackStatistics()
             turnLifecycle.recordResponseCreated()
-            DesktopVoiceTrace.event("response_created", turnID: currentTurnID)
+            DesktopVoiceTrace.event("response_created", turnID: currentTurnID,
+                fields: ["response_id": responseID ?? "none"])
 
         case .toolCall(let callID, let name, let argumentsJSON):
             startToolWork(callID: callID, name: name, argumentsJSON: argumentsJSON)
@@ -719,6 +914,10 @@ final class StepFunRealtimeSession {
             playbackProbeSpeechStarts += 1
             #endif
             didRequestDesktopTaskThisUtterance = false
+            // Read before anything below clears playback: this is what makes the
+            // speech start a barge-in rather than an ordinary new turn.
+            let wasSpeakingWhenUserStarted = state.isModelSpeaking || audioPlayer.isPlaying
+            let bargeInObservation = bargeInOnsetEstimator.takeBargeInObservationAndDisarm()
             // Always pause the application task, including while the realtime
             // response is idle after an asynchronous task admission.
             if toolHandler.preservesTaskLifetime {
@@ -731,16 +930,43 @@ final class StepFunRealtimeSession {
             currentTurnID = UUID().uuidString
             state.lastInputTranscript = ""
             currentUserSpeechStoppedAt = nil
+            currentUserTurnStartedAt = Date()
+            estimatedUserSpeechEndAt = nil
             currentResponseCreatedAt = nil
             toolHandler.beginUserTurn(currentTurnID)
             refreshTaskContext()
             DesktopVoiceTrace.event("user_turn_started", turnID: currentTurnID)
+            if wasSpeakingWhenUserStarted {
+                var bargeInFields = ["local_onset_detected": String(bargeInObservation.onsetAt != nil)]
+                if let estimatedUserOnsetAt = bargeInObservation.onsetAt {
+                    bargeInFields["ms_since_estimated_user_onset"] =
+                        String(Int(Date().timeIntervalSince(estimatedUserOnsetAt) * 1000))
+                }
+                if let peakDecibels = bargeInObservation.peakDecibelsFullScaleWhileArmed {
+                    bargeInFields["mic_peak_dbfs_while_speaking"] = String(peakDecibels)
+                }
+                DesktopVoiceTrace.event("barge_in_detected", turnID: currentTurnID, fields: bargeInFields)
+            }
 
         case .userStoppedSpeaking:
             currentUserSpeechStoppedAt = Date()
-            DesktopVoiceTrace.event("user_speech_stopped", turnID: currentTurnID)
+            // Only a loud buffer inside this utterance counts; anything older
+            // than the utterance start is noise from before the user spoke.
+            estimatedUserSpeechEndAt = bargeInOnsetEstimator.mostRecentLoudBufferAt
+                .flatMap { lastLoudAt in lastLoudAt > currentUserTurnStartedAt ? lastLoudAt : nil }
+            var stoppedFields: [String: String] = [
+                "vad_energy_threshold": String(client.serverVADEnergyThreshold)
+            ]
+            if let micLevel = bargeInOnsetEstimator.smoothedDecibelsFullScale {
+                stoppedFields["mic_level_dbfs_at_speech_stopped"] = String(micLevel)
+            }
+            if let estimatedUserSpeechEndAt {
+                stoppedFields["ms_server_silence_window_estimate"] =
+                    String(Int(Date().timeIntervalSince(estimatedUserSpeechEndAt) * 1000))
+            }
+            DesktopVoiceTrace.event("user_speech_stopped", turnID: currentTurnID, fields: stoppedFields)
 
-        case .responseAborted:
+        case .responseAborted(let responseID, let status):
             clearExpectedReceiptSpeech()
             audioPlayer.clearQueuedAudio()
             playbackDrainTask?.cancel()
@@ -748,7 +974,8 @@ final class StepFunRealtimeSession {
             cancelOutstandingToolWork()
             turnLifecycle.reset()
             state.isModelSpeaking = false
-            DesktopVoiceTrace.event("response_aborted", turnID: currentTurnID)
+            DesktopVoiceTrace.event("response_aborted", turnID: currentTurnID,
+                fields: ["response_id": responseID ?? "none", "status": status])
 
         case .unexpectedDisconnect(let error):
             state.errorMessage = "Voice connection dropped: \(error.localizedDescription)"
@@ -910,7 +1137,9 @@ final class StepFunRealtimeSession {
     private func handlePlaybackDrained(runID: Int) {
         state.isModelSpeaking = false
         DesktopVoiceTrace.event("playback_drain_finished", turnID: currentTurnID,
-            fields: ["queued_buffers": String(audioPlayer.pendingBufferCount)])
+            fields: ["queued_buffers": String(audioPlayer.pendingBufferCount),
+                     "underruns": String(audioPlayer.underrunCountSinceReset),
+                     "odd_byte_chunks": String(audioPlayer.oddByteChunkCountSinceReset)])
 
         switch turnLifecycle.recordPlaybackDrained() {
         case .finishTurn:
@@ -985,7 +1214,9 @@ final class StepFunRealtimeSession {
             playbackDrainTask?.cancel()
             playbackDrainTask = nil
             cancelOutstandingToolWork()
-            client.cancelCurrentResponse()
+            let cancelledResponseID = client.cancelCurrentResponse()
+            DesktopVoiceTrace.event("response_cancel_sent", turnID: currentTurnID,
+                fields: ["believed_active_response_id": cancelledResponseID ?? "none", "reason": "barge_in"])
             print("[StepFunRealtimeSession] barge-in: cancelled the model response")
 
         case .abandonCurrentTurn:
@@ -1014,7 +1245,9 @@ final class StepFunRealtimeSession {
             playbackDrainTask?.cancel()
             playbackDrainTask = nil
             cancelOutstandingToolWork()
-            client.cancelCurrentResponse()
+            let cancelledResponseID = client.cancelCurrentResponse()
+            DesktopVoiceTrace.event("response_cancel_sent", turnID: currentTurnID,
+                fields: ["believed_active_response_id": cancelledResponseID ?? "none", "reason": "discard_followup"])
             rebuildSessionAfterDiscardedFollowup()
             print("[StepFunRealtimeSession] barge-in: discarded the pending tool-result follow-up and rebuilt the session")
 
