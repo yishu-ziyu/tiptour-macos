@@ -11,7 +11,7 @@
 | `TipTour/Perception` | AX, browser geometry, CoreML/OCR, screenshots, target cache |
 | `TipTour/Harnesses` | Localhost HTTP access to the engine |
 | `TipTour/Skills` | Portable markdown app guidance and small runtime hints |
-| `TipTour/UI` | Menu bar, Settings, command panel, pointer and detection overlays |
+| `TipTour/UI` | Menu bar, Settings, command panel, pointer and detection overlays; `UI/Panel` holds the menu bar panel's pieces |
 | `TipTour/Utilities` | Permissions, Keychain, preferences, shortcuts, logging and analytics |
 
 Gemini, JEV and StepFun use the same action engine. Keep provider networking in their respective directories, execution in the action/workflow layer, and app-specific quirks in markdown skills. Neither UI nor providers should bypass the engine's action permissions or pauses.

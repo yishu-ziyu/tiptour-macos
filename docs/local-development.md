@@ -120,3 +120,13 @@ Enter provider keys once through Her's normal settings. Successful key reads
 remain cached only in the current process; settings presence checks do not
 decrypt. Do not copy secrets from the old service, weaken ACLs, write keys to
 `.env`, or use the old self-signed identity as a workaround.
+
+## Documentation pre-commit hook
+
+Enable once per clone:
+
+```sh
+git config core.hooksPath scripts/git-hooks
+```
+
+`scripts/git-hooks/pre-commit` runs `python3 scripts/check-docs.py --staged` and blocks a commit on broken links, unindexed documents, missing paths or key-file size drift. The rules behind it are the documentation sync rule in `AGENTS.md`.

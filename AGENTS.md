@@ -1,296 +1,73 @@
 # Her — Agent Instructions
 
-This file is the source of truth for coding agents; CLAUDE.md is a symlink.
+This file is the entry point for coding agents; `CLAUDE.md` is a symlink to it. It holds only the rules that apply to every change and a map of where everything else is written. Details live in small documents under `docs/`, indexed by [`docs/README.md`](docs/README.md).
 
-## Product
+## What this repository is
 
-The shipped product identity is now **Her** (`com.yishuziyu.her`) and local development uses Personal Team `87DM76C54G` with Apple Development signing. The repository, source folder, Swift module and many internal type names still use the historical `TipTour` namespace during migration. Do not perform a cosmetic whole-codebase rename while product/runtime consolidation is still in progress.
+- **Her** (`com.yishuziyu.her`, Personal Team `87DM76C54G`): a macOS 14.2+ menu bar companion. StepFun realtime voice (Ctrl+Option) is the default mode, JEV text (Ctrl+K) the fallback, Gemini is being retired.
+- `os` is the only development repository. `我的agent` is frozen at tag `archive/2026-09-23-frozen`; port from it per [`docs/lineage.md`](docs/lineage.md), never add runtimes from it.
+- The source folder, Swift module and many type names still use the historical `TipTour` namespace. Do not perform a cosmetic whole-codebase rename while consolidation is in progress.
 
-macOS 14.2+ menu bar-only SwiftUI/AppKit app (`LSUIElement=true`). Three provider modes ship together on `main` — `jev`, `gemini` (being retired) and `stepfun`:
+## Read before you change
 
-- **Gemini realtime**: Ctrl+Option toggles a voice session. Audio and optional screenshots go directly to Gemini using the user's Keychain key. One tool per user turn: a single desktop workflow action or the existing Apple Notes convenience action.
-- **StepFun realtime voice**: Ctrl+Option runs a full-duplex voice session. `response.audio.delta` from that same Realtime session is the only playback source; interruptions clear queued audio and pending actions. The realtime model receives **no direct image input**. `describe_screen` passes the locally captured image and its bounded AX/OCR candidate list to the vision client, with one observation ID. Screenshots obey the existing permission/toggle. An index requires that same observation ID; visual prose alone is not a clickable target.
-  `act_on_screen` defaults to **one action**. Workflows require an explicit list of at most six steps; whether each step counts as done is decided by code from that step's completion policy (see [Step completion truth table](#step-completion-truth-table-code-owned)), never by the model. Exact names and location constraints restrict the candidate set before model selection; a missing named target gets one re-observation, not an unrelated substitute. Supported primitives are click/double-click/right-click, open_app, type, press_key, shortcut and scroll, all through the existing engine. Typing requires a named, already-focused field and complete text.
-  A top-level pointer request may omit `action` only when it carries an explicit pointer constraint (`target_label`, `index`+`observation_id`, `region`, or `anchor_label`+`relation`); a bare goal is rejected as incomplete rather than defaulting to click. In that narrow case JEV chooses click/double-click/right-click. Explicit actions and every workflow-step action are locked and cannot be overridden by JEV.
-  Literal spatial wording remains code-owned even when the realtime model emits a conflicting mouse action. For top-level Chinese requests, `右边/右侧/右方` and `左边/左侧/左方` restore the corresponding horizontal region. If the model confuses `右边` with `right_click`, the action is corrected to ordinary click unless the preserved goal explicitly contains `右键`、`右击`、`上下文菜单` or an English right-click/context-menu equivalent. Never apply this correction to an explicit right-click request.
-  `new`, `resume` and `correct` distinguish task intent. Current and historical actions are separate; verified progress is recorded even if interruption arrives before the receipt. Explicit resume cannot execute an unrelated or rejected plan. `uncertain_effect` has exactly two causes: delivery itself is `unknown`, or the step's policy is `outcome_required` and no outcome evidence ever arrived. An uncertain action is not repeated, stays out of the decision model's already-done history, and a plain resume or correction cannot switch to another candidate. The user resolves it explicitly with `uncertain_resolution`: `confirmed_succeeded` (recorded as user_confirmed: the step counts done and enters the satisfied history, but never the verified history), `confirmed_failed` (block lifts, attempt stays attempted-unverified), `retry_same` (same-goal resume, the recorded target is pinned so the retry cannot pick another candidate), or `replace_target` (with `intent=correct` and an explicit new target). Uncertain records are scoped to their task chain, so a brand-new instruction is never blocked by an older task's uncertainty.
-  Normal conversation plays Realtime audio as it arrives. Session voice is configured once in `session.update`; response.create never overrides it again. Once a response emits a real tool call, any queued/spilling tool-preamble audio from that response is suppressed; the result response is not created until the original response has actually ended. After the tool result is sent, the turn waits in an awaiting-followup-created phase instead of going idle. A barge-in in that window cannot tell the pending follow-up's `response.created` from the user's next response (measured: StepFun echoes neither `response.metadata` nor a client `event_id`, and a cancelled follow-up still emits created + done(incomplete) with no audio), so the session cancels the follow-up and performs one explicit session rebuild — retiring the socket the stale follow-up lives on instead of assuming which created is which. Probe: `swift run --package-path tools/stepprobe stepprobe followup-race`. Action speech is generated from the current receipt: the same Realtime session receives a one-response exact-reading instruction, and its audio is buffered until the returned transcript matches that receipt. A mismatch is displayed but not played. Screen questions retain four historical observations; window/input changes invalidate old reads. Voice telemetry records speech-stop→first-audio latency and whether the server-reported voice matches the requested session voice, without raw audio/text by default.
-- **JEV text**: Ctrl+K opens the command panel. TypeSafe's `jev-latest` classifies locally detected screen labels and locations. JEV selects click/double-click/right-click targets, not prose or pixels. It acts on the top-ranked target without minimum probability or absent-score cutoffs. Its bounded loop stops on an explicit none choice, task completion, malformed responses, cancellation, action rejection/pause/failure, or 12 actions, with a final observation after the last action.
-
-JEV is the default selected mode. `stepfun` occupies the voice slot alongside the outgoing `gemini`. Onboarding is Choose mode → Save that mode’s API key → Grant its permissions; Both voice modes require microphone access. The previous onboarding flag is migrated to a new mode-setup completion flag so existing users also choose a mode. Settings → Models shows the selector and only the selected mode’s key input. Successful key reads are reused in process memory; settings check presence without decrypting. Keys are stored only in macOS Keychain; no environment, sibling project, or hosted-key fallback. The UI must report Keychain errors accurately.
-
-No Claude/Hermes integration, separate Flash Lite matcher, image-generation service, recording/video pipeline, or Worker proxy is bundled. Do not reintroduce them without an explicit user request.
-
-## Architecture
-
-- `CompanionManager` persists the selected mode, initializes Gemini only when used, gates mode-specific shortcuts, and coordinates hotkeys, provider sessions, focus highlight, permissions, and overlay state. It owns the cancellable JEV task and prevents overlapping text/voice runs.
-- `TipTourEngine` is the shared facade for perception, exact targets, workflow submission, action history, and localhost harness operations. `WorkflowRunner` owns pauses, per-operation tokens, target resolution, and post-action checks. `ActionExecutor`/`TipTourActionDriver` deliver CUA input. Never bypass these boundaries.
-- Ground exact local IDs/marks first, then AX, browser DOM/CDP, local CoreML/OCR, and finally Gemini screenshot coordinates. JEV never invents coordinates and never walks stale alternative rankings after a failed action.
-- JEV runs local detection while active without changing the user's persisted Accurate Grounding setting. Its command panel freezes position during execution; Escape/Stop cancels the task and active workflow.
-- Ctrl+Shift paints focus context for Gemini. Ctrl+Option+Command is a Speak/Type/Highlight input chooser, not an extra model mode.
-- Auto-click controls action delivery; Gemini supports point-only guidance, while JEV requires auto-click. CUA's toggle gates all desktop actions. Screenshots controls remote images, not local perception. Both voice modes need the microphone.
-- AX is enabled for Electron on app activation. Preserve batched AX reads, messaging timeouts, target app pinning, clipboard/selected-range protections, and event-driven detection refreshes.
-- The perception cache retains one local image with its capture time and observation identity. Visual candidates are restricted to the target application's foreground window; whole-display OCR from other apps cannot become its controls. Window identity and bounds participate in capture invalidation; the JEV panel uses the application captured by its shortcut rather than the panel itself. AX controls are merged with OCR before ranking; secure AX fields are excluded by the AX reader. This does not redact screenshots, so the remote screenshot toggle remains important. Failed/superseded captures cannot replace newer observations. YOLO may only borrow overlapping OCR text; a highly overlapping YOLO box cannot rename the same AX control. Distinct same-name controls remain distinct.
-- `DesktopTaskExecutor` adapts voice steps to the shared engine. `DesktopActionVerifier` checks selected/focused state, typed values, or a newly visible explicit result label. A driver return, changing target set, or model `done` is insufficient. Generic keyboard/scroll outcomes without a checkable result remain unconfirmed; do not market that as full workflow completion.
-- `DesktopDecisionPacket` is the per-action SSOT for `intent / action / target / where / scope / confidence / perception / planning / evidence`. Exact and targetless actions create deterministic packets. Ambiguous pointer actions use JEV speculative fan-out: one request asks `action` plus `target_click`, `target_double_click`, and `target_right_click`; code consumes only the target head matching the chosen or explicitly locked action. Probability and margin are recorded but are not threshold-gated until labeled traffic exists.
-- `open_app` is a targetless fast path: it uses context-only observation, never requires screenshot/OCR/JEV, resolves localized installed-app names once to a bundle ID, then reuses WorkflowRunner/ActionExecutor and verifies that the target bundle has a live process. Intermediate app activations must not cancel the atomic launch; any later step still re-pins the foreground app/window before sending input, and unrelated switches still pause other action types.
-- `open_app` success means user-visible state, not merely a live process: the resolved app (including nested helper bundles) must own an on-screen top-level window and be foreground. If a background wrapper process exists with no window, LaunchServices gets one bounded reopen attempt; otherwise the receipt stays unverified and must not say the app opened.
-- `describe_screen` must describe the target application's visible window, never the cursor display as a substitute. It first checks for an on-screen top-level window, captures that `SCWindow` directly, and refuses visual claims when the app has no visible window. The captured window is the focused AX window mapped to its `SCWindow` (falling back to frontmost z-order, never largest-area), and the observation is bound to that window's identity: a slow vision result is only spoken while the same window ID, frame, app and content version are still current, the capture is fresh (`DesktopObservedWindowIdentity`), AND a fresh capture of the same window still matches its dHash content fingerprint (re-verified owner PID included) — so a same-window page navigation or dialog during the call is caught and re-read once. A yes/no “can you see it?” question is answered from local window state without the remote vision round-trip. Whole-display OCR/YOLO is suppressed when the selected app has no visible window so desktop/other-app text cannot be attributed to it.
-- `DesktopVoiceTrace` uses the `VoiceTask` unified-log category with status/identity metadata. Opt-in DEBUG `voiceDiagnosticTraceEnabled` writes bounded local raw diagnostics, not credentials or images. Do not enable it silently for private user sessions.
-- The localhost harness (`127.0.0.1:19474`) exposes the engine to developer clients. `/v1/agent-contract` is canonical. Preserve trace IDs, single-action workflow limits, and explicit deterministic `/v1/tasks` sequences.
-- Portable app instructions live in `TipTour/Skills/**/SKILL.md`; precedence is user overrides, project skills, then bundled skills. General documentation belongs outside the app target.
-
-### Step completion truth table (code-owned)
-
-`DesktopActionCompletion` in `TipTour/Voice/DesktopTaskContract.swift:193` is the only source of truth for "does this step count as done". The coordinator, the receipt, the spoken summary and the telemetry all read these predicates (`DesktopTaskContract.swift:327`, `:332`, `:337`); nothing may re-derive its own completion rule.
-
-The policy is chosen per step, not by the model (`DesktopStepCompletionPolicy`, `DesktopTaskContract.swift:162`): `open_app` and `type` are always `outcome_required`; `click`, `double_click`, `right_click`, `press_key`, `shortcut` and `scroll` are `delivery_sufficient` only when the step carries no explicit `expected_label`.
-
-| Delivery | Outcome evidence | `delivery_sufficient` | `outcome_required` |
-| --- | --- | --- | --- |
-| `not_sent` | `not_observed` | not satisfied — task ends `paused` | not satisfied — task ends `paused` |
-| `sent` | `not_observed` | **satisfied**, basis `delivery_confirmed` | **`uncertain_effect`** |
-| `sent` | `system_verified` | satisfied, basis `system_verified_outcome` | satisfied, basis `system_verified_outcome` |
-| `sent` | `user_confirmed` | satisfied, basis `user_confirmed_outcome` | satisfied, basis `user_confirmed_outcome` |
-| `unknown` | any | **`uncertain_effect`** | **`uncertain_effect`** |
-
-`unknown` never co-occurs with outcome evidence in practice: the executor only reports `system_verified` once `delivery == .sent` (`DesktopTaskExecutor.swift:99`, `:187`), so that row means "the driver could not say whether the input landed".
-
-- `satisfied` (`DesktopTaskContract.swift:194`) is true when outcome evidence is `system_verified` or `user_confirmed`, or when the policy is `delivery_sufficient` and delivery is `sent`. Nothing else satisfies a step.
-- `uncertain_effect` (`DesktopTaskContract.swift:203`) is true only when delivery is `unknown`, or delivery is `sent` with an `outcome_required` policy and no outcome evidence. A `delivery_sufficient` step that was sent is never uncertain; a step that was never sent is `paused`, not uncertain.
-- `verified` (`DesktopTaskContract.swift:325`) is a compatibility view meaning `outcomeEvidence == .system_verified` only. Old JSON consumers still read it; it is never an input to a decision.
-- The task advances to the next step only when the current one is satisfied (`DesktopTaskCoordinator.swift:648`). A satisfied step counts as done even when interruption arrives before the receipt is returned (`DesktopTaskCoordinator.swift:640`), and a satisfied step is never re-dispatched by a later resume.
-- Spoken wording stays separate from completion: `delivery_confirmed` only names the input action ("已点击「…」。", "已按下 enter。", "已向下滚动。") and never claims a result; only `system_verified_outcome` claims a confirmed result, with action-specific wording (`已确认「X」已启动。` / `文字已输入，并已读回确认。` / `已确认「X」的操作结果。`); `user_confirmed_outcome` says "你已确认上一轮操作已经生效。" (`DesktopTaskContract.swift:344`, `:394`, `:437`).
-
-Progress and history — the counters, the two history lists and the difference between a system verification and a user confirmation must never be merged into one "done":
-
-| Field | Meaning |
+| If you are touching… | Read first |
 | --- | --- |
-| `completedStepCount` / `totalStepCount` | steps counted done so far / plan length. Progress while `status` is `running` or `pausing`; it is not a completion claim |
-| `verifiedActionHistory` | summaries of steps whose effect the **system** independently verified. Never contains delivery-only or user-confirmed steps |
-| `satisfiedActionHistory` | summaries of every step that counts as done — delivery-confirmed direct inputs, system-verified outcomes and user-confirmed outcomes. This is the list the decision model receives as already-done history |
-| `user_confirmed` | outcome evidence the **user** supplied through `uncertain_resolution: confirmed_succeeded`. It satisfies the step, enters the satisfied history as `用户已确认结果`, never the verified history, and performs no new side effect (`DesktopTaskCoordinator.swift:445`) |
+| Product behavior, persona, priorities | [`docs/PRODUCT.md`](docs/PRODUCT.md), [`docs/ROADMAP.md`](docs/ROADMAP.md) |
+| A provider mode, onboarding, voice session settings | [`docs/architecture/provider-modes.md`](docs/architecture/provider-modes.md) |
+| Engine, grounding, perception, actions, harness | [`docs/architecture/runtime.md`](docs/architecture/runtime.md) |
+| Anything that decides whether a step is done | [`docs/architecture/step-completion.md`](docs/architecture/step-completion.md) |
+| Task coordinator, admission, journal, continuity | [`docs/architecture/task-continuity.md`](docs/architecture/task-continuity.md) |
+| Where a file lives or what it does | [`docs/architecture/key-files.md`](docs/architecture/key-files.md), [`docs/source-layout.md`](docs/source-layout.md) |
+| Building, isolated suites, probes | [`docs/guides/build-and-verification.md`](docs/guides/build-and-verification.md) |
+| Real-user-path acceptance | [`docs/guides/acceptance.md`](docs/guides/acceptance.md) |
+| Writing Swift in this codebase | [`docs/guides/code-style.md`](docs/guides/code-style.md) |
+| The current stage's working contract and evidence | the newest dated file in [`docs/development/`](docs/development/README.md) |
+| What to call a stage, metric or component | [`docs/terminology.md`](docs/terminology.md) — use only these names; no metaphors or nicknames |
 
-`uncertain_resolution` values: `confirmed_succeeded` records the user's confirmation (no new side effect, `promoted_to_verified=false`), `confirmed_failed` lifts the block and leaves the attempt attempted-unverified, `retry_same` re-runs the same goal with the recorded target pinned so the decision layer cannot pick the runner-up, and `replace_target` requires `intent=correct` plus an explicit new target. Uncertain records are scoped to their task chain, so a brand-new instruction is never blocked by an older task's uncertainty (`DesktopTaskCoordinator.swift:349`).
+## Hard rules
 
-## Documentation map
+- **Do not run `xcodebuild` from the terminal** — it invalidates TCC permissions. Build in Xcode. Pure Swift typechecking and the isolated test scripts are allowed; none of them replaces or launches the installed app.
+- Never bypass `CompanionManager` → `TipTourEngine` → `WorkflowRunner` → `ActionExecutor`/`TipTourActionDriver`. Every entry shares that engine, its permissions and its pauses.
+- `DesktopActionCompletion` in `TipTour/Voice/DesktopTaskContract.swift` is the only authority for whether a step counts as done. Nothing re-derives its own completion rule.
+- Provider keys live only in macOS Keychain: no environment, sibling-project or hosted-key fallback. The UI reports Keychain errors accurately.
+- No Claude/Hermes integration, separate Flash Lite matcher, image-generation service, recording/video pipeline or Worker proxy is bundled. Do not reintroduce them without an explicit user request. Exception (user decision 2026-09-25): Stage 4 may invoke Claude Code and Codex as external command-line tools; they are not a second reasoning runtime inside Her. See [`docs/development/2026-09-25-claude-code-delegation-map.md`](docs/development/2026-09-25-claude-code-delegation-map.md).
+- Do not add features, refactors or "improvements" beyond what was asked. Do not add docstrings, comments or type annotations to code you did not change.
+- Do not fix the known non-blocking Swift 6 concurrency and deprecated `onChange` warnings as incidental cleanup.
 
-Current, maintained sources of truth: this file, `docs/local-development.md`, `docs/source-layout.md` and `tools/voice-acceptance/README.md`. Correction and classification guidance for `docs/development/**` lives in `docs/development/README.md`.
-
-Everything else under `docs/development/` is a dated record: either a frozen historical evidence log (what actually happened on that day, failures and blocks included) or a dated working contract that is still maintained. Do not rewrite a historical log so it looks green; when a rule changes, change it in the current document and record what it superseded. `docs/development/README.md` lists which file is which.
-
-## Experimental task continuity
-
-`--voice-task-continuity` opts into the application-retained StepFun task path.
-It is **off by default** until real-provider, real-desktop and microphone acceptance
-pass. It does not merge the other repositories or enable a new runtime/provider.
-
-- `CompanionManager` retains the task router independently of a voice session.
-  The existing `DesktopTaskCoordinator` owns execution, task/revision/attempt identity,
-  progress and terminal facts. Each voice session receives an identity-bound handler;
-  a retired handler cannot stop or control its replacement's task.
-- Speech first clears playback and pauses future desktop delivery. In-flight action
-  readback survives loss of the voice waiter. Progress queries return a snapshot without
-  waiting for readback; any deferred continuation is checked again after settlement.
-  New turns, cancellation, disconnection and uncertain effects invalidate that continuation.
-  Automatic continuation also checks the verified after-scene's app/window/content version;
-  explicit resume remains distinct from merely asking for progress.
-- `task_control` status is read-only. Continuing/cancelling binds task ID, target version
-  and current user-turn ID. Task snapshots are data, never fresh authorization. State
-  updates refresh the panel and model context without unsolicited speech; they do not
-  replay an old connection's `function_call_output` or create a second TTS route.
-- `DesktopTaskAdmission` coordinates this process's reachable task/engine/driver entries.
-  Busy requests are rejected before focus-changing perception or action delivery. A stopped
-  driver retains its execution occupancy until it returns. Task-owned settled attempts
-  retire their workflow while legacy UI pauses retain their own explicit resume controls.
-  `TipTourLongTaskCoordinator` is still a separate legacy task path with mutual
-  exclusion, not yet the fully unified task owner. This is not a cross-process lock.
-- `DesktopTaskJournal` records only recovery metadata in Application Support / bundle ID /
-  `TaskRecovery/task.json`: IDs, counts, action kinds, target digests and delivery/verification
-  state. It does not persist goals, typed text, screenshots, audio or credentials. Admission
-  and attempt metadata are written before dispatch; write/read failure blocks further work.
-  An unreadable journal is preserved and reported. Restart recovery requires inspection,
-  not automatic replay; this is a current-task recovery file, not full historical memory.
-
-`scripts/test-workflow-integration.py --derived-data <existing-checkout-DerivedData>`
-compiles actual app sources into an isolated headless test package against existing
-dependencies. Use `--filter 'WorkflowRunnerIntegrationTests|TaskRouterIntegrationTests|VoiceTaskSessionIntegrationTests'`
-for the production-source seams. It does not replace real UI/provider acceptance.
-
-The signed DEBUG binary (`Her.app/Contents/MacOS/Her`) accepts
-`--voice-continuity-probe <progress.pcm> <cancel.pcm> <report.json>`.
-Inputs are public synthetic PCM16 / 24 kHz mono. It tests two provider sessions with the
-production session/router but an in-memory executor, and never opens the microphone,
-plays sound, starts monitors, drives the desktop or loads the real task journal. Keychain
-access remains non-interactive and fails without a credential fallback; the report includes
-only the OS failure code/message, not a key. See the current task document for evidence.
-
-## Key files
-
-| File | Purpose |
-| --- | --- |
-| `TipTour/App/CompanionManager.swift` | Shared state, provider coordination, hotkeys, highlight and detection lifecycle |
-| `TipTour/App/TipTourApp.swift` | App entry point, Sparkle gate (skipped without `SUFeedURL`/`SUPublicEDKey`) and DEBUG probe dispatch (~124 lines) |
-| `TipTour/Workflow/WorkflowRunner.swift` | Operation tokens, pause/resume, target resolution and post-action checks shared by every entry (~1842 lines) |
-| `TipTour/Actions/ActionExecutor.swift` | Delivers CUA input and reports the delivery fact for an attempt; DEBUG-only receipt-loss fault injection for the unknown/recovery acceptance (~1187 lines) |
-| `TipTour/Actions/TipTourActionDriver.swift` | CUA driver boundary (~69 lines) |
-| `TipTour/Harnesses/TipTourHarnessServer.swift` | Localhost engine API on `127.0.0.1:19474`, `/v1/agent-contract` canonical (~1128 lines) |
-| `TipTour/Perception/LocalTargetContinuity.swift` | Matches the same label/source/display across small detection bounds changes before execution (~20 lines) |
-| `TipTour/Core/TipTourMode.swift` | JEV-first mode defaults, key/shortcut metadata and permission requirements (~93 lines) |
-| `TipTour/Core/TipTourEngine.swift` | Grounding, execution, validation and local harness facade |
-| `TipTour/Jev/JevClient.swift` | Keychain-authenticated TypeSafe API client |
-| `TipTour/Jev/JevGrounding.swift` | Bounded speculative action/target fan-out and validated decisions |
-| `TipTour/Jev/JevPointerLoop.swift` | Cancellable JEV action loop and immutable UI snapshots |
-| `TipTour/Jev/JevStepPanelView.swift` | Decision progress in the text panel |
-| `TipTour/Voice/GeminiLiveSession.swift` | Realtime session, microphone, screenshots and tool callbacks |
-| `TipTour/Voice/GeminiLiveClient.swift` | Gemini WebSocket protocol and tool declarations |
-| `TipTour/Voice/StepFunRealtimeClient.swift` | Ordered WebSocket events, response identity filtering, deduplicated calls and task-context data (~710 lines) |
-| `TipTour/Voice/StepFunRealtimeSession.swift` | Full-duplex session, receipt speech, cancellation and production-path synthetic probe (~1090 lines) |
-| `TipTour/Voice/StepFunRealtimeTools.swift` | Strict task/step parameters, observation-bound indices, goal-declared operation gate, redundant-action normalization and model-facing expected_label guidance (~627 lines) |
-| `TipTour/Voice/StepFunRealtimeToolRouter.swift` | Shared scene identity, constrained routing, task controls and session-bound access (~545 lines) |
-| `TipTour/Voice/StepFunVisionClient.swift` | Screen understanding, history-aware comparison and bounded general-model decisions (~295 lines) |
-| `TipTourTests/StepFunVisionClientTests.swift` | Vision request format and malformed screen-description regressions (~65 lines) |
-| `TipTour/Voice/DesktopTaskCoordinator.swift` | Task-owned execution, goal revisions, step budget, verified progress, safe continuation and uncertainty (~671 lines) |
-| `TipTour/Voice/DesktopTaskContract.swift` | Typed actions, literal/spatial constraints, delivery vs outcome evidence, step completion predicates, receipts and speech (~543 lines) |
-| `TipTour/Voice/DesktopTaskAdmission.swift` | Process-local task ownership and per-execution dispatch admission (~23 lines) |
-| `TipTour/Voice/DesktopTaskJournal.swift` | Private, atomic metadata-only recovery checkpoint; no automatic replay (~187 lines) |
-| `TipTour/Voice/VoiceTaskContinuityProbe.swift` | Signed-app, no-mic/no-desktop provider smoke with a fixture executor; delivery-only vs verified progress wording and cancellation chains (~493 lines) |
-| `TipTourTests/DesktopTaskContinuityTests.swift` | Task identity, interruption, deferred continuation, journal and recovery behavior (~462 lines) |
-| `TipTourTests/WorkflowRunnerIntegrationTests.swift` | Actual engine/runner admission, delivery lifetime and terminal-status tests (~176 lines) |
-| `TipTourTests/TaskRouterIntegrationTests.swift` | Actual router binding, status controls and constrained resume tests (~125 lines) |
-| `TipTourTests/VoiceTaskSessionIntegrationTests.swift` | Production speech event pauses without cancelling the task (~36 lines) |
-| `TipTour/Voice/DesktopDecisionPacket.swift` | Shared structured action/target/where/confidence decision packet (~125 lines) |
-| `TipTour/Voice/DesktopTaskExecutor.swift` | Existing-engine adapter and independent before/after readback (~229 lines) |
-| `TipTour/Voice/DesktopApplicationResolver.swift` | Installed-app catalog, Spotlight-localized names and stable bundle-ID resolution (~262 lines) |
-| `TipTour/Voice/DesktopObservedWindowIdentity.swift` | Window identity + dHash content fingerprint for slow vision observations (~110 lines) |
-| `TipTour/Voice/DesktopActionVerifier.swift` | Pure target-specific result predicates (~55 lines) |
-| `TipTour/Perception/DesktopAccessibilityReader.swift` | Bounded read-only AX evidence and local candidate geometry (~110 lines) |
-| `TipTour/Voice/StepFunResponseBoundary.swift` | Stale/duplicate response rejection and verified-receipt transcript matching (~55 lines) |
-| `TipTour/Voice/DesktopVoiceTrace.swift` | Metadata telemetry and explicitly enabled bounded local diagnostics, written under the Her bundle identity (~61 lines) |
-| `TipTour/Voice/VoiceRouteProbe.swift` | DEBUG probes; voice-task uses the production session, JEV fan-out probe never executes actions, receipt-loss/journal-recovery/preflight probe dispatch (~312 lines) |
-| `TipTour/Voice/DiagnosticPreflight.swift` | DEBUG-only read-only acceptance preflight: bundle/team identity, accessibility trust, frontmost identity, no prompts (~132 lines) |
-| `TipTour/Voice/DesktopFaultRecoveryProbe.swift` | DEBUG-only one-shot receipt-loss fault plus receipt-loss and v1 journal-recovery acceptance probes (~724 lines) |
-| `TipTour/Workflow/WorkflowModalPolicy.swift` | Distinguishes blocking modals from unrelated modeless windows (~11 lines) |
-| `TipTourTests/DesktopTaskCoordinatorTests.swift` | Execution, cancellation, budget, escalation and continuation regressions, including the delivery-vs-outcome completion matrix (~1013 lines) |
-| `TipTourTests/DesktopControlContractTests.swift` | Receipt, targeting, verification, response boundary, window identity and resume regressions (~648 lines) |
-| `TipTourTests/WorkflowModalPolicyTests.swift` | Blocking-dialog and modeless-window rules (~15 lines) |
-| `TipTourTests/NativeElementDetectorTests.swift` | Real OCR regression for Chinese and English control labels (~30 lines) |
-| `TipTourTests/LocalPerceptionTargetCacheTests.swift` | Duplicate preservation, frame identity, window isolation and contradictory-label regressions (~130 lines) |
-| `TipTour/UI/ProviderSetupView.swift` | The two Keychain key cards |
-| `TipTour/UI/CompanionPanelView.swift` | Compact mode hints, permissions and action controls |
-| `TipTour/UI/TipTourSettingsView.swift` | Models, desktop actions, privacy, permissions and advanced options |
-| `TipTour/UI/TextCommandPanelManager.swift` | Cursor-following, resizable command panel |
-| `TipTour/UI/TextCommandPanelView.swift` | JEV input, stop control and results |
-| `TipTour/Utilities/KeychainStore.swift` | Device-local provider credential storage; existence vs in-process readability states, DEBUG-only acceptance denial seam (~540 lines) |
-
-See `docs/source-layout.md` for the remaining directory responsibilities.
-
-## Build and verification
-
-`tools/voice-acceptance/fixture.py` serves disposable controls on `127.0.0.1:19475` with
-independent `/state` readback. DEBUG-only probe launch arguments are documented in
-`tools/voice-acceptance/README.md`; they never export keys or open the microphone.
-The signed DEBUG binary they accept is `Her.app/Contents/MacOS/Her`
-(bundle ID `com.yishuziyu.her`, Personal Team `87DM76C54G`).
-Real desktop probes still require exclusive access to the target window.
-
-Run `bash scripts/test-local-perception.sh` for the real OCR regression on Simplified Chinese,
-Traditional Chinese and English controls, plus cross-source duplicate detection and blocking-modal tests. It uses a generated image and an isolated package,
-without launching or replacing the app.
-
-Open `tiptour-macos.xcodeproj`, select the `tiptour-macos` scheme, build/run in Xcode.
-Run `scripts/test-stepfun.sh` and `scripts/test-jev.sh` for the decision suites, which compile
-into temporary packages and never touch the installed app. Her uses the local Personal Team signing identity; see `docs/local-development.md` for signing, bundle identifier, Sparkle feed and remote conventions used here.
-
-Run `scripts/test-stepfun-voice-lifecycle.sh` for isolated voice turn-lifecycle, task coordination, audio playback and vision-client tests; it compiles real sources without launching the app or opening the microphone. Vision requests use a local URLProtocol fixture.
-
-The StepFun scripts accept Swift test filters, e.g. `bash scripts/test-stepfun-voice-lifecycle.sh --filter DesktopControlContractTests`.
-`python3 scripts/typecheck-local-app.py --derived-data <existing-checkout-DerivedData>` type-checks against an existing Xcode dependency build without linking, signing, installing or launching. It does not replace Xcode build or runtime acceptance.
-
-Every command in this section is a regression or seam check. None of them is a completion criterion: `XCTest` / `Swift Testing` results, exit codes and typechecks never stand in for the E2E gate described in Testing Rules.
-
-The current control contract and evidence are in `docs/development/2026-09-21-trustworthy-desktop-control.md`.
-Read the evidence status before enabling automated real-app trials or changing the default entrypoint.
-
-**Do NOT run `xcodebuild` from the terminal** — it invalidates TCC permissions and the app will need to re-request screen recording/accessibility access. Pure Swift parsing/typechecking and isolated tests are permitted without replacing or launching the installed app. Run `scripts/test-jev.sh` and `scripts/test-stepfun.sh` for the two decision suites.
-
-Known non-blocking Swift 6 concurrency and deprecated `onChange` warnings must not be fixed as incidental cleanup.
-
-## Acceptance infrastructure
-
-Real-user-path acceptance runs from `scripts/acceptance/`:
-
-- `her_voice_e2e.py` is the one-command runner: identity/freshness gate → machine preflight → controlled fixture (`tools/voice-acceptance/fixture.py`, :19475) or controlled desktop host app (`tools/cua-host`, :19476) → signed DEBUG Her launched via LaunchServices (`-n`, a new instance, never the user's running Her) → synthetic-PCM voice probes → real provider and executor → independent `/state` readback → six-layer evidence (`out/acceptance/<id>/result.json`: user words, model tool arguments, task/turn/attempt IDs, Her receipt, independent state, final speech, failure-recovery). Exit codes: 0 pass, 1 any non-pass, 3 preflight/precondition BLOCKED, 4 another run active (cross-process mutex), 130 SIGINT — every termination path writes the aggregate report.
-- `runner/machine_preflight.py` is read-only machine verification (ports, user Her process record, binary freshness, frontmost identity via ASN resolution, screen-lock state); unproven states fail closed.
-- `verify_evidence.py` is the independent reviewer: it re-derives PASS/FAIL from the evidence package and never trusts the product's own `passed` field. Accepted terminal contracts: `completed` with per-action corroboration, honest `uncertain_effect` with uncertainty speech, and `cancelled` with valid control binding and no unexplained side effects.
-- `manual_runner.py` drives human-in-the-loop steps (for example save → deny-read → restore in Settings): it prints instructions, waits for the human, and independently verifies each claim (keychain presence via `security` exit code, `/state`, process records). It never clicks UI itself.
-- `runner/conversation_driver.py` defines the multi-turn conversation script schema (turns with `wait_ms` / `barge_in` / `expect`); the in-app probe for 3+ turns and barge-in is rebuild-gated.
-- `runner/provider_shapes.py` records real tool-argument shapes per run as a contract-drift monitor; replays under `cassettes/` are labeled `acceptance: false` and can never stand in for E2E.
-- `runner/runner_faults.py` holds runner-side fault primitives (owned-fixture kill, stale-state window); arming requires a named `authorized_by`, and page-navigation faults never run automatically.
-- `tools/ax-probe/` (AXProbe) snapshots and, only with a user-created grant token, types into another app's UI; snapshot mode fails cleanly when the controlling process lacks Accessibility. No mode activates or focuses any app.
-
-Desktop acceptance requires the fixture or host app to be foreground, so it only runs inside a window the user explicitly grants. Background-safe work (builds, self-tests, dry-runs, cassette replays, isolated suites, evidence review) never touches the desktop.
-
-## Testing Rules
+## Testing rules
 
 - Tests must be **results-based, not implementation-based**: assert the observable outcome the user cares about — receipts, spoken text, independent `/state` readback, real side effects — never that a particular function was called or implemented in a specific way. When a collaborator must be stubbed, stub at a real protocol/URL seam and still assert on the end result, not on which collaborators were invoked.
 - E2E through the real product entrypoint is the primary completion gate: user's words → real Her build → real provider and executor → controlled local fixture page → real side effects → independent `/state` readback → Her receipt and speech → post-failure deduplication and recovery. Every E2E run must save a verifiable, repeatable evidence artifact (JSON) capturing the user's exact words, the model's tool arguments, task/turn/attempt IDs, Her receipts, independent `/state`, final speech text, and failure-recovery results.
 - Existing XCTest / Swift Testing suites are regression protection only. They are never a completion criterion: no coverage targets, no test-count metrics, no exit-code-0 or reviewer self-assessment as proof of completion.
 - If a system must be verified in isolation, first enumerate every way it can fail, then write the code against those failure outcomes — still asserting observable results, not internal mechanics.
 
-## Code Style & Conventions
+## Documentation sync rule
 
-### Variable and Method Naming
+A change is not finished until every current document it made wrong is corrected **in the same change**. Documents are part of the interface, not a follow-up task.
 
-IMPORTANT: Follow these naming rules strictly. Clarity is the top priority.
+| When you change… | Update |
+| --- | --- |
+| Provider modes, shortcuts, onboarding, voice/VAD defaults (`TipTour/Voice/StepFun*`, `TipTour/Voice/Gemini*`, `TipTour/Jev/`, `TipTour/Core/TipTourMode.swift`, `TipTour/Utilities/TipTourDefaults.swift`, `TipTour/UI/`) | `docs/architecture/provider-modes.md`; `README.md` if a user would notice |
+| Engine, workflow, actions, perception, harness, desktop task adapters | `docs/architecture/runtime.md` |
+| Completion policy or predicates in `DesktopTaskContract.swift` | `docs/architecture/step-completion.md` |
+| Task coordinator, admission, journal, continuity probe | `docs/architecture/task-continuity.md` |
+| A source file added, deleted or renamed, or its size drifts by more than 50 lines | `docs/architecture/key-files.md` (and `docs/source-layout.md` for a new directory) |
+| Test scripts, typecheck, build steps | `docs/guides/build-and-verification.md` |
+| `scripts/acceptance/**` | `docs/guides/acceptance.md`, `docs/tools/acceptance-runner.md` |
+| `tools/<name>/**` | `docs/tools/<name>.md` |
+| A product direction or stage status | `docs/PRODUCT.md`, `docs/ROADMAP.md` |
 
-- Be as clear and specific with variable and method names as possible
-- **Optimize for clarity over concision.** A developer with zero context on the codebase should immediately understand what a variable or method does just from reading its name
-- Use longer names when it improves clarity. Do NOT use single-character variable names
-- Example: use `originalQuestionLastAnsweredDate` instead of `originalAnswered`
-- When passing props or arguments to functions, keep the same names as the original variable. Do not shorten or abbreviate parameter names. If you have `currentCardData`, pass it as `currentCardData`, not `card` or `cardData`
+Rules for the documents themselves:
 
-### Code Clarity
+1. Every document lives under `docs/` and is linked from [`docs/README.md`](docs/README.md). Directories under `tools/` and `scripts/` keep only a one-line `README.md` pointing there. Bundled `TipTour/Skills/**/SKILL.md` files are app resources, not documentation.
+2. Progressive disclosure: keep a document to roughly 300 lines. When it grows past that, split it by section into sibling files and leave the parent as an overview plus links.
+3. Frozen records under `docs/development/` are never rewritten, not even to fix a fact; write the correction in a current document and name what it supersedes.
+4. Minor edits and bug fixes that change no documented fact need no document change.
+5. The pre-commit hook (`scripts/git-hooks/pre-commit`, enabled per clone with `git config core.hooksPath scripts/git-hooks`) runs `python3 scripts/check-docs.py --staged` and blocks the commit on any failure; do not bypass it with `--no-verify` to land a documentation gap. Run the same check before finishing uncommitted work. It fails on broken links, documents unreachable from `README.md`, missing paths in the key-files table and line counts that drifted more than 50 lines. `python3 scripts/check-docs.py --changed` also lists code areas changed against `HEAD` whose mapped document did not change — a prompt to look, not proof of an omission.
+6. Rules still miss things. At every merge to `main`, and at least weekly, run the full check and read the documents mapped to that period's changes against the code.
 
-- **Clear is better than clever.** Do not write functionality in fewer lines if it makes the code harder to understand
-- Write more lines of code if additional lines improve readability and comprehension
-- Make things so clear that someone with zero context would completely understand the variable names, method names, what things do, and why they exist
-- When a variable or method name alone cannot fully explain something, add a comment explaining what is happening and why
-
-### Swift/SwiftUI Conventions
-
-- Use SwiftUI for all UI unless a feature is only supported in AppKit (e.g., `NSPanel` for floating windows)
-- All UI state updates must be on `@MainActor`
-- Use async/await for all asynchronous operations
-- Comments should explain "why" not just "what", especially for non-obvious AppKit bridging
-- AppKit `NSPanel`/`NSWindow` bridged into SwiftUI via `NSHostingView`
-- All buttons must show a pointer cursor on hover
-- For any interactive element, explicitly think through its hover behavior (cursor, visual feedback, and whether hover should communicate clickability)
-
-### Do NOT
-
-- Do not add features, refactor code, or make "improvements" beyond what was asked
-- Do not add docstrings, comments, or type annotations to code you did not change
-- Do not try to fix the known non-blocking warnings (Swift 6 concurrency, deprecated onChange)
-- Do not run `xcodebuild` from the terminal — it invalidates TCC permissions
-
-## Git Workflow
+## Git workflow
 
 - Branch naming: `feature/description` or `fix/description`
 - Commit messages: imperative mood, concise, explain the "why" not the "what"
 - Do not force-push to main
-
-## Self-Update Instructions
-
-<!-- AI agents: follow these instructions to keep this file accurate. -->
-
-When you make changes to this project that affect the information in this file, update this file to reflect those changes. Specifically:
-
-1. **New files**: Add new source files to the "Key Files" table with their purpose and approximate line count
-2. **Deleted files**: Remove entries for files that no longer exist
-3. **Architecture changes**: Update the architecture section if you introduce new patterns, frameworks, or significant structural changes
-4. **Build changes**: Update build commands if the build process changes
-5. **New conventions**: If the user establishes a new coding convention during a session, add it to the appropriate conventions section
-6. **Line count drift**: If a file's line count changes significantly (>50 lines), update the approximate count in the Key Files table
-
-Do NOT update this file for minor edits, bug fixes, or changes that don't affect the documented architecture or conventions.

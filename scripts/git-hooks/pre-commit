@@ -1,0 +1,14 @@
+#!/bin/sh
+# Blocks a commit when the documentation no longer matches the repository
+# (broken links, unindexed documents, missing paths, key-file size drift).
+# "CHECK" lines are prompts, not failures: a staged code area whose mapped
+# document is not staged. Enabled once per clone with:
+#   git config core.hooksPath scripts/git-hooks
+# Bypass for one commit, knowingly: git commit --no-verify
+repository_root=$(git rev-parse --show-toplevel) || exit 1
+python3 "$repository_root/scripts/check-docs.py" --staged
+check_exit_code=$?
+if [ "$check_exit_code" -ne 0 ]; then
+    echo "pre-commit: documentation check failed; fix the FAIL lines above (see AGENTS.md, Documentation sync rule)." >&2
+fi
+exit "$check_exit_code"

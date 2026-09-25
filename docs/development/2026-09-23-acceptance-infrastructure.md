@@ -14,7 +14,7 @@
 
 | 组件 | 位置 | 作用 |
 | --- | --- | --- |
-| 受控宿主 App | `tools/cua-host/`（bundle `com.yishuziyu.her.cua-host`，:19476） | 已知 bundle ID、可命名控件（左右同名「设置」、「打开显示设置」→「缩放选项」、输入框、菜单、二级窗口），自带 `/state` 独立读回。`swift build` + `scripts/package-app.sh` 构建，**不自动启动** |
+| 受控宿主 App | `tools/cua-host/`（bundle `com.yishuziyu.her.cua-host`，:19476） | 已知 bundle ID、可命名控件（左右同名「设置」、「打开显示设置」→「缩放选项」、输入框、菜单、二级窗口），自带 `/state` 独立读回。`swift build` + `tools/cua-host/scripts/package-app.sh` 构建，**不自动启动** |
 | 一键验收运行器 | `scripts/acceptance/her_voice_e2e.py` | 身份/新鲜度门禁 → 机器预检 → LaunchServices 启动 DEBUG Her（`-n` 新实例，不碰用户 Her）→ 合成 PCM 语音探针 → 真实链路 → 六层证据。退出码 0/1/3/4/130；任何终止路径都写总报告 |
 | 机器预检 | `runner/machine_preflight.py` | 只读：端口、用户 Her 进程记录、二进制新鲜度、前台身份（ASN 解析）、锁屏；不可证明即不通过 |
 | 独立证据复核 | `scripts/acceptance/verify_evidence.py` | 从证据包独立重推 PASS/FAIL，不信任产品 `passed`；接受 completed+逐项佐证 / 诚实 uncertain / cancelled+绑定有效且无未解释副作用 |
@@ -22,7 +22,7 @@
 | 对话脚本 schema | `runner/conversation_driver.py` | 多轮 + 打断的脚本契约（turns: text/wait_ms/barge_in/expect）；3+ 轮与打断的应用侧探针待 Xcode 重建后补 |
 | 形状监控/契约磁带 | `runner/provider_shapes.py`、`cassettes/` | 记录真实工具参数形状（action+steps 混用、结果句式 expected_label、拒绝原因）；磁带重放固定 `acceptance:false`，永不可冒充 E2E |
 | 运行器侧故障原语 | `runner/runner_faults.py` | 只作用于本次创建的 fixture 子进程的终止/陈旧状态窗口；武装需具名 `authorized_by`；页面导航故障永不自动执行 |
-| AX 工具链 | `tools/ax-probe/`（`com.yishuziyu.her.ax-probe`） | 只读快照另一 app 的 AX 树；`type-into` 仅在有用户创建的授权令牌时可用；无模式激活/聚焦任何 app |
+| AX 工具链 | **未入库**：tools/ax-probe（`com.yishuziyu.her.ax-probe`）在任何分支上都没有提交（2026-09-23 核对），下列行为只是计划 | 只读快照另一 app 的 AX 树；`type-into` 仅在有用户创建的授权令牌时可用；无模式激活/聚焦任何 app |
 
 ## 使用方式（开发日常）
 
