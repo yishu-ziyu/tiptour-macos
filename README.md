@@ -10,7 +10,7 @@ She is always present on your Mac: call her and she answers, she can do short ta
 | StepFun realtime voice (default) | Ctrl+Option | Full-duplex Chinese voice conversation. She can describe the current window and perform short desktop actions, then reads back what was actually confirmed. |
 | JEV text | Ctrl+K | Type a click-based task. JEV chooses from locally detected controls; each action is executed and validated by the shared engine. |
 
-First launch: save your StepFun API key (the panel links to where to get one) → allow the microphone and Accessibility → press ⌃⌥ and talk. Screen Recording is asked for when you first want her to look at the screen. Name her and choose another mode in **Settings → Models**. Keys stay in macOS Keychain.
+First launch: save your StepFun API key (the panel links to where to get one) → allow the microphone and Accessibility → press ⌃⌥ and talk. Screen Recording is asked for when you first want her to look at the screen. Name her and choose another mode in **Settings → 模型**. Keys stay in macOS Keychain.
 
 ## Privacy and permissions
 

@@ -41,7 +41,7 @@ final class TipTourSettingsWindowManager {
             backing: .buffered,
             defer: false
         )
-        settingsWindow.title = "TipTour Settings"
+        settingsWindow.title = "Her 设置"
         settingsWindow.titleVisibility = .hidden
         settingsWindow.titlebarAppearsTransparent = true
         settingsWindow.isReleasedWhenClosed = false

@@ -149,10 +149,10 @@ struct TipTourSettingsView: View {
     private var connectionsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             settingsRow(
-                title: "CUA Driver",
+                title: "操作桌面",
                 subtitle: companionManager.isCuaActionDriverEnabled
-                    ? "Desktop clicking, typing, launching, and shortcuts are enabled."
-                    : "TipTour can observe and plan, but desktop actions are blocked.",
+                    ? "她可以点击、输入、打开应用和按快捷键。"
+                    : "她只看和规划，不会动手操作桌面。",
                 systemImage: "cursorarrow.motionlines",
                 isOn: Binding(
                     get: { companionManager.isCuaActionDriverEnabled },
@@ -211,8 +211,8 @@ struct TipTourSettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             if companionManager.selectedMode.isVoiceMode {
             permissionRow(
-                title: "Microphone",
-                subtitle: "Required for voice input.",
+                title: "麦克风",
+                subtitle: "语音对话时听见你说话。",
                 systemImage: "mic",
                 isGranted: companionManager.hasMicrophonePermission
             ) {
@@ -227,8 +227,8 @@ struct TipTourSettingsView: View {
             }
 
             permissionRow(
-                title: "Accessibility",
-                subtitle: "Required to read app UI and drive desktop actions.",
+                title: "辅助功能",
+                subtitle: "读取应用界面，并替你点击和输入。",
                 systemImage: "hand.raised",
                 isGranted: companionManager.hasAccessibilityPermission
             ) {
@@ -236,8 +236,8 @@ struct TipTourSettingsView: View {
             }
 
             permissionRow(
-                title: "Screen Recording",
-                subtitle: "Required to capture screen context.",
+                title: "屏幕录制",
+                subtitle: "你问起屏幕时，看一眼屏幕上的内容。",
                 systemImage: "rectangle.dashed.badge.record",
                 isGranted: companionManager.hasScreenRecordingPermission
             ) {
@@ -246,8 +246,8 @@ struct TipTourSettingsView: View {
 
             if companionManager.hasScreenRecordingPermission {
                 permissionRow(
-                    title: "Screen Content",
-                    subtitle: "Lets TipTour read the screen without choosing a window each time.",
+                    title: "屏幕内容",
+                    subtitle: "看屏幕时不用每次都选窗口。",
                     systemImage: "eye",
                     isGranted: companionManager.hasScreenContentPermission
                 ) {
@@ -382,12 +382,12 @@ struct TipTourSettingsView: View {
                     Circle()
                         .fill(DS.Colors.success)
                         .frame(width: 6, height: 6)
-                    Text("Granted")
+                    Text("已允许")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(DS.Colors.success)
                 }
             } else {
-                Button("Grant", action: action)
+                Button("允许", action: action)
                     .font(.system(size: 11, weight: .semibold))
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
@@ -451,10 +451,10 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .models: return "Models"
-        case .connections: return "Desktop actions"
+        case .models: return "模型"
+        case .connections: return "桌面操作"
         case .privacy: return "隐私"
-        case .permissions: return "Permissions"
+        case .permissions: return "权限"
         case .advanced: return "高级"
         }
     }
@@ -464,11 +464,11 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .models:
             return "给她起名，选择使用方式；阶跃语音和可选的 JEV 决策密钥可分别配置。"
         case .connections:
-            return "Local harnesses and desktop action integrations."
+            return "决定她能不能动手操作桌面，以及由谁来点击。"
         case .privacy:
             return "决定哪些内容会离开这台 Mac，以及本机怎样定位目标。"
         case .permissions:
-            return "macOS access TipTour needs to hear, see, and act."
+            return "她听你说话、看屏幕和动手操作所需的 macOS 权限。"
         case .advanced:
             return "实验性外观和开发调试选项。"
         }
