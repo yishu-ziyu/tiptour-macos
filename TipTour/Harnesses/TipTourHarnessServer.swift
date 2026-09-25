@@ -19,6 +19,7 @@ final class TipTourHarnessServer {
     private var listener: NWListener?
     private var restartAttempts = 0
     private let maximumRestartAttempts = 5
+    private let maximumRequestBytes = 1_048_576
     private var intentionallyStopped = false
     private var listenerReady = false
 
@@ -241,6 +242,24 @@ final class TipTourHarnessServer {
                 updatedRequestData.append(data)
             }
 
+            if updatedRequestData.count > self.maximumRequestBytes {
+                Task { @MainActor in
+                    let denied = self.jsonResponse(
+                        ["ok": false, "reason": "request_too_large"],
+                        statusCode: 413,
+                        statusText: "Content Too Large"
+                    )
+                    PipelineLogStore.shared.record(
+                        category: "harness", name: "request", status: "rejected",
+                        metadata: ["status_code": "413"]
+                    )
+                    connection.send(content: denied.data, completion: .contentProcessed { _ in
+                        connection.cancel()
+                    })
+                }
+                return
+            }
+
             if self.requestDataIsComplete(updatedRequestData) || isComplete {
                 Task { @MainActor in
                     await self.respond(to: updatedRequestData, on: connection)
@@ -272,6 +291,24 @@ final class TipTourHarnessServer {
 
     private func respond(to requestData: Data, on connection: NWConnection) async {
         let request = parseRequest(requestData)
+        let allowedHosts = ["127.0.0.1:\(port)", "localhost:\(port)"]
+        guard let host = request.host,
+              allowedHosts.contains(host),
+              request.origin == nil || request.origin == "http://\(host)" else {
+            let denied = jsonResponse(
+                ["ok": false, "reason": "invalid_request_origin"],
+                statusCode: 403,
+                statusText: "Forbidden"
+            )
+            PipelineLogStore.shared.record(
+                category: "harness", name: "request", status: "rejected",
+                metadata: ["status_code": "403"]
+            )
+            connection.send(content: denied.data, completion: .contentProcessed { _ in
+                connection.cancel()
+            })
+            return
+        }
         PipelineLogStore.shared.record(
             category: "harness",
             name: "request",
@@ -676,7 +713,7 @@ final class TipTourHarnessServer {
 
     private func parseRequest(_ requestData: Data) -> HarnessHTTPRequest {
         guard let headerRange = requestData.range(of: Data("\r\n\r\n".utf8)) else {
-            return HarnessHTTPRequest(method: "", path: "", body: Data())
+            return HarnessHTTPRequest(method: "", path: "", host: nil, origin: nil, body: Data())
         }
 
         let headerData = requestData[..<headerRange.lowerBound]
@@ -686,9 +723,26 @@ final class TipTourHarnessServer {
         let method = requestLineParts.first.map(String.init) ?? ""
         let rawPath = requestLineParts.dropFirst().first.map(String.init) ?? ""
         let path = rawPath.split(separator: "?", maxSplits: 1).first.map(String.init) ?? rawPath
+        let headerLines = headerText.components(separatedBy: "\r\n").dropFirst()
+        let hostValues = headerLines.compactMap { line -> String? in
+            let parts = line.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2, parts[0].lowercased() == "host" else { return nil }
+            return parts[1].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        let originValues = headerLines.compactMap { line -> String? in
+            let parts = line.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2, parts[0].lowercased() == "origin" else { return nil }
+            return parts[1].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
         let body = requestData[headerRange.upperBound...]
 
-        return HarnessHTTPRequest(method: method, path: path, body: Data(body))
+        return HarnessHTTPRequest(
+            method: method,
+            path: path,
+            host: hostValues.count == 1 ? hostValues[0] : nil,
+            origin: originValues.count <= 1 ? originValues.first : "invalid",
+            body: Data(body)
+        )
     }
 
     private func encodableResponse<T: Encodable>(_ value: T) -> HarnessHTTPResponse {
@@ -723,7 +777,6 @@ final class TipTourHarnessServer {
         responseData.append(Data("Content-Type: application/json\r\n".utf8))
         responseData.append(Data("Content-Length: \(body.count)\r\n".utf8))
         responseData.append(Data("Connection: close\r\n".utf8))
-        responseData.append(Data("Access-Control-Allow-Origin: http://127.0.0.1\r\n".utf8))
         responseData.append(Data("\r\n".utf8))
         responseData.append(body)
         return HarnessHTTPResponse(
@@ -738,6 +791,8 @@ final class TipTourHarnessServer {
 private struct HarnessHTTPRequest {
     let method: String
     let path: String
+    let host: String?
+    let origin: String?
     let body: Data
 }
 
