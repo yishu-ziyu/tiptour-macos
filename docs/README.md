@@ -18,6 +18,7 @@ Three kinds of document, and how to treat them:
 | [terminology.md](terminology.md) | The one name for each stage, metric and component |
 | [research/incredible-reconstruction.md](research/incredible-reconstruction.md) | Competitor architecture evidence with confidence levels |
 | [research/decision-layer-comparison.md](research/decision-layer-comparison.md) | JEV vs local Cua-S1-4B as the decision layer; evidence for stage 7 |
+| [research/delegation-references.md](research/delegation-references.md) | How open-source projects hand work to Claude Code / Codex; evidence for Stage 4 decisions |
 | [design-references.md](design-references.md) | Where UI design references come from |
 
 ## How the app works (current)
