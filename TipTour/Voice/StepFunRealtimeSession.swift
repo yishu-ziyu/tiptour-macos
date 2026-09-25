@@ -368,6 +368,103 @@ nonisolated final class BargeInOnsetEstimator: @unchecked Sendable {
     }
 }
 
+/// Silences the microphone while she is audible, once her own echo has been
+/// caught in this session.
+///
+/// Full duplex stays the default: echo removal is the voice-processing unit's
+/// job and the user can talk over her. When that removal fails (2026-09-25: her
+/// words came back as the user's at −22 to −33 dBFS on the MacBook speaker), the
+/// session falls back to half duplex until the user ends it: while her audio is
+/// projected to be playing, plus `tailAfterPlayback`, the tap sends silence.
+/// See `docs/research/full-duplex-echo.md`.
+///
+/// The end of playback is projected from the duration of the audio scheduled,
+/// not taken from the player's completion callbacks, so a callback that never
+/// fires cannot leave the microphone muted: the silence always ends by itself.
+///
+/// Read on the audio render thread; the lock is the only shared state.
+nonisolated final class HalfDuplexMicrophoneGate: @unchecked Sendable {
+    /// Room reverb and the output hardware buffer outlast the last scheduled sample.
+    static let tailAfterPlayback: TimeInterval = 1.5
+
+    private let lock = NSLock()
+    private var engaged = false
+    private var projectedPlaybackEnd = Date.distantPast
+
+    var isEngaged: Bool { lock.withLock { engaged } }
+
+    func engage() {
+        lock.withLock { engaged = true }
+    }
+
+    /// Called for every chunk she will say, in order. A chunk that arrives after
+    /// the queue has played out starts from now.
+    func recordScheduledPlayback(duration: TimeInterval, at now: Date = Date()) {
+        lock.withLock {
+            projectedPlaybackEnd = max(projectedPlaybackEnd, now).addingTimeInterval(duration)
+        }
+    }
+
+    /// Her queued audio was dropped; nothing more comes out of the speaker.
+    func recordPlaybackCleared(at now: Date = Date()) {
+        lock.withLock { projectedPlaybackEnd = min(projectedPlaybackEnd, now) }
+    }
+
+    /// She is audible or just was: a user turn starting now may be her own echo.
+    func isWithinOwnSpeech(at now: Date = Date()) -> Bool {
+        lock.withLock { now < projectedPlaybackEnd.addingTimeInterval(Self.tailAfterPlayback) }
+    }
+
+    func shouldSilenceMicrophone(at now: Date = Date()) -> Bool {
+        lock.withLock { engaged && now < projectedPlaybackEnd.addingTimeInterval(Self.tailAfterPlayback) }
+    }
+
+    /// A new session starts in full duplex again.
+    func reset() {
+        lock.withLock {
+            engaged = false
+            projectedPlaybackEnd = .distantPast
+        }
+    }
+}
+
+/// Whether a user transcript is her own recent words coming back through the
+/// microphone. In the 2026-09-25 trace she said 「今天天气不错，要不要出去走走」 and
+/// the provider transcribed 「天气不错，要不要」 as the user.
+nonisolated enum OwnSpeechEchoDetector {
+    /// Shorter transcripts carry too little to tell echo from a short reply.
+    static let minimumCharacters = 4
+    /// Share of the transcript that must appear verbatim in her words. Below it,
+    /// a user quoting part of her sentence back (「出去走走？好啊」) is not echo.
+    static let minimumOverlap = 0.7
+
+    static func isEcho(transcript: String, ownSpeech: String) -> Bool {
+        let heard = comparableCharacters(transcript)
+        let said = comparableCharacters(ownSpeech)
+        guard heard.count >= minimumCharacters, !said.isEmpty else { return false }
+        let overlap = longestCommonSubstringLength(heard, said)
+        return Double(overlap) >= Double(heard.count) * minimumOverlap
+    }
+
+    private static func comparableCharacters(_ text: String) -> [Character] {
+        text.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    private static func longestCommonSubstringLength(_ first: [Character], _ second: [Character]) -> Int {
+        var previousRow = [Int](repeating: 0, count: second.count + 1)
+        var longest = 0
+        for firstCharacter in first {
+            var currentRow = [Int](repeating: 0, count: second.count + 1)
+            for (secondIndex, secondCharacter) in second.enumerated() where firstCharacter == secondCharacter {
+                currentRow[secondIndex + 1] = previousRow[secondIndex] + 1
+                longest = max(longest, currentRow[secondIndex + 1])
+            }
+            previousRow = currentRow
+        }
+        return longest
+    }
+}
+
 // MARK: - Session
 
 @MainActor
@@ -385,7 +482,15 @@ final class StepFunRealtimeSession {
     private var audioEngine = AVAudioEngine()
     private let audioPlayer = RealtimeAudioPlayer()
     private let bargeInOnsetEstimator = BargeInOnsetEstimator()
+    private let microphoneGate = HalfDuplexMicrophoneGate()
     private let pcm16Converter: BuddyPCM16AudioConverter
+    /// The last words she actually voiced, compared against user transcripts
+    /// that start while she is audible.
+    private var recentOwnSpeech = ""
+    private static let recentOwnSpeechLimit = 200
+    private var currentTurnStartedWithinOwnSpeech = false
+    /// A user turn found to be her own echo whose reply has not been created yet.
+    private var echoTurnIDToDiscard: String?
 
     private var turnLifecycle = StepFunTurnLifecycle()
     private var pendingToolWork: Task<String, Never>?
@@ -621,6 +726,15 @@ final class StepFunRealtimeSession {
         // would make the next drain wait think audio was still playing.
         audioPlayer.clearQueuedAudio()
         audioPlayer.detach()
+        echoTurnIDToDiscard = nil
+        // A rebuild is the same conversation to the user; only a session the user
+        // ends goes back to full duplex.
+        if isRebuildingAfterDiscardedFollowup {
+            microphoneGate.recordPlaybackCleared()
+        } else {
+            microphoneGate.reset()
+            recentOwnSpeech = ""
+        }
 
         turnLifecycle.reset()
         clearExpectedReceiptSpeech()
@@ -696,9 +810,14 @@ final class StepFunRealtimeSession {
             // removal is the voice-processing unit's job; dropping audio here
             // instead would make a barge-in undetectable and would leave the
             // microphone dead for the rest of the session if a turn ever failed
-            // to complete.
+            // to complete. The exception is a session that has already caught
+            // her own echo: the gate then sends silence while she is audible, and
+            // ends that silence by elapsed time rather than by turn completion.
             self.bargeInOnsetEstimator.observe(buffer)
-            guard let pcm16Data = self.pcm16Converter.convertToPCM16Data(from: buffer) else { return }
+            guard var pcm16Data = self.pcm16Converter.convertToPCM16Data(from: buffer) else { return }
+            if self.microphoneGate.shouldSilenceMicrophone() {
+                pcm16Data.resetBytes(in: 0..<pcm16Data.count)
+            }
             self.client.sendAudioChunk(pcm16Data)
         }
         isMicrophoneTapInstalled = true
@@ -771,6 +890,7 @@ final class StepFunRealtimeSession {
 
         stopMicrophoneCapture()
         audioPlayer.clearQueuedAudio()
+        microphoneGate.recordPlaybackCleared()
         audioPlayer.detach()
         do {
             try startMicrophoneCapture()
@@ -861,14 +981,21 @@ final class StepFunRealtimeSession {
 
         case .inputTranscriptFinal(let itemID, let text):
             let associatedTurn = inputTurnIDs[itemID]
-            if associatedTurn == currentTurnID { state.lastInputTranscript = text }
             DesktopVoiceTrace.event("input_transcript_final", turnID: associatedTurn ?? "unassociated",
                 fields: ["source": "provider_completed", "correlation": associatedTurn == nil ? "unavailable" : "item_id"],
                 privateFields: ["transcript": text])
+            guard associatedTurn == currentTurnID else { return }
+            if currentTurnStartedWithinOwnSpeech,
+               OwnSpeechEchoDetector.isEcho(transcript: text, ownSpeech: recentOwnSpeech) {
+                discardOwnEchoTurn()
+            } else {
+                state.lastInputTranscript = text
+            }
 
         case .outputTranscript(let text):
             guard turnLifecycle.phase != .interrupted else { return }
             if suppressAudioForCurrentResponse, expectedSpokenReceipt == nil { return }
+            recentOwnSpeech = String((recentOwnSpeech + text).suffix(Self.recentOwnSpeechLimit))
             if expectedSpokenReceipt != nil {
                 pendingReceiptTranscript += text
             } else {
@@ -901,6 +1028,7 @@ final class StepFunRealtimeSession {
             turnLifecycle.recordResponseCreated()
             DesktopVoiceTrace.event("response_created", turnID: currentTurnID,
                 fields: ["response_id": responseID ?? "none"])
+            if echoTurnIDToDiscard == currentTurnID { cancelReplyToOwnEcho() }
 
         case .toolCall(let callID, let name, let argumentsJSON):
             startToolWork(callID: callID, name: name, argumentsJSON: argumentsJSON)
@@ -917,6 +1045,7 @@ final class StepFunRealtimeSession {
             // Read before anything below clears playback: this is what makes the
             // speech start a barge-in rather than an ordinary new turn.
             let wasSpeakingWhenUserStarted = state.isModelSpeaking || audioPlayer.isPlaying
+            currentTurnStartedWithinOwnSpeech = microphoneGate.isWithinOwnSpeech()
             let bargeInObservation = bargeInOnsetEstimator.takeBargeInObservationAndDisarm()
             // Always pause the application task, including while the realtime
             // response is idle after an asynchronous task admission.
@@ -927,6 +1056,7 @@ final class StepFunRealtimeSession {
             }
             print("[StepFunRealtimeSession] speech started, phase=\(turnLifecycle.phase), queued=\(audioPlayer.pendingBufferCount)")
             handleUserStartedSpeaking()
+            microphoneGate.recordPlaybackCleared()
             currentTurnID = UUID().uuidString
             state.lastInputTranscript = ""
             currentUserSpeechStoppedAt = nil
@@ -969,6 +1099,7 @@ final class StepFunRealtimeSession {
         case .responseAborted(let responseID, let status):
             clearExpectedReceiptSpeech()
             audioPlayer.clearQueuedAudio()
+            microphoneGate.recordPlaybackCleared()
             playbackDrainTask?.cancel()
             playbackDrainTask = nil
             cancelOutstandingToolWork()
@@ -1065,6 +1196,9 @@ final class StepFunRealtimeSession {
         }
         #endif
         audioPlayer.enqueueAudioChunk(pcm16Data)
+        microphoneGate.recordScheduledPlayback(
+            duration: Double(pcm16Data.count / 2) / StepFunRealtimeClient.audioSampleRate
+        )
     }
 
     /// Action receipts are generated by program state, not by the model. The
@@ -1200,7 +1334,27 @@ final class StepFunRealtimeSession {
         }
     }
 
-    private func handleUserStartedSpeaking() {
+    /// The user turn was her own voice. Switch this session to half duplex so it
+    /// does not happen again, and drop the reply the server makes to it:
+    /// answering herself is what the user notices.
+    private func discardOwnEchoTurn() {
+        let wasEngaged = microphoneGate.isEngaged
+        microphoneGate.engage()
+        state.lastInputTranscript = ""
+        echoTurnIDToDiscard = currentTurnID
+        DesktopVoiceTrace.event("own_echo_detected", turnID: currentTurnID,
+            fields: ["half_duplex_engaged_now": String(!wasEngaged)])
+        print("[StepFunRealtimeSession] heard her own voice as the user; half duplex for the rest of this session")
+        if currentResponseCreatedAt != nil { cancelReplyToOwnEcho() }
+    }
+
+    private func cancelReplyToOwnEcho() {
+        echoTurnIDToDiscard = nil
+        handleUserStartedSpeaking(cancelReason: "own_echo")
+        microphoneGate.recordPlaybackCleared()
+    }
+
+    private func handleUserStartedSpeaking(cancelReason: String = "barge_in") {
         clearExpectedReceiptSpeech()
         switch turnLifecycle.recordUserStartedSpeaking() {
         case .interruptModelResponse:
@@ -1216,7 +1370,7 @@ final class StepFunRealtimeSession {
             cancelOutstandingToolWork()
             let cancelledResponseID = client.cancelCurrentResponse()
             DesktopVoiceTrace.event("response_cancel_sent", turnID: currentTurnID,
-                fields: ["believed_active_response_id": cancelledResponseID ?? "none", "reason": "barge_in"])
+                fields: ["believed_active_response_id": cancelledResponseID ?? "none", "reason": cancelReason])
             print("[StepFunRealtimeSession] barge-in: cancelled the model response")
 
         case .abandonCurrentTurn:

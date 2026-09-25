@@ -19,6 +19,7 @@ Three kinds of document, and how to treat them:
 | [research/incredible-reconstruction.md](research/incredible-reconstruction.md) | Competitor architecture evidence with confidence levels |
 | [research/decision-layer-comparison.md](research/decision-layer-comparison.md) | JEV vs local Cua-S1-4B as the decision layer; evidence for stage 7 |
 | [research/delegation-references.md](research/delegation-references.md) | How open-source projects hand work to Claude Code / Codex; evidence for Stage 4 decisions |
+| [research/full-duplex-echo.md](research/full-duplex-echo.md) | 全双工还是半双工：ChatGPT、Gemini、LiveKit、Pipecat、Samuel 怎么处理「听见自己」，以及 Her 的选项 |
 | [design-references.md](design-references.md) | Where UI design references come from |
 
 ## How the app works (current)

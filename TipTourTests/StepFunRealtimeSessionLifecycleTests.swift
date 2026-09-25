@@ -362,3 +362,82 @@ struct StepFunTurnLifecycleTests {
         #expect(lifecycle.hasPendingToolCall == false)
     }
 }
+
+/// Her own voice coming back through the MacBook speaker. Each test names the
+/// failure it guards against, from the user's side.
+@Suite("Own echo and half-duplex fallback")
+struct OwnEchoFallbackTests {
+    private let start = Date(timeIntervalSince1970: 1_000_000)
+
+    // F1: her words came back and were not recognized, so she keeps answering herself.
+    @Test func herOwnSentenceHeardBackIsEcho() {
+        let herSentence = "今天天气不错，要不要出去走走？"
+        #expect(OwnSpeechEchoDetector.isEcho(transcript: "天气不错，要不要", ownSpeech: herSentence))
+        #expect(OwnSpeechEchoDetector.isEcho(transcript: "今天天气不错要不要出去走走", ownSpeech: herSentence))
+        // The transcriber rarely hears her perfectly; one wrong character still counts.
+        #expect(OwnSpeechEchoDetector.isEcho(transcript: "天汽不错，要不要", ownSpeech: herSentence))
+    }
+
+    // F2: the user's own words are dropped as echo and the user is ignored.
+    @Test func userSpeechIsNotEcho() {
+        let herSentence = "今天天气不错，要不要出去走走？"
+        #expect(!OwnSpeechEchoDetector.isEcho(transcript: "等一下，先别说了", ownSpeech: herSentence))
+        #expect(!OwnSpeechEchoDetector.isEcho(transcript: "出去走走？好啊", ownSpeech: herSentence))
+        #expect(!OwnSpeechEchoDetector.isEcho(transcript: "好的", ownSpeech: herSentence))
+        #expect(!OwnSpeechEchoDetector.isEcho(transcript: "天气不错", ownSpeech: ""))
+    }
+
+    // F5: with no echo caught, the microphone must stay open so the user can talk over her.
+    @Test func fullDuplexUntilEchoIsCaught() {
+        let gate = HalfDuplexMicrophoneGate()
+        gate.recordScheduledPlayback(duration: 3, at: start)
+        #expect(gate.isWithinOwnSpeech(at: start.addingTimeInterval(1)))
+        #expect(!gate.shouldSilenceMicrophone(at: start.addingTimeInterval(1)))
+    }
+
+    // F3 and F4: once engaged, silence covers her speech and its tail, then ends
+    // by itself even if the player never reports that it finished.
+    @Test func halfDuplexSilencesHerSpeechAndTailThenReopensByItself() {
+        let gate = HalfDuplexMicrophoneGate()
+        gate.engage()
+        for chunkIndex in 0..<50 {
+            // 50 chunks of 40 ms arriving faster than real time: 2 s of speech.
+            gate.recordScheduledPlayback(duration: 0.04, at: start.addingTimeInterval(Double(chunkIndex) * 0.01))
+        }
+        #expect(gate.shouldSilenceMicrophone(at: start.addingTimeInterval(1.9)))
+        #expect(gate.shouldSilenceMicrophone(at: start.addingTimeInterval(2 + HalfDuplexMicrophoneGate.tailAfterPlayback - 0.1)))
+        #expect(!gate.shouldSilenceMicrophone(at: start.addingTimeInterval(2 + HalfDuplexMicrophoneGate.tailAfterPlayback + 0.1)))
+    }
+
+    // F7: a chunk that arrives after a gap starts from its own arrival, so the
+    // silence still covers it.
+    @Test func lateChunkAfterGapIsStillCovered() {
+        let gate = HalfDuplexMicrophoneGate()
+        gate.engage()
+        gate.recordScheduledPlayback(duration: 1, at: start)
+        #expect(!gate.shouldSilenceMicrophone(at: start.addingTimeInterval(4)))
+        gate.recordScheduledPlayback(duration: 1, at: start.addingTimeInterval(5))
+        #expect(gate.shouldSilenceMicrophone(at: start.addingTimeInterval(5.5)))
+        #expect(gate.shouldSilenceMicrophone(at: start.addingTimeInterval(6 + HalfDuplexMicrophoneGate.tailAfterPlayback - 0.1)))
+    }
+
+    // Her reply was cut: the microphone reopens after the tail, not after the
+    // speech she will no longer say.
+    @Test func clearedPlaybackShortensTheSilence() {
+        let gate = HalfDuplexMicrophoneGate()
+        gate.engage()
+        gate.recordScheduledPlayback(duration: 10, at: start)
+        gate.recordPlaybackCleared(at: start.addingTimeInterval(1))
+        #expect(!gate.shouldSilenceMicrophone(at: start.addingTimeInterval(1 + HalfDuplexMicrophoneGate.tailAfterPlayback + 0.1)))
+    }
+
+    // F6: a session the user starts again begins in full duplex.
+    @Test func newSessionStartsInFullDuplex() {
+        let gate = HalfDuplexMicrophoneGate()
+        gate.engage()
+        gate.reset()
+        gate.recordScheduledPlayback(duration: 3, at: start)
+        #expect(!gate.isEngaged)
+        #expect(!gate.shouldSilenceMicrophone(at: start.addingTimeInterval(1)))
+    }
+}

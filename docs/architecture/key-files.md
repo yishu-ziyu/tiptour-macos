@@ -22,7 +22,7 @@ Keep the approximate line counts within 50 lines of the real file; `scripts/chec
 | `TipTour/Jev/JevStepPanelView.swift` | Decision progress in the text panel |
 | `TipTour/Voice/RealtimeAudioPlayer.swift` | StepFun PCM16 playback on the shared engine, odd-byte carry and underrun counts (~283 lines) |
 | `TipTour/Voice/StepFunRealtimeClient.swift` | Ordered WebSocket events, response identity filtering, deduplicated calls and task-context data (~710 lines) |
-| `TipTour/Voice/StepFunRealtimeSession.swift` | Full-duplex session, receipt speech, cancellation and production-path synthetic probe (~1300 lines) |
+| `TipTour/Voice/StepFunRealtimeSession.swift` | Full-duplex session with a per-session half-duplex fallback after own echo, receipt speech, cancellation and production-path synthetic probe (~1480 lines) |
 | `TipTour/Voice/StepFunRealtimeTools.swift` | Strict task/step parameters, observation-bound indices, goal-declared operation gate, redundant-action normalization and model-facing expected_label guidance (~627 lines) |
 | `TipTour/Voice/StepFunRealtimeToolRouter.swift` | Shared scene identity, constrained routing, task controls and session-bound access (~545 lines) |
 | `TipTour/Voice/StepFunVisionClient.swift` | Screen understanding, history-aware comparison and bounded general-model decisions (~295 lines) |
