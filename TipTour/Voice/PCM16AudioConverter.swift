@@ -3,8 +3,8 @@
 //  TipTour
 //
 //  Converts AVAudioPCMBuffers (whatever the mic produces) into PCM16 mono
-//  Data at a target sample rate. Used by GeminiLiveSession to feed the
-//  Gemini Live WebSocket, which expects 16kHz mono PCM16.
+//  Data at a target sample rate. Used by StepFunRealtimeSession to feed the
+//  realtime WebSocket, which expects 24kHz mono PCM16.
 //
 
 import AVFoundation
@@ -145,7 +145,7 @@ final class BuddyPCM16AudioConverter {
     private func logConversionFailure(_ reason: String) {
         conversionFailureCount += 1
         if conversionFailureCount <= 3 || conversionFailureCount % 100 == 0 {
-            print("[GeminiLiveAudio] mic PCM conversion failed #\(conversionFailureCount): \(reason)")
+            print("[RealtimeAudio] mic PCM conversion failed #\(conversionFailureCount): \(reason)")
         }
     }
 }

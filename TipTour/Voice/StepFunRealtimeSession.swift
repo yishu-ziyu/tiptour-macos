@@ -274,7 +274,7 @@ final class StepFunRealtimeSession {
     private let instructions: String
 
     private var audioEngine = AVAudioEngine()
-    private let audioPlayer = GeminiLiveAudioPlayer()
+    private let audioPlayer = RealtimeAudioPlayer()
     private let pcm16Converter: BuddyPCM16AudioConverter
 
     private var turnLifecycle = StepFunTurnLifecycle()

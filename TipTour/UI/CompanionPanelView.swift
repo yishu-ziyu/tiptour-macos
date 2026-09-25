@@ -366,9 +366,10 @@ struct CompanionPanelView: View {
                     companionManager.setAccurateGroundingEnabled(!companionManager.isAccurateGroundingEnabled)
                 }
 
-                // StepFun never sends screenshots, so the remote-screenshot
-                // toggle would be a dead control there — Gemini only.
-                if companionManager.selectedMode == .gemini {
+                // Voice sends screenshots only to the vision model behind
+                // describe_screen; JEV keeps images on this Mac, so the
+                // remote-screenshot toggle would be a dead control there.
+                if companionManager.selectedMode.isVoiceMode {
                 compactControlButton(
                     title: companionManager.isScreenshotStreamingEnabled ? "发送屏幕" : "隐私模式",
                     subtitle: companionManager.isScreenshotStreamingEnabled ? "远端可见" : "仅本机",

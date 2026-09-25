@@ -1,6 +1,6 @@
 # Local harness
 
-TipTour listens only on `127.0.0.1:19474`. This developer interface shares the same grounding, action permissions, and workflow validation as Gemini and JEV. No external orchestrator is bundled.
+TipTour listens only on `127.0.0.1:19474`. This developer interface shares the same grounding, action permissions, and workflow validation as JEV and StepFun voice. No external orchestrator is bundled.
 
 Fetch `GET /v1/agent-contract` for the current machine-readable contract and `GET /v1/capabilities` for supported operations.
 

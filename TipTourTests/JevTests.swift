@@ -38,22 +38,23 @@ struct JevTests {
     @Test func defaultModeIsJevAndSavedChoiceIsRespected() {
         #expect(TipTourMode.restored(from: nil) == .jev)
         #expect(TipTourMode.restored(from: "obsolete-provider") == .jev)
-        #expect(TipTourMode.restored(from: "gemini") == .gemini)
+        #expect(TipTourMode.restored(from: "gemini") == .stepfun)
+        #expect(TipTourMode.restored(from: "stepfun") == .stepfun)
         #expect(TipTourMode.restored(from: "jev") == .jev)
     }
 
-    @Test func microphoneIsRequiredOnlyForGemini() {
+    @Test func microphoneIsRequiredOnlyForVoice() {
         #expect(TipTourMode.jev.permissionsReady(desktop: true, microphone: false))
-        #expect(!TipTourMode.gemini.permissionsReady(desktop: true, microphone: false))
-        #expect(TipTourMode.gemini.permissionsReady(desktop: true, microphone: true))
+        #expect(!TipTourMode.stepfun.permissionsReady(desktop: true, microphone: false))
+        #expect(TipTourMode.stepfun.permissionsReady(desktop: true, microphone: true))
         #expect(!TipTourMode.jev.permissionsReady(desktop: false, microphone: true))
     }
 
     @Test func selectedModeUsesItsOwnKeyAndShortcut() {
         #expect(TipTourMode.jev.keyName == "jevAPIKey")
-        #expect(TipTourMode.gemini.keyName == "geminiAPIKey")
+        #expect(TipTourMode.stepfun.keyName == "stepfunAPIKey")
         #expect(TipTourMode.jev.shortcut == "Ctrl+K")
-        #expect(TipTourMode.gemini.shortcut == "Ctrl+Option")
+        #expect(TipTourMode.stepfun.shortcut == "Ctrl+Option")
     }
 
     @Test func requestsStayUnderAPILimitAndKeepNoneOption() {

@@ -3,17 +3,15 @@
 //  TipTour
 //
 
-//  Cheap perceptual hash (dHash) for skipping near-identical screenshots
-//  before sending them to Gemini Live. The hash is a 64-bit fingerprint
+//  Cheap perceptual hash (dHash) for telling whether two screenshots show
+//  a meaningfully different scene. The hash is a 64-bit fingerprint
 //  computed from a 9x8 grayscale downscale; comparing two hashes by
 //  Hamming distance gives a robust "is this scene meaningfully different"
 //  signal that ignores cursor blinks, antialiasing jitter, and 1px scroll.
 //
-//  Why this exists: GeminiLiveSession sends a fresh JPEG every 3s. When the
-//  user is reading a long document or watching something render, frames are
-//  pixel-identical but we still pay the ScreenCaptureKit + JPEG encode +
-//  WebSocket bandwidth + Gemini per-image input tokens. Skipping unchanged
-//  frames cuts all of that without changing behavior on active screens.
+//  Why this exists: the engine reports whether each visual-context
+//  screenshot changed since the previous one, so callers can tell an
+//  unchanged screen from new evidence without comparing raw pixels.
 //
 
 import CoreGraphics

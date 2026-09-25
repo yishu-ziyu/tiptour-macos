@@ -132,12 +132,6 @@ enum KeychainStore {
 
     // MARK: - TipTour-specific keys
 
-    /// Gemini API key the user has pasted directly into the app.
-    static var geminiAPIKey: String? {
-        get { get(forKey: "geminiAPIKey") }
-        set { set(newValue ?? "", forKey: "geminiAPIKey") }
-    }
-
     /// TypeSafe API key for JEV text commands.
     static var jevAPIKey: String? {
         get { get(forKey: "jevAPIKey") }
