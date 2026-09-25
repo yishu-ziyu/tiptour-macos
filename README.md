@@ -8,7 +8,8 @@ She is always present on your Mac: call her and she answers, she can do short ta
 | Mode | Shortcut | What it does |
 | --- | --- | --- |
 | StepFun realtime voice (default) | Ctrl+Option | Full-duplex Chinese voice conversation. She can describe the current window and perform short desktop actions, then reads back what was actually confirmed. |
-| JEV text | Ctrl+K | Type a click-based task. JEV chooses from locally detected controls; each action is executed and validated by the shared engine. |
+| Conversation with Her | Ctrl+K | With a StepFun key: type to her in Chinese. Coding requests become a draft for Claude Code; after you press 发出去 it works in a private git worktree, and you merge or discard the result. Screen clicks go to JEV. |
+| JEV text | Ctrl+K | Without a StepFun key: type a click-based task. JEV chooses from locally detected controls; each action is executed and validated by the shared engine. |
 
 First launch: save your StepFun API key (the panel links to where to get one) → allow the microphone and Accessibility → press ⌃⌥ and talk. Screen Recording is asked for when you first want her to look at the screen. Name her and choose another mode in **Settings → 模型**. Keys stay in macOS Keychain.
 

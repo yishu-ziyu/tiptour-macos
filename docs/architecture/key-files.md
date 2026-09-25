@@ -67,8 +67,12 @@ Keep the approximate line counts within 50 lines of the real file; `scripts/chec
 | `TipTour/UI/TipTourSettingsView.swift` | Models, desktop actions, privacy, permissions and advanced options |
 | `TipTour/UI/TipTourSettingsWindowManager.swift` | Settings and log windows; default pipeline events store only diagnostic IDs, statuses and counts |
 | `TipTourTests/PipelineLogIntegrationTests.swift` | Serialized default-log privacy regression without writing to the user's log files |
-| `TipTour/Delegation/CodingAgentDelegation.swift` | Claude Code hand-off: current-project lookup, private worktree, stream-json progress, git readback receipt, merge/discard (~430 lines) |
+| `TipTour/Delegation/CodingAgentDelegation.swift` | Claude Code hand-off: current-project lookup, private worktree, stream-json progress, git readback receipt, merge/discard (~479 lines) |
 | `TipTourTests/CodingAgentDelegationTests.swift` | Outcome tests with a stubbed `claude` at the process seam and real git repositories (~250 lines) |
+| `TipTour/Delegation/DelegationConversation.swift` | Ctrl+K conversation model call (Step Plan, JSON mode), happy-style instructions and the say-do guard (~206 lines) |
+| `TipTour/Delegation/DelegationSession.swift` | Conversation → draft → send → receipt → merge/discard state; app-owned hand-off sentences (~241 lines) |
+| `TipTour/UI/DelegationPanelView.swift` | Ctrl+K conversation panel: bubbles, draft card, running row, report card (~369 lines) |
+| `TipTourTests/DelegationSessionTests.swift` | Conversation outcomes with the model stubbed at its URL seam and a stub `claude` (~238 lines) |
 | `TipTour/UI/TextCommandPanelManager.swift` | Cursor-following, resizable command panel |
 | `TipTour/UI/TextCommandPanelView.swift` | JEV input, stop control and results |
 | `TipTour/Utilities/KeychainStore.swift` | Device-local provider credential storage; existence vs in-process readability states, DEBUG-only acceptance denial seam (~540 lines) |

@@ -29,5 +29,8 @@ cp "$project_dir/TipTour/Delegation/"*.swift "$test_dir/Sources/Delegation/"
 sed 's/@testable import TipTour/@testable import Delegation/' \
     "$project_dir/TipTourTests/CodingAgentDelegationTests.swift" \
     > "$test_dir/Tests/DelegationTests/CodingAgentDelegationTests.swift"
+sed 's/@testable import TipTour/@testable import Delegation/' \
+    "$project_dir/TipTourTests/DelegationSessionTests.swift" \
+    > "$test_dir/Tests/DelegationTests/DelegationSessionTests.swift"
 
 swift test --package-path "$test_dir" "$@"

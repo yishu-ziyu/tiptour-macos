@@ -17,7 +17,7 @@ Open `tiptour-macos.xcodeproj`, select the `tiptour-macos` scheme, build/run in 
 Run `scripts/test-stepfun.sh` and `scripts/test-jev.sh` for the decision suites, which compile
 into temporary packages and never touch the installed app. Her uses the local Personal Team signing identity; see `docs/local-development.md` for signing, bundle identifier, Sparkle feed and remote conventions used here.
 
-Run `scripts/test-delegation.sh` for the Claude Code delegation executor: Claude Code is replaced by stub executables at the process seam, while git repositories and worktrees are real temporary ones; the tests read outcomes back with git (changed, claimed-but-unchanged, failed, cancelled, merge refused over the user's own edits, hook leftovers never merged, current-project lookup).
+Run `scripts/test-delegation.sh` for the Claude Code delegation executor: Claude Code is replaced by stub executables at the process seam, while git repositories and worktrees are real temporary ones; the tests read outcomes back with git (changed, claimed-but-unchanged, failed, cancelled, merge refused over the user's own edits, hook leftovers never merged, current-project lookup) and for the Ctrl+K conversation, whose model is stubbed at the StepFun URL seam with a `URLProtocol` (unclear request → a question and nothing runs; draft → nothing runs until sent; claimed success without edits → not done; a promise without a draft is corrected once and never loops; screen goals go to JEV; merge and discard).
 
 Run `scripts/test-stepfun-voice-lifecycle.sh` for isolated voice turn-lifecycle, task coordination, audio playback and vision-client tests; it compiles real sources without launching the app or opening the microphone. Vision requests use a local URLProtocol fixture.
 

@@ -6,8 +6,18 @@ struct TextCommandPanelView: View {
     @State private var commandText: String = ""
 
     var body: some View {
+        if let session = companionManager.delegationSession {
+            DelegationPanelView(session: session, companionManager: companionManager)
+        } else {
+            jevInput
+        }
+    }
+
+    private var jevInput: some View {
         let activityText = companionManager.textCommandActivityText ?? ""
         let hasActivityText = !activityText.isEmpty
+
+        return Group {
 
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 9) {
@@ -88,6 +98,7 @@ struct TextCommandPanelView: View {
             DispatchQueue.main.async {
                 isInputFocused = true
             }
+        }
         }
     }
 

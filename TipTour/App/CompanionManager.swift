@@ -1466,13 +1466,23 @@ final class CompanionManager: ObservableObject {
             presentTransientOverlayHint("先点菜单栏里的 Her 完成设置。")
             return
         }
-        guard selectedMode == .jev else {
-            presentTransientOverlayHint("文字输入需要先在「设置」里选择 JEV。")
+        // With a StepFun key, Ctrl+K opens the conversation with Her in any
+        // mode (Stage 4); without one it stays the JEV click input.
+        let conversation = delegationSessionIfAvailable()
+        guard conversation != nil || selectedMode == .jev else {
+            presentTransientOverlayHint("⌃K 打字和她对话需要阶跃密钥；在「设置 → 模型」里存一个。")
             return
         }
         captureTargetAppContextForShortcutPress(reason: "text command")
         NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
         textCommandActivityText = nil
+        if let conversation {
+            // The view reports its real height once it lays out; this only
+            // puts the panel into the conversation layout before it appears.
+            resizeConversationPanel(height: TextCommandPanelManager.baseHeight, hasEntries: !conversation.entries.isEmpty)
+        } else {
+            textCommandPanelManager.useJevLayout()
+        }
         textCommandPanelManager.show()
         textCommandFocusRequest = UUID()
 
@@ -1586,6 +1596,37 @@ final class CompanionManager: ObservableObject {
             self.showOnboardingPrompt = false
             self.onboardingPromptText = ""
         }
+    }
+
+    // MARK: - Ctrl+K conversation (Stage 4)
+
+    /// The conversation lives as long as the app so a hand-off keeps running,
+    /// and its result keeps waiting for a decision, while the panel is closed.
+    @Published private(set) var delegationSession: DelegationSession?
+
+    private func delegationSessionIfAvailable() -> DelegationSession? {
+        if let delegationSession { return delegationSession }
+        let read = KeychainStore.readItem(forKey: TipTourMode.stepfun.keyName)
+        guard read.state == .available, let apiKey = read.value, !apiKey.isEmpty else { return nil }
+        let modelClient = DelegationModelClient(apiKey: apiKey)
+        let worktreesRootPath = CodingAgentDelegation.defaultWorktreesRootPath
+        let session = DelegationSession(
+            conversation: DelegationConversation(complete: { try await modelClient.complete($0) }),
+            delegation: CodingAgentDelegation(worktreesRootPath: worktreesRootPath),
+            findProject: {
+                await DelegationProjectLocator.mostRecentProject(
+                    excludedPathPrefixes: DelegationProjectLocator.defaultExcludedPathPrefixes(worktreesRootPath: worktreesRootPath))
+            },
+            onScreenGoal: { [weak self] goal in self?.submitTextCommand(goal) }
+        )
+        delegationSession = session
+        return session
+    }
+
+    func resizeConversationPanel(height: CGFloat, hasEntries: Bool) {
+        textCommandPanelManager.setConversationSize(NSSize(width: DelegationPanelView.width, height: height))
+        // A conversation stays where it is; only the empty input follows the cursor.
+        textCommandPanelManager.setTrackingFrozen(hasEntries)
     }
 
     func dismissTextCommandPanel() {

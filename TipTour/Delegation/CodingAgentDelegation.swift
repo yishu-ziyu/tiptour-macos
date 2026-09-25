@@ -83,12 +83,54 @@ struct DelegationCommandResult: Sendable {
     let standardError: String
 }
 
+/// Delivers a process's exit through `terminationHandler`.
+///
+/// `Process.waitUntilExit()` waits for a notification that is delivered to
+/// the run loop of the thread that launched the process. Swift concurrency
+/// launches and waits on different pool threads, so that notification can
+/// never arrive and the wait hangs forever even though the process is gone
+/// (seen in `scripts/test-delegation.sh`: the stub had exited, the run never
+/// returned).
+final class DelegationProcessExit: @unchecked Sendable {
+    private let lock = NSLock()
+    private var exitStatus: Int32?
+    private var waiter: CheckedContinuation<Int32, Never>?
+
+    /// Call before `process.run()`.
+    func attach(to process: Process) {
+        process.terminationHandler = { [weak self] finishedProcess in
+            self?.finish(finishedProcess.terminationStatus)
+        }
+    }
+
+    func finish(_ status: Int32) {
+        let continuation: CheckedContinuation<Int32, Never>? = lock.withLock {
+            exitStatus = status
+            defer { waiter = nil }
+            return waiter
+        }
+        continuation?.resume(returning: status)
+    }
+
+    func wait() async -> Int32 {
+        await withCheckedContinuation { continuation in
+            let alreadyFinished: Int32? = lock.withLock {
+                if let exitStatus { return exitStatus }
+                waiter = continuation
+                return nil
+            }
+            if let alreadyFinished { continuation.resume(returning: alreadyFinished) }
+        }
+    }
+}
+
 enum DelegationCommand {
     static let gitExecutablePath = "/usr/bin/git"
 
     /// Runs a tool to completion off the main thread.
     static func run(_ executablePath: String, _ arguments: [String], inDirectory directoryPath: String? = nil) async -> DelegationCommandResult {
-        await Task.detached {
+        let exit = DelegationProcessExit()
+        let output: (Data, Data)? = await Task.detached { () -> (Data, Data)? in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executablePath)
             process.arguments = arguments
@@ -98,20 +140,28 @@ enum DelegationCommand {
             process.standardOutput = outputPipe
             process.standardError = errorPipe
             process.standardInput = FileHandle.nullDevice
+            exit.attach(to: process)
             do {
                 try process.run()
             } catch {
-                return DelegationCommandResult(exitStatus: -1, standardOutput: "", standardError: error.localizedDescription)
+                exit.finish(-1)
+                return nil
             }
+            // Drain stderr concurrently so a chatty command cannot fill its
+            // pipe and block while stdout is still being read.
+            let errorReader = Task.detached { errorPipe.fileHandleForReading.readDataToEndOfFile() }
             let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return DelegationCommandResult(
-                exitStatus: process.terminationStatus,
-                standardOutput: String(decoding: outputData, as: UTF8.self),
-                standardError: String(decoding: errorData, as: UTF8.self)
-            )
+            return (outputData, await errorReader.value)
         }.value
+        let exitStatus = await exit.wait()
+        guard let output else {
+            return DelegationCommandResult(exitStatus: -1, standardOutput: "", standardError: "could not launch \(executablePath)")
+        }
+        return DelegationCommandResult(
+            exitStatus: exitStatus,
+            standardOutput: String(decoding: output.0, as: UTF8.self),
+            standardError: String(decoding: output.1, as: UTF8.self)
+        )
     }
 
     static func git(_ arguments: [String], inDirectory directoryPath: String) async -> DelegationCommandResult {
@@ -269,6 +319,8 @@ final class CodingAgentDelegation: @unchecked Sendable {
         process.standardError = errorPipe
         process.standardInput = FileHandle.nullDevice
 
+        let agentExit = DelegationProcessExit()
+        agentExit.attach(to: process)
         let alreadyCancelled: Bool = processLock.withLock {
             runningAgentProcess = process
             return cancellationRequested
@@ -297,7 +349,7 @@ final class CodingAgentDelegation: @unchecked Sendable {
             // means the stream stopped early, which the exit status reports.
         }
         let errorOutput = String(decoding: errorPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        await Task.detached { process.waitUntilExit() }.value
+        let agentExitStatus = await agentExit.wait()
         let wasCancelled: Bool = processLock.withLock {
             runningAgentProcess = nil
             return cancellationRequested
@@ -307,7 +359,7 @@ final class CodingAgentDelegation: @unchecked Sendable {
         if !wasCancelled {
             if agentResult == nil {
                 let detail = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-                failure = detail.isEmpty ? "Claude Code 没有给出结果（退出码 \(process.terminationStatus)）" : String(detail.suffix(400))
+                failure = detail.isEmpty ? "Claude Code 没有给出结果（退出码 \(agentExitStatus)）" : String(detail.suffix(400))
             } else if agentResult?["is_error"] as? Bool == true {
                 failure = (agentResult?["result"] as? String) ?? "Claude Code 报告出错"
             }

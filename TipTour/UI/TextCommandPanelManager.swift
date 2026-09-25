@@ -27,8 +27,10 @@ final class TextCommandPanelManager {
     // consumer reads this property, and positionPanel re-asserts the frame at
     // 60Hz, so changing it here is enough to resize the live window.
     static let baseHeight: CGFloat = 64
-    private var panelSize = NSSize(width: 340, height: TextCommandPanelManager.baseHeight)
+    static let defaultWidth: CGFloat = 340
+    private var panelSize = NSSize(width: TextCommandPanelManager.defaultWidth, height: TextCommandPanelManager.baseHeight)
     private var isTrackingFrozen = false
+    private var isConversationLayout = false
     private let screenEdgeInset: CGFloat = 12
     private let cursorClearance: CGFloat = 44
     private let horizontalOffsetFromCursor: CGFloat = 56
@@ -134,9 +136,27 @@ final class TextCommandPanelManager {
 
     /// Resize the live panel to fit `extraHeight` of results under the input.
     func setResultsHeight(_ extraHeight: CGFloat) {
-        let height = TextCommandPanelManager.baseHeight + max(0, extraHeight)
-        guard abs(panelSize.height - height) > 0.5 else { return }
-        panelSize = NSSize(width: panelSize.width, height: height)
+        // In the conversation layout JEV reports through the activity line
+        // under the input; its results height must not shrink the panel.
+        guard !isConversationLayout else { return }
+        resizePanel(to: NSSize(width: TextCommandPanelManager.defaultWidth,
+                               height: TextCommandPanelManager.baseHeight + max(0, extraHeight)))
+    }
+
+    /// The Ctrl+K conversation with Her is wider and taller than the JEV input.
+    func setConversationSize(_ size: NSSize) {
+        isConversationLayout = true
+        resizePanel(to: size)
+    }
+
+    func useJevLayout() {
+        isConversationLayout = false
+        setResultsHeight(0)
+    }
+
+    private func resizePanel(to size: NSSize) {
+        guard abs(panelSize.height - size.height) > 0.5 || abs(panelSize.width - size.width) > 0.5 else { return }
+        panelSize = size
         if let panel {
             // The hosting view is generic over the wrapped root view type, so
             // resize it as a plain NSView rather than casting.
