@@ -65,6 +65,7 @@
 - Her 先给用户自己用（见 `docs/PRODUCT.md` 产品简介）；阶段 3 因此只验收界面（U3–U4），取消面向陌生用户的首次使用验收（U1–U2）。阶段名称暂不改。
 - ~~进入阶段 4 之前，先用当前构建把 10 句验收任务各跑一遍，做一次失败分析~~（同日被下面取代）。
 - 把整个项目过一遍后（用户逐条选定，见 [development/2026-09-25-claude-code-delegation-map.md](development/2026-09-25-claude-code-delegation-map.md)）：下一个目的地是阶段 4 的最小版本，先接 Claude Code、Codex，走文字入口；阶段 2 暂时停掉，阶段 3 停放；阶段 6 中「最近在做什么」和「好案例」两部分随阶段 4 一起做；10 句验收任务基线在阶段 4 做出来后再跑。取代「阶段 2、3 完成后做阶段 4」。
+- 她可以自己学会新能力：阶段 4 最小版本通过后，由她把需求交给 Claude Code 写成技能，用户看过差异才装上（细节见 [development/2026-09-25-claude-code-delegation-map.md](development/2026-09-25-claude-code-delegation-map.md)）。「只有一个大脑」不排斥这样生成的工具。
 
 ## 取代关系
 
