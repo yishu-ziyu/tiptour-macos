@@ -17,6 +17,7 @@
 | [OpenAI Realtime VAD](https://developers.openai.com/api/docs/guides/realtime-vad) | `interrupt_response` 默认打断 | 可关掉自动打断，由客户端自己决定何时打断、何时回答 |
 | [LiveKit Agents 轮次文档](https://docs.livekit.io/agents/logic/turns/) | 全双工；`min_duration`、`min_words` 过滤短促声音 | 「假打断」：检测到声音先停下，若在 `false_interruption_timeout`（默认 2 秒）内没转写出字，就从原处接着说 |
 | [Pipecat 用户静音策略](https://docs.pipecat.ai/server/utilities/filters/stt-mute) | 默认全双工 | 可选静音策略：只在开场白、工具调用期间，或 `ALWAYS`（她每次说话都静音，即半双工） |
+| [HeyClicky](https://www.heyclicky.com/)（开源版 [farzaa/clicky](https://github.com/farzaa/clicky)，Her 的前身之一，见 [lineage.md](../lineage.md)） | 按住 Ctrl+Option 才录音，松开后语音识别（AssemblyAI）→ Claude → ElevenLabs 合成语音；识别和合成是分开的两步，麦克风只在按住时开，不会听见自己 | 按下快捷键先停掉正在播放的语音（`CompanionManager.swift` 的 `handleShortcutTransition`），即用按键打断 |
 | Samuel `src/hooks/useRealtime.ts` | 声明支持打断（`interrupt_response: true`），但她一开口就关麦，回答生成完再等 1.5 秒（开场白 3 秒）才开；另外丢掉与她上一句重合的转写 | 实际是半双工；用户说「那不是我说的」可撤回上一轮 |
 | [阶跃实时接口文档](https://platform.stepfun.com/docs/zh/api-reference/realtime/chat) | `turn_detection` 只有 `prefix_padding_ms`、`silence_duration_ms`（默认 100）、`energy_awakeness_threshold`；没有「自动打断」开关，`speech_started` 只是「一般用于打断场景」的通知 | 打断与否完全由客户端决定：Her 在 `StepFunRealtimeSession.handleUserStartedSpeaking()` 里自己停播、自己发取消 |
 | [Apple WWDC23：语音处理新功能](https://developer.apple.com/videos/play/wwdc2023/10235) | `isVoiceProcessingInputMuted` 静音后，`setMutedSpeechActivityEventListener` 仍能报告「有人在说话」 | 半双工时仍可知道用户想插话（未验证在她放音时是否会被回声触发） |
@@ -35,6 +36,7 @@
 | 最小 | 半双工：她说话到放音结束再过 1.5 秒之前不发麦克风声音，并丢掉与她上一句重合的转写 | 否 | 麦克风回调里加一个开关；恢复绑在「播放放完」上，并加超时兜底 | 某轮没正常结束时麦克风可能一直不恢复，所以超时兜底必须有 |
 | 推荐 | 默认全双工；一旦发现回声（转写与她正在说或刚说完的话重合），本次会话剩下的时间自动改成半双工，并记录下来 | 回声消除正常时（如戴耳机）保留 | 最小做法加一处检测和一个会话内状态 | 每次会话第一次回声仍会打断她一次；之后不再发生 |
 | 放后面 | LiveKit 式假打断：听到声音先暂停不取消，转写回来确认是真人再打断，否则接着说 | 是 | 要处理阶跃自动为回声那一轮生成的回答（取消、删除），LiveKit 的阶跃插件里已报告过取消时序的竞争 | 回声频繁时她会一顿一顿；复杂度最高 |
+| 以后可加 | 学 HeyClicky：半双工期间按一个键就能让她停下（旧仓库 `YishuDuplexAudioFloor.swift` 也定过「开口只停声、不取消任务」的约定，见 lineage.md） | 按键可以 | 一个快捷键动作 | Ctrl+Option 现在用来开关整段会话，要另选按键或区分短按和长按 |
 | 根治 | 查清 Her 里回声消除为什么比最小程序差 30–40 dB | 是 | 未知 | 原因未定；停放地图里下一步本是「戴耳机对照」 |
 
 推荐项与根治不冲突：推荐项保证外放时不再自言自语，根治恢复外放时的插话。
@@ -43,6 +45,5 @@
 
 ## 还不知道的
 
-- 用户提到的「High clip」（据用户说是语音识别和语音合成分开的串联产品）没有找到出处；搜到的同名产品都是视频剪辑工具。
 - 阶跃在客户端取消回答、删除对话项上的具体行为，没有在真实会话里测过。
 - Apple 静音时的说话检测在她放音时会不会被回声误触发，没有测过。
