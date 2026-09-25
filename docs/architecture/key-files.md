@@ -67,6 +67,8 @@ Keep the approximate line counts within 50 lines of the real file; `scripts/chec
 | `TipTour/UI/TipTourSettingsView.swift` | Models, desktop actions, privacy, permissions and advanced options |
 | `TipTour/UI/TipTourSettingsWindowManager.swift` | Settings and log windows; default pipeline events store only diagnostic IDs, statuses and counts |
 | `TipTourTests/PipelineLogIntegrationTests.swift` | Serialized default-log privacy regression without writing to the user's log files |
+| `TipTour/Delegation/CodingAgentDelegation.swift` | Claude Code hand-off: current-project lookup, private worktree, stream-json progress, git readback receipt, merge/discard (~430 lines) |
+| `TipTourTests/CodingAgentDelegationTests.swift` | Outcome tests with a stubbed `claude` at the process seam and real git repositories (~250 lines) |
 | `TipTour/UI/TextCommandPanelManager.swift` | Cursor-following, resizable command panel |
 | `TipTour/UI/TextCommandPanelView.swift` | JEV input, stop control and results |
 | `TipTour/Utilities/KeychainStore.swift` | Device-local provider credential storage; existence vs in-process readability states, DEBUG-only acceptance denial seam (~540 lines) |

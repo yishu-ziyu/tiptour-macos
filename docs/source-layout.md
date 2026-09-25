@@ -4,6 +4,7 @@
 | --- | --- |
 | `TipTour/App` | Lifecycle, hotkeys, shared state, and mode coordination |
 | `TipTour/Voice` | StepFun Realtime WebSocket, microphone, audio playback, voice sessions |
+| `TipTour/Delegation` | Hands coding work to Claude Code in a private git worktree, reads the result back with git, merges or discards on the user's decision |
 | `TipTour/Jev` | TypeSafe client, validated target decisions, bounded click loop, results view |
 | `TipTour/Core` | Shared engine, action requests, highlight source resolution, harness contract |
 | `TipTour/Actions` | Desktop input facade and CUA driver |
