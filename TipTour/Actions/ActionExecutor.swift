@@ -522,7 +522,7 @@ final class CuaActionDriver: TipTourActionDriver {
 
         if shouldTypeTextUsingPhysicalKeys(text, targetApplication: targetApplication) {
             try await typeTextUsingPhysicalKeys(text)
-            print("[ActionExecutor] typed skill-directed modal input \"\(text)\" via physical key events on pid=\(targetProcessIdentifier)")
+            print("[ActionExecutor] typed \(text.count) characters via physical key events on pid=\(targetProcessIdentifier)")
             postUserInterfaceActionExecuted()
             return
         }
@@ -656,7 +656,7 @@ final class CuaActionDriver: TipTourActionDriver {
             try await Task.sleep(nanoseconds: 2_000_000_000)
         }
 
-        print("[ActionExecutor] opened URL \(url.absoluteString)")
+        print("[ActionExecutor] opened URL scheme=\(url.scheme ?? "unknown")")
         postUserInterfaceActionExecuted()
     }
 

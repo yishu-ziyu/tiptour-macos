@@ -864,7 +864,7 @@ final class GeminiLiveSession: ObservableObject {
         if toolCallsThisTurn > 1 {
             print("[GeminiLiveSession] ⚠️ Gemini called \(toolCallsThisTurn) tools in one turn — this will cause double narration. Prompt likely needs tightening.")
         }
-        print("[GeminiLiveSession] ← toolCall #\(toolCallsThisTurn) \(name) id=\(id) args=\(args)")
+        print("[GeminiLiveSession] ← toolCall #\(toolCallsThisTurn) \(name) id=\(id)")
 
         // Gemini often narrates a short intro ("sure, let me check...") BEFORE
         // emitting the tool call, then a proper response after the tool returns.
@@ -915,7 +915,7 @@ final class GeminiLiveSession: ObservableObject {
                 response = ["ok": false, "error": "unknown_tool"]
             }
 
-            print("[GeminiLiveSession] → toolResponse \(name) id=\(id) response=\(response)")
+            print("[GeminiLiveSession] → toolResponse \(name) id=\(id) ok=\(response["ok"] as? Bool ?? false)")
             geminiClient.sendToolResponse(id: id, name: name, response: response)
         }
     }

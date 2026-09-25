@@ -77,7 +77,7 @@ final class ElementResolver: @unchecked Sendable {
         let globalPoint = await MainActor.run {
             displayFrameContaining(axResult.center) ?? axResult.screenFrame
         }
-        print("[ElementResolver] ✓ AX matched \"\(label)\" → \"\(axResult.title)\" [\(axResult.role)] at \(axResult.center)")
+        print("[ElementResolver] ✓ AX matched [\(axResult.role)] at \(axResult.center)")
         return Resolution(
             globalScreenPoint: axResult.center,
             displayFrame: globalPoint,
@@ -113,7 +113,7 @@ final class ElementResolver: @unchecked Sendable {
         let globalScreenRect = Self.rect(from: matchedTarget.globalBox)
         let displayFrame = Self.rect(from: matchedTarget.displayFrame)
         let label = matchedTarget.label.isEmpty ? fallbackLabel : matchedTarget.label
-        print("[ElementResolver] ✓ exact local target #\(matchedTarget.mark) \"\(label)\" [\(matchedTarget.source)] at \(matchedTarget.globalCenter)")
+        print("[ElementResolver] ✓ exact local target #\(matchedTarget.mark) [\(matchedTarget.source)] at \(matchedTarget.globalCenter)")
         return Resolution(
             globalScreenPoint: CGPoint(
                 x: matchedTarget.globalCenter[0],
@@ -133,7 +133,7 @@ final class ElementResolver: @unchecked Sendable {
         capture: CompanionScreenCapture
     ) -> Resolution {
         let globalPoint = screenshotPixelToGlobalScreen(llmHintInScreenshotPixels, capture: capture)
-        print("[ElementResolver] ⚠ using raw LLM coords for \"\(label)\" → screenshotPixel=\(llmHintInScreenshotPixels), capture=\(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels), displayFrame=\(capture.displayFrame), screen=\(globalPoint)")
+        print("[ElementResolver] ⚠ using raw LLM coords → screenshotPixel=\(llmHintInScreenshotPixels), capture=\(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels), displayFrame=\(capture.displayFrame), screen=\(globalPoint)")
         return Resolution(
             globalScreenPoint: globalPoint,
             displayFrame: capture.displayFrame,
@@ -159,7 +159,7 @@ final class ElementResolver: @unchecked Sendable {
         // of wasted polling per step AND the CPU churn that causes
         // audio underruns in the Gemini Live output stream.
         if AccessibilityTreeResolver.isAppKnownToLackAXTree(hint: targetAppHint) {
-            print("[AX] skipping poll for \"\(label)\" — app \"\(targetAppHint ?? "?")\" flagged as no-AX-tree")
+            print("[AX] skipping poll — app flagged as no-AX-tree")
             return nil
         }
         let deadline = Date().addingTimeInterval(timeoutSeconds)
@@ -206,13 +206,13 @@ final class ElementResolver: @unchecked Sendable {
         if let capture = latestCapture {
             let ageSeconds = Date().timeIntervalSince(capture.captureTimestamp)
             if ageSeconds > 1.0 {
-                print("[ElementResolver] ⚠ screenshot is \(String(format: "%.2f", ageSeconds))s old — coords may have drifted for \"\(label)\"")
+                print("[ElementResolver] ⚠ screenshot is \(String(format: "%.2f", ageSeconds))s old — coords may have drifted")
             }
         }
 
         let shouldSkipAXAndBrowser = shouldSkipAXAndBrowserForVisionOnlyApp(targetAppHint: targetAppHint)
         if shouldSkipAXAndBrowser {
-            print("[ElementResolver] ⏭ vision-only app \"\(targetAppHint ?? "?")\" — skipping AX/CDP for \"\(label)\"")
+            print("[ElementResolver] ⏭ vision-only app — skipping AX/CDP")
         }
 
         if preferLocalHintBeforeAccessibility,
@@ -279,7 +279,7 @@ final class ElementResolver: @unchecked Sendable {
         }
 
         guard let capture = latestCapture else {
-            print("[ElementResolver] ✗ no AX/local match and no screenshot capture — giving up on \"\(label)\"")
+            print("[ElementResolver] ✗ no AX/local match and no screenshot capture")
             return nil
         }
 
@@ -306,7 +306,7 @@ final class ElementResolver: @unchecked Sendable {
             )
         }
 
-        print("[ElementResolver] ✗ could not resolve \"\(label)\" — AX missed and no box_2d hint")
+        print("[ElementResolver] ✗ could not resolve — AX missed and no box_2d hint")
         return nil
     }
 
@@ -324,7 +324,7 @@ final class ElementResolver: @unchecked Sendable {
             return nil
         }
 
-        print("[ElementResolver] ✓ local perception resolved \"\(label)\" → \"\(target.label)\" [\(target.source)] at \(target.globalScreenPoint), cacheAge=\(target.cacheAgeMs)ms")
+        print("[ElementResolver] ✓ local perception resolved [\(target.source)] at \(target.globalScreenPoint), cacheAge=\(target.cacheAgeMs)ms")
         return Resolution(
             globalScreenPoint: target.globalScreenPoint,
             displayFrame: target.displayFrame,
@@ -366,7 +366,7 @@ final class ElementResolver: @unchecked Sendable {
 
         let globalPoint = screenshotPixelToGlobalScreen(nativeDetectorMatch.center, capture: capture)
         let globalRect = screenshotPixelRectToGlobalScreen(nativeDetectorMatch.bbox, capture: capture)
-        print("[ElementResolver] ✓ native detector refined \"\(label)\" → \"\(nativeDetectorMatch.label)\" at screenshotPixel=\(nativeDetectorMatch.center), screen=\(globalPoint), cacheAge=\(nativeDetectorMatch.cacheAgeMs)ms")
+        print("[ElementResolver] ✓ native detector refined at screenshotPixel=\(nativeDetectorMatch.center), screen=\(globalPoint), cacheAge=\(nativeDetectorMatch.cacheAgeMs)ms")
 
         return Resolution(
             globalScreenPoint: globalPoint,

@@ -224,7 +224,7 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
 
         let (targetApp, targetBundleID) = resolveTargetApp(hint: targetAppHint)
         guard let targetApp else {
-            print("[AX] no target app (hint: \"\(targetAppHint ?? "nil")\")")
+            print("[AX] no target app")
             return nil
         }
 
@@ -232,7 +232,7 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
         // target app is busy (e.g. Blender mid-render, games in a frame).
         AXUIElementSetMessagingTimeout(targetApp, 0.2)
 
-        print("[AX] searching \"\(targetBundleID ?? "?")\" for \"\(query)\" (hint: \"\(targetAppHint ?? "none")\")")
+        print("[AX] searching target app for query of \(query.count) characters")
 
         let scoredCandidates = collectCandidates(
             from: targetApp,
@@ -253,7 +253,7 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
             if menuBarChildCount == 0 {
                 Self.noteAppHasEmptyAXTree(hint: targetAppHint)
             }
-            print("[AX] no match among \(scoredCandidates.count) candidates in \"\(targetBundleID ?? "?")\" (menuBarChildren=\(menuBarChildCount))")
+            print("[AX] no match among \(scoredCandidates.count) candidates (menuBarChildren=\(menuBarChildCount))")
             return nil
         }
         return winner
@@ -312,7 +312,7 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
         emptyTreeCacheLock.withLock {
             emptyTreeHintTimestamps[key] = Date()
         }
-        print("[AX] 🚫 flagging app \"\(hint)\" as no-AX-tree for 10min — future steps will skip straight to box_2d")
+        print("[AX] 🚫 flagging app as no-AX-tree for 10min")
     }
 
     /// Check whether an app's AX tree is known to be empty. Callers
@@ -346,7 +346,7 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
                 let axApp = AXUIElementCreateApplication(runningApp.processIdentifier)
                 return (axApp, runningApp.bundleIdentifier ?? runningApp.localizedName)
             }
-            print("[AX] no running app matches hint \"\(hint)\" — falling back to snapshot")
+            print("[AX] no running app matches hint — falling back to snapshot")
         }
 
         // Snapshot captured at hotkey press time — most reliable signal of

@@ -286,7 +286,7 @@ final class WorkflowRunner: ObservableObject {
 
         let singleActionPlan: WorkflowPlan
         if tracedPlan.steps.count > 1 {
-            print("[Workflow] ✂️ single-action mode: clamping \"\(tracedPlan.goal)\" from \(tracedPlan.steps.count) steps to 1")
+            print("[Workflow] ✂️ single-action mode: clamping \(tracedPlan.steps.count) steps to 1")
             recordWorkflowEvent(
                 name: "clamped",
                 status: "warning",
@@ -319,7 +319,7 @@ final class WorkflowRunner: ObservableObject {
         preClickAccessibilityFingerprint = nil
         planTargetAppBundleID = Self.bundleIDForAppName(singleActionPlan.app)
         startObservingAppActivationsForCurrentPlan()
-        print("[Workflow] starting \"\(singleActionPlan.goal)\" — \(singleActionPlan.steps.count) step(s) — token=\(freshOperationToken.uuidString.prefix(8))")
+        print("[Workflow] starting \(singleActionPlan.steps.count) step(s) — token=\(freshOperationToken.uuidString.prefix(8))")
         recordWorkflowEvent(
             name: "start",
             status: "started",
@@ -418,7 +418,7 @@ final class WorkflowRunner: ObservableObject {
     func pause(_ reason: PauseReason) {
         guard activePlan != nil else { return }
         if pausedReason == reason { return }
-        print("[Workflow] paused — \(reason.humanReadable)")
+        print("[Workflow] paused")
         pausedReason = reason
         recordWorkflowEvent(
             name: "paused",
@@ -694,7 +694,7 @@ final class WorkflowRunner: ObservableObject {
         if !isPostClick,
            let targetAppHint = activePlan?.app,
            let modalTitle = Self.detectBlockingModalDialogTitle(targetAppHint: targetAppHint) {
-            print("[Workflow] modal dialog detected mid-workflow: \"\(modalTitle ?? "")\" — pausing")
+            print("[Workflow] modal dialog detected mid-workflow — pausing")
             recordWorkflowEvent(
                 name: "modal_detected",
                 status: "paused",
@@ -712,7 +712,7 @@ final class WorkflowRunner: ObservableObject {
         switch step.type {
         case .click, .rightClick, .doubleClick:
             guard let label = step.label, !label.isEmpty else {
-                print("[Workflow] step \"\(step.hint)\" has no label — skipping")
+                print("[Workflow] step has no label — skipping")
                 recordWorkflowEvent(
                     name: "step_missing_label",
                     status: "warning",
@@ -776,7 +776,7 @@ final class WorkflowRunner: ObservableObject {
 
         case .observe:
             guard let label = step.label, !label.isEmpty else {
-                print("[Workflow] observe step \"\(step.hint)\" has no label — skipping")
+                print("[Workflow] observe step has no label — skipping")
                 advanceUsingCachedHandlers(isPostClick: false)
                 return
             }
@@ -788,7 +788,7 @@ final class WorkflowRunner: ObservableObject {
             )
 
         case .waitForState:
-            print("[Workflow] step \"\(step.hint)\" is .waitForState — not yet implemented, skipping")
+            print("[Workflow] .waitForState is not implemented — skipping")
             finishOperation(as: .skipped)
         }
     }
@@ -977,7 +977,7 @@ final class WorkflowRunner: ObservableObject {
         // Ran out of budget. Surface the failure so the UI can prompt
         // the user to skip or retry instead of stalling silently.
         guard operationToken == currentOperationToken else { return }
-        print("[Workflow] ✗ step \(activeStepIndex + 1) \"\(label)\" did not resolve within \(stepResolutionTimeoutSeconds)s (\(attemptIndex) attempts)")
+        print("[Workflow] ✗ step \(activeStepIndex + 1) did not resolve within \(stepResolutionTimeoutSeconds)s (\(attemptIndex) attempts)")
         recordWorkflowEvent(
             name: "resolve_failed",
             status: "failed",
@@ -1158,7 +1158,7 @@ final class WorkflowRunner: ObservableObject {
             guard operationToken == currentOperationToken else { return }
             advanceUsingCachedHandlers(isPostClick: true)
         } catch {
-            print("[Workflow] open app \"\(applicationName)\" failed: \(error.localizedDescription)")
+            print("[Workflow] open app failed")
             currentStepResolutionFailureLabel = applicationName
         }
     }
@@ -1185,7 +1185,7 @@ final class WorkflowRunner: ObservableObject {
             guard operationToken == currentOperationToken else { return }
             advanceUsingCachedHandlers(isPostClick: true)
         } catch {
-            print("[Workflow] open URL \"\(rawURLString)\" failed: \(error.localizedDescription)")
+            print("[Workflow] open URL failed")
             currentStepResolutionFailureLabel = rawURLString
         }
     }
@@ -1218,7 +1218,7 @@ final class WorkflowRunner: ObservableObject {
             guard operationToken == currentOperationToken else { return }
             advanceUsingCachedHandlers(isPostClick: false)
         } catch {
-            print("[Workflow] keyboard shortcut \"\(shortcut)\" failed: \(error.localizedDescription)")
+            print("[Workflow] keyboard shortcut failed")
             currentStepResolutionFailureLabel = shortcut
         }
     }
@@ -1245,7 +1245,7 @@ final class WorkflowRunner: ObservableObject {
             guard operationToken == currentOperationToken else { return }
             advanceUsingCachedHandlers(isPostClick: false)
         } catch {
-            print("[Workflow] press key \"\(keyName)\" failed: \(error.localizedDescription)")
+            print("[Workflow] press key failed")
             currentStepResolutionFailureLabel = keyName
         }
     }
@@ -1301,7 +1301,7 @@ final class WorkflowRunner: ObservableObject {
             guard operationToken == currentOperationToken else { return }
             advanceUsingCachedHandlers(isPostClick: false)
         } catch {
-            print("[Workflow] type \"\(textToType.prefix(40))…\" failed: \(error.localizedDescription)")
+            print("[Workflow] type failed after \(textToType.count) characters were requested")
             currentStepResolutionFailureLabel = "type"
         }
     }

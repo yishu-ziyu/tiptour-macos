@@ -1439,7 +1439,7 @@ final class TipTourEngine {
         }
 
         guard normalizedSteps.count == 1 else {
-            print("[Engine] rejecting multi-step external workflow plan \"\(plan.goal)\" - received \(normalizedSteps.count) step(s)")
+            print("[Engine] rejecting multi-step external workflow plan - received \(normalizedSteps.count) step(s)")
             recordEngineEvent(
                 name: "workflow_plan",
                 status: "rejected",
@@ -1495,9 +1495,8 @@ final class TipTourEngine {
             traceID: traceID
         )
 
-        let actionLabel = firstStep.label ?? firstStep.value ?? "<unlabeled>"
-        print("[Engine] accepted workflow plan \"\(singleActionPlan.goal)\" -> \(actionLabel)")
-        activityReporter("TipTour action - \(singleActionPlan.goal) -> \(actionLabel)")
+        print("[Engine] accepted workflow plan with action=\(firstStep.type.rawValue)")
+        activityReporter("TipTour action - \(singleActionPlan.goal) -> \(firstStep.label ?? firstStep.value ?? "<unlabeled>")")
         recordEngineEvent(
             name: "workflow_plan",
             status: "accepted",

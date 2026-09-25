@@ -36,7 +36,7 @@ final class BrowserCoordinateResolver: @unchecked Sendable {
         guard isBrowserTarget(targetAppHint: targetAppHint) else { return nil }
 
         guard let port = await CDPClient.findPageTarget(ports: cdpCandidatePorts) else {
-            print("[BrowserResolver] no CDP page target available for \"\(label)\"")
+            print("[BrowserResolver] no CDP page target available")
             return nil
         }
 
@@ -48,7 +48,7 @@ final class BrowserCoordinateResolver: @unchecked Sendable {
             guard let data = result.data(using: .utf8),
                   let match = try? JSONDecoder().decode(DOMMatch.self, from: data),
                   match.score > 0 else {
-                print("[BrowserResolver] CDP found no DOM match for \"\(label)\"")
+                print("[BrowserResolver] CDP found no DOM match")
                 return nil
             }
 
@@ -70,10 +70,10 @@ final class BrowserCoordinateResolver: @unchecked Sendable {
                 globalScreenRect: globalScreenRect,
                 matchedLabel: match.label
             )
-            print("[BrowserResolver] ✓ CDP matched \"\(label)\" → \"\(match.label)\" at \(resolution.globalScreenPoint)")
+            print("[BrowserResolver] ✓ CDP matched at \(resolution.globalScreenPoint)")
             return resolution
         } catch {
-            print("[BrowserResolver] CDP failed for \"\(label)\": \(error.localizedDescription)")
+            print("[BrowserResolver] CDP failed")
             return nil
         }
     }

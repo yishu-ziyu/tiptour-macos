@@ -605,15 +605,15 @@ final class GeminiLiveClient: @unchecked Sendable {
                 let id = (call["id"] as? String) ?? ""
                 let name = (call["name"] as? String) ?? ""
                 let args = (call["args"] as? [String: Any]) ?? [:]
-                print("[GeminiLive] toolCall \(name)(\(args)) id=\(id)")
+                print("[GeminiLive] toolCall \(name) id=\(id)")
                 dispatchEvent(.toolCall(id: id, name: name, args: args))
             }
             return
         }
 
         // 4. goAway — server will disconnect soon, we should reconnect proactively
-        if let goAway = json["goAway"] as? [String: Any] {
-            print("[GeminiLive] Server signaled goAway: \(goAway)")
+        if json["goAway"] is [String: Any] {
+            print("[GeminiLive] Server signaled goAway")
             return
         }
 
@@ -651,7 +651,7 @@ final class GeminiLiveClient: @unchecked Sendable {
                     let id = (functionCall["id"] as? String) ?? ""
                     let name = (functionCall["name"] as? String) ?? ""
                     let args = (functionCall["args"] as? [String: Any]) ?? [:]
-                    print("[GeminiLive] inline functionCall \(name)(\(args)) id=\(id)")
+                    print("[GeminiLive] inline functionCall \(name) id=\(id)")
                     dispatchEvent(.toolCall(id: id, name: name, args: args))
                 }
             }

@@ -36,8 +36,8 @@ struct JevTests {
     }
 
     @Test func defaultModeIsJevAndSavedChoiceIsRespected() {
-        #expect(TipTourMode.restored(from: nil) == .jev)
-        #expect(TipTourMode.restored(from: "obsolete-provider") == .jev)
+        #expect(TipTourMode.restored(from: nil) == .stepfun)
+        #expect(TipTourMode.restored(from: "obsolete-provider") == .stepfun)
         #expect(TipTourMode.restored(from: "gemini") == .gemini)
         #expect(TipTourMode.restored(from: "jev") == .jev)
     }
