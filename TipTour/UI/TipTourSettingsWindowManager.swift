@@ -90,7 +90,7 @@ final class TipTourLogsWindowManager {
             backing: .buffered,
             defer: false
         )
-        logsWindow.title = "TipTour Logs"
+        logsWindow.title = "Her 日志"
         logsWindow.titleVisibility = .hidden
         logsWindow.titlebarAppearsTransparent = true
         logsWindow.isReleasedWhenClosed = false
@@ -511,6 +511,13 @@ private enum TipTourLogDisplayMode: String, CaseIterable, Identifiable {
     case raw
 
     var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .pretty: return "易读"
+        case .raw: return "原始"
+        }
+    }
 }
 
 private struct TipTourLogsWindowView: View {
@@ -577,11 +584,11 @@ private struct TipTourLogsWindowView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Text("logs")
+            Text("日志")
                 .font(.system(size: 11, weight: .semibold, design: .monospaced))
                 .foregroundColor(DS.Colors.textTertiary)
 
-            TextField("filter jsonl", text: $filterText)
+            TextField("筛选日志", text: $filterText)
                 .textFieldStyle(.plain)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(DS.Colors.textPrimary)
@@ -589,22 +596,22 @@ private struct TipTourLogsWindowView: View {
                 .padding(.vertical, 4)
                 .background(terminalFieldBackground)
 
-            Text("\(visibleEvents.count)/\(logStore.events.count)")
+            Text("\(visibleEvents.count)/\(logStore.events.count) 条")
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(DS.Colors.textTertiary)
 
             modeButton(.pretty)
             modeButton(.raw)
 
-            terminalAction("copy") {
+            terminalAction("复制") {
                 logStore.copyToPasteboard(visibleText)
             }
 
-            terminalAction("reload") {
+            terminalAction("重载") {
                 logStore.reloadFromDisk()
             }
 
-            terminalAction("reveal") {
+            terminalAction("打开目录") {
                 logStore.revealLogFolder()
             }
         }
@@ -615,7 +622,7 @@ private struct TipTourLogsWindowView: View {
     }
 
     private func modeButton(_ mode: TipTourLogDisplayMode) -> some View {
-        Text(displayMode == mode ? "[\(mode.rawValue)]" : mode.rawValue)
+        Text(displayMode == mode ? "[\(mode.displayName)]" : mode.displayName)
             .font(.system(size: 11, design: .monospaced))
             .foregroundColor(displayMode == mode ? DS.Colors.accent : DS.Colors.textTertiary)
             .contentShape(Rectangle())
