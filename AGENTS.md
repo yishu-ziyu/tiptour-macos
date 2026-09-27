@@ -21,16 +21,24 @@ This file is the entry point for coding agents; `CLAUDE.md` is a symlink to it. 
 | Building, isolated suites, probes | [`docs/guides/build-and-verification.md`](docs/guides/build-and-verification.md) |
 | Real-user-path acceptance | [`docs/guides/acceptance.md`](docs/guides/acceptance.md) |
 | Writing Swift in this codebase | [`docs/guides/code-style.md`](docs/guides/code-style.md) |
-| The current stage's working contract and evidence | the newest dated file in [`docs/development/`](docs/development/README.md) |
+| The current delivery, priorities and acceptance | [`docs/ROADMAP.md`](docs/ROADMAP.md), then its linked stage contract; a newer date does not imply higher priority |
 | What to call a stage, metric or component | [`docs/terminology.md`](docs/terminology.md) — use only these names; no metaphors or nicknames |
+
+## Product management
+
+- Before implementation or a new research branch, read the current delivery in `docs/ROADMAP.md`. State the user-visible outcome this work serves and the evidence needed; do not let a tool problem silently replace the product objective.
+- `docs/PRODUCT.md` owns product direction; `docs/ROADMAP.md` is the single current priority/status entry. Stage contracts and research files provide detail and evidence, not competing work queues.
+- Keep approved delivery work, separately authorized experiments, and unapproved suggestions distinct. A successful prototype, build or connector probe is not product acceptance. Preserve parked work and the user's latest steering.
+- Research should resolve a concrete decision with bounded, real checks when feasible. Do not hand the user an avoidable "not tested" unknown, and do not expand permissions or scope to obtain a result.
+- The primary agent owns sequencing, integration and status updates. Ask the user for meaningful product tradeoffs or required authorization, not routine reversible implementation choices. Update the current delivery state at close-out.
 
 ## Hard rules
 
 - **Do not run `xcodebuild` from the terminal** — it invalidates TCC permissions. Build in Xcode. Pure Swift typechecking and the isolated test scripts are allowed; none of them replaces or launches the installed app.
-- Never bypass `CompanionManager` → `TipTourEngine` → `WorkflowRunner` → `ActionExecutor`/`TipTourActionDriver`. Every entry shares that engine, its permissions and its pauses.
-- `DesktopActionCompletion` in `TipTour/Voice/DesktopTaskContract.swift` is the only authority for whether a step counts as done. Nothing re-derives its own completion rule.
+- Her owns shared context, authorization, task state and user-facing receipts; execution paths remain separate (user decision 2026-09-26). All desktop input must reuse `CompanionManager` → `TipTourEngine` → `WorkflowRunner` → `ActionExecutor`/`TipTourActionDriver`, including its permissions and pauses. External Coding Agent delegation uses the existing delegation executor and isolated worktree, not the desktop-input loop. Neither path may bypass user confirmation or invent success. This ownership direction does not imply the current dialogue and task owners are already unified; see `docs/architecture/README.md`.
+- `DesktopActionCompletion` in `TipTour/Voice/DesktopTaskContract.swift` is the only authority for whether a desktop step counts as done. Coding Agent execution outcomes come from the existing delegation receipt and independent repository readback. Neither a model's completion claim nor a changed-file count proves the user's whole request passed acceptance.
 - Provider keys live only in macOS Keychain: no environment, sibling-project or hosted-key fallback. The UI reports Keychain errors accurately.
-- No Claude/Hermes integration, separate Flash Lite matcher, image-generation service, recording/video pipeline or Worker proxy is bundled. Do not reintroduce them without an explicit user request. Exception (user decision 2026-09-25): Stage 4 may invoke Claude Code and Codex as external command-line tools; they are not a second reasoning runtime inside Her. See [`docs/development/2026-09-25-claude-code-delegation-map.md`](docs/development/2026-09-25-claude-code-delegation-map.md).
+- No Claude/Hermes integration, separate Flash Lite matcher, image-generation service, recording/video pipeline or Worker proxy is bundled. Do not reintroduce them without an explicit user request. Exception: Stage 4 may invoke Claude Code and Codex (user decision 2026-09-25), plus Kimi Code and Step Code (user decision 2026-09-26), as external command-line tools; they are not a second reasoning runtime inside Her. See [`docs/development/2026-09-25-claude-code-delegation-map.md`](docs/development/2026-09-25-claude-code-delegation-map.md) for the original scope and [`docs/ROADMAP.md`](docs/ROADMAP.md) for current delivery.
 - Do not add features, refactors or "improvements" beyond what was asked. Do not add docstrings, comments or type annotations to code you did not change.
 - Do not fix the known non-blocking Swift 6 concurrency and deprecated `onChange` warnings as incidental cleanup.
 

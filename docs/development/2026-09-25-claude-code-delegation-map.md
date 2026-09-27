@@ -1,8 +1,10 @@
 # 把活交给 Claude Code：地图（2026-09-25）
 
-现行工作契约。接在 [能听见你并跑出失败清单](2026-09-25-listen-and-baseline-map.md) 之后；那一段于 2026-09-25 停放。方法与前两张地图相同：只有一个目的地；决定、停放的线和收件箱只记在这里。
+现行阶段 4 详细契约。接在 [能听见你并跑出失败清单](2026-09-25-listen-and-baseline-map.md) 之后；那一段于 2026-09-25 停放。自 2026-09-26 起，当前交付、即时优先级和下一步统一在 [ROADMAP.md](../ROADMAP.md) 维护；本文件保留阶段约定、原始决定与证据，不再单独承担当前工作队列。
 
 来源：2026-09-25 用户要求把整个项目从头过一遍（产品 → 路线 → 代码），以下决定都是那次对话里用户逐条选定的。
+
+2026-09-26 补充：用户批准草稿中显式选择 Codex、保留 Claude Code，并指定 Codex 日常任务使用 GPT-6 Luna / High。当前两者共用原有工作区和 Git 回执，不自动 fallback、不改全局配置；阶跃仍负责前台对话。真实 Codex 执行器临时项目验证已通过，原生完整路径仍被阶跃钥匙串读取拦截，见[当前验证](../guides/build-and-verification.md)。这取代下文「Codex 什么时候接」这一待定问题，不改变至少三个真实请求与用户验收的要求。
 
 ## 目的地
 
@@ -90,3 +92,4 @@
 | 日期 | 是什么 | 可能对哪一步有用 |
 | --- | --- | --- |
 | 2026-09-25 | [Samuel](https://github.com/sambuild04/screen-voice-agent)：Electron + OpenAI 实时语音的 macOS 助手，不调用编程工具 | 本段：她说了「这就交给 Claude Code」却没调工具时补一次提醒；派活结果带原因码。阶段 2：她说话时关麦，说完 1.5 秒后再开，并丢掉与她上一句重合的转写。阶段 9：盯屏、盯音频的触发器 |
+| 2026-09-25 | [awesome-native-macosx-apps](https://github.com/open-saas-directory/awesome-native-macosx-apps)：约 200 个原生 Mac 应用的清单，没有「AI 伙伴或代理」一类；Her 闲置时占 31 MB，已满足「原生、轻量」 | 盯进度：[Headroom](https://github.com/patwalls/headroom) 从 Claude Code 写在本机的文件读 5 小时和每周额度，派活前可以提醒额度快用完。阶段 2：[OpenQuack](https://github.com/larryxiao/openquack) 用 WhisperKit 做本机听写。⌃K 面板：Raycast、Alfred 这类一键唤起面板 |

@@ -2,6 +2,8 @@
 
 Every document lives under `docs/`. Each file stays small and links to its neighbours; start from the entry for your question and follow links only as far as you need.
 
+For product work, start with [PRODUCT.md](PRODUCT.md) for the big picture and [ROADMAP.md](ROADMAP.md) for the one current delivery, its acceptance and the next action. Dated maps and research support those two entries; their dates do not set priority.
+
 Three kinds of document, and how to treat them:
 
 - **Current** — describes the code and product as they are now. Must be updated in the same change that makes it wrong (see the documentation sync rule in [`AGENTS.md`](../AGENTS.md)).
@@ -13,7 +15,7 @@ Three kinds of document, and how to treat them:
 | Document | Answers |
 | --- | --- |
 | [PRODUCT.md](PRODUCT.md) | Who she is, the value function, decided directions |
-| [ROADMAP.md](ROADMAP.md) | Target architecture, stages with exit criteria and status |
+| [ROADMAP.md](ROADMAP.md) | Single current delivery/status entry, product management rules, candidates and stage exit criteria |
 | [lineage.md](lineage.md) | Frozen predecessor repositories and what to port from them |
 | [terminology.md](terminology.md) | The one name for each stage, metric and component |
 | [research/incredible-reconstruction.md](research/incredible-reconstruction.md) | Competitor architecture evidence with confidence levels |
@@ -21,6 +23,7 @@ Three kinds of document, and how to treat them:
 | [research/delegation-references.md](research/delegation-references.md) | How open-source projects hand work to Claude Code / Codex; evidence for Stage 4 decisions |
 | [research/full-duplex-echo.md](research/full-duplex-echo.md) | 全双工还是半双工：ChatGPT、Gemini、LiveKit、Pipecat、Samuel 怎么处理「听见自己」，以及 Her 的选项 |
 | [design-references.md](design-references.md) | Where UI design references come from |
+| [design/her-continuity-interaction.md](design/her-continuity-interaction.md) | Interaction prototype: quiet updates while away, preserved context on return, and explicit simulation boundaries |
 
 ## How the app works (current)
 
@@ -55,9 +58,13 @@ Three kinds of document, and how to treat them:
 | Document | Kind |
 | --- | --- |
 | [development/README.md](development/README.md) | Classification of every file in `development/` |
-| [development/2026-09-25-claude-code-delegation-map.md](development/2026-09-25-claude-code-delegation-map.md) | Dated contract: current map — minimal Stage 4, handing work to Claude Code with the user's recent context |
+| [research/2026-09-26-today-incredible-experience.md](research/2026-09-26-today-incredible-experience.md) | Dated research: Today live recall tests, Incredible installation and design sources, with verification limits |
+| [research/2026-09-26-coordination-architecture.md](research/2026-09-26-coordination-architecture.md) | Dated research: Grok Bot, Today, Incredible, OpenMausBot and OpenMuse; coordination mechanisms, source provenance and Her-specific tradeoffs |
+| [research/2026-09-26-today-proactivity.md](research/2026-09-26-today-proactivity.md) | Dated research: actual proactive messages, official claims, a factual counterexample and Her-specific proposals |
+| [research/2026-09-26-open-connector-pilot.md](research/2026-09-26-open-connector-pilot.md) | Live pilot: GitHub HTTP/MCP reads and write denial verified; temporary credential cleanup; Notion awaiting its own page-scoped authorization |
+| [development/2026-09-25-claude-code-delegation-map.md](development/2026-09-25-claude-code-delegation-map.md) | Stage 4 detailed contract and evidence; current scheduling belongs to ROADMAP.md |
 | [development/2026-09-25-listen-and-baseline-map.md](development/2026-09-25-listen-and-baseline-map.md) | Dated contract: parked map — Her hears you, then the first failure list from the acceptance tasks |
-| [development/2026-09-25-product-definition-map.md](development/2026-09-25-product-definition-map.md) | Dated contract: the single map for the product-definition effort (destination, decisions, parked threads, inbox) |
+| [development/2026-09-25-product-definition-map.md](development/2026-09-25-product-definition-map.md) | Frozen product-definition decisions; current direction is PRODUCT.md, current delivery is ROADMAP.md |
 | [development/2026-09-23-first-run-and-interface.md](development/2026-09-23-first-run-and-interface.md) | Dated contract: stage 3, first-run guidance and interface design |
 | [development/2026-09-23-voice-conversation-quality.md](development/2026-09-23-voice-conversation-quality.md) | Dated contract: stage 2, voice conversation quality, with evidence |
 | [development/2026-09-23-acceptance-infrastructure.md](development/2026-09-23-acceptance-infrastructure.md) | Dated contract: acceptance infrastructure |
