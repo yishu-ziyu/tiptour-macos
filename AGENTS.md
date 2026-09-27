@@ -22,6 +22,7 @@ This file is the entry point for coding agents; `CLAUDE.md` is a symlink to it. 
 | Real-user-path acceptance | [`docs/guides/acceptance.md`](docs/guides/acceptance.md) |
 | Writing Swift in this codebase | [`docs/guides/code-style.md`](docs/guides/code-style.md) |
 | The current delivery, priorities and acceptance | [`docs/ROADMAP.md`](docs/ROADMAP.md), then its linked stage contract; a newer date does not imply higher priority |
+| Starting any item in the ROADMAP task list | The files named in that item's 「参考」 (in the sibling `today-study/` research repo: behaviour gap table, OSS capability and subsystem analyses). State what was borrowed and what did not apply |
 | What to call a stage, metric or component | [`docs/terminology.md`](docs/terminology.md) — use only these names; no metaphors or nicknames |
 
 ## Product management

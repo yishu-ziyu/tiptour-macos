@@ -16,11 +16,44 @@ Her 主动告诉你在意的新东西（新模型、黑客松、电影……）�
 
 | 段 | 做什么 | 怎样算做完（最终由用户判定） | 状态 |
 | --- | --- | --- | --- |
-| 1 她说的都是真的 | 方案第 6 条，以及缺陷表第 1–4、7、9、10 项 | 合并前工作区变了就不合并，未提交的新文件和目标分支写进回执；JEV 一步没做不报完成，屏幕目标没执行或执行结果都回到对话；语音不念参数名；手改的委派记录和提醒规则不被覆盖、运行中能读到。每项有真实路径证据 | 待用户验收：代码与隔离测试完成（委派 87、语音生命周期 37、StepFun 18、JEV 16 项）；2026-09-27 真实构建逐项验收通过：旧改动先核对、新建未提交文件写明、看过后变了不合、换分支不合、重启后回执一致、手删记录不回写、点通知只开对话、JEV 没启动的结果回到对话。未在真机测到：JEV 0 步报完成、语音未确认时的说法。证据 `out/acceptance/2026-09-27-phase1-truthful/` |
+| 1 她说的都是真的 | 方案第 6 条，以及缺陷表第 1–4、7、9、10 项 | 合并前工作区变了就不合并，未提交的新文件和目标分支写进回执；JEV 一步没做不报完成，屏幕目标没执行或执行结果都回到对话；语音不念参数名；手改的委派记录和提醒规则不被覆盖、运行中能读到。每项有真实路径证据 | 进行中：1.1 已验收（2026-09-27）；1.2–1.4 待做。已验收部分：代码与隔离测试完成（委派 87、语音生命周期 37、StepFun 18、JEV 16 项）；2026-09-27 真实构建逐项验收通过：旧改动先核对、新建未提交文件写明、看过后变了不合、换分支不合、重启后回执一致、手删记录不回写、点通知只开对话、JEV 没启动的结果回到对话。未在真机测到：JEV 0 步报完成、语音未确认时的说法。证据 `out/acceptance/2026-09-27-phase1-truthful/` |
 | 2 一个她 | 方案第 3、1a、2、5 条 | 语音里起的名字两边都认；语音答得出 Ctrl+K 里的草稿和最近结果；连聊二十句不明显变慢；问「你能做什么」答得准 | 待开始 |
 | 3 主动推荐 | 方案第 4 条书桌 → 看出你在意什么 → 接 OpenConnector 三个来源 → 每天找一次新东西，值得说才通知 | 「你在意的方向」10 条里至少 8 条你觉得对；三个来源只读能读到最近 7 天、写入被拒；连续 7 天推送至少一半你觉得有用，而且不烦 | 待开始 |
 
-**暂时不做：** Ctrl+K 对话跨重启保留、长期记忆、委派功能继续扩展、方案第 1b 条（语音直接改草稿）、浏览记录和照片、IM 和手机端。
+### 任务清单（按顺序做，做完一项勾一项）
+
+标「你」的要用户动手或拍板；其余由主代理做，每项用真实构建验收并留证据。开工前先读该项「参考」里的文件，并在交付说明里写明借了什么、哪条不适用；差距表指 `today-study/spec/her-gap.md`。
+
+**第 1 段 她说的都是真的**
+- [x] 1.1 你：看 GIF，决定第 1 段是否验收（2026-09-27 用户：通过）（证据页 `out/acceptance/2026-09-27-phase1-truthful/`）
+- [ ] 1.2 「丢掉」和「没有改动」时，工具新建但没提交的文件会随工作区删除：先移到废纸篓或保留，并在回执里写明去向。参考：`today-study/refs-analysis/capabilities/task-execution.md`
+- [ ] 1.3 工作区内容变了但文件列表相同时，回执要写明「内容和你上次看到的不一样」。参考：`today-study/refs-analysis/capabilities/safety-permissions.md`（确认后再核对）
+- [ ] 1.4 屏幕操作没真正开始前，她不说「正在点击」。参考：`today-study/refs-analysis/capabilities/tools-connectors.md`（结果类型）
+
+**第 2 段 一个她**（顺序即方案顺序）
+- [ ] 2.1 她是谁写进 `persona.md`；语音里起的名字和称呼能存下，两边都认（方案第 3 条）。参考：`today-study/refs-analysis/capabilities/persona.md`、`openhanako/subsystems/persona.md`、`CowAgent/subsystems/persona-prompt.md`
+- [ ] 2.2 语音看得见 Ctrl+K 的草稿和最近结果（方案第 1a 条）。参考：`today-study/refs-analysis/CowAgent/subsystems/voice.md`、`openhanako/subsystems/session.md`
+- [ ] 2.3 Ctrl+K 对话重启后还在：旧消息保留（淡显），隔久了或重启过的地方插一行时间；「刚才」按时间对到最近那件，对不上时说出时间和内容来问（用户 2026-09-27 选 A，示意见 `out/acceptance/2026-09-27-restart-options/index.html` 的选项 A）。同时：进模型的内容设上限；记录编号不再随新任务后移（方案第 2 条）。参考：`today-study/refs-analysis/capabilities/persistence-sessions.md`、`openhanako/subsystems/session.md`；差距表 UI-07
+- [ ] 2.4 回复里提到换项目时必须同时给出草稿（真机测试中出现 3 次）。参考：`today-study/refs-analysis/capabilities/task-execution.md`
+- [ ] 2.5 两个入口都知道自己现在能做什么、缺什么、去哪开（方案第 5 条）。参考：`today-study/refs-analysis/CowAgent/subsystems/skills.md`、`CowAgent/subsystems/tools.md`、`capabilities/tools-connectors.md`
+
+**第 3 段 主动推荐**
+- [ ] 3.1 书桌：你写给她的话（她只读）＋「她以为你在意的」列表，设置里可看可删（方案第 4 条）。参考：`today-study/refs-analysis/openhanako/subsystems/desktop-ui-desk-workspace.md`、`capabilities/memory.md`；差距表 ME-01…ME-08
+- [ ] 3.2 从 Claude Code、Codex 对话、git 项目、Obsidian 推断「你在意的方向」，每条带出处；你判断 10 条里至少 8 条对。开工前先补一篇「兴趣发现」设计：`today-study/refs-analysis/QUESTIONS.md` 第 11 题只答了一部分，素材是 openhanako 记忆提取提示词（抽兴趣和近期关注）和巡检提示词。参考：`today-study/refs-analysis/capabilities/memory.md`、`openhanako/subsystems/memory.md`、`QUESTIONS.md` 第 11 题
+- [ ] 3.3 你：给 flomo MCP Token、建只读 Notion 集成、授权 Gmail 只读（我逐步带）；接入 OpenConnector，密钥加密钥匙放钥匙串。参考：`today-study/refs-analysis/capabilities/tools-connectors.md`；`docs/research/2026-09-26-open-connector-pilot.md`
+- [ ] 3.4 每天找一次新东西（网页搜索限定最近一天或一周、Hacker News），值得说才发通知，写明为什么现在；消息写法、去重和频率按 `today-study/spec/her-gap.md` 的 PR-03、PR-05、PR-08，每条附来源（BR-07）。参考：`today-study/refs-analysis/capabilities/proactive.md`、`CowAgent/subsystems/scheduler-proactive.md`、`openhanako/subsystems/hub-scheduler-heartbeat.md`；差距表 PR-01…PR-10、BR-07
+- [ ] 3.5 你：连续用 7 天，判断有用和打扰程度；对照 Today 7 天记录（10 月 4 日结束）。参考：`today-study/refs-analysis/../spec/difftest.md`
+
+**零散事项的归属**
+- Today 7 天记录器自动运行到 10 月 4 日，结果用于 3.5 对照，不需要操作。
+- Today 行为规格（`today-study/spec/`）与开源分析（`today-study/refs-analysis/`）是第 2、3 段的依据，不单独推进。
+- Today 页面交互浏览（试用期内）、测试用虚拟机（磁盘只剩约 34 GB）：可选，你提出时再做。
+- 本机「防止睡眠」系统级失败（`caffeinate` 也失败）：不是 Her 的问题，可重启电脑试；暂不处理。
+- 原阶段 4「三个真实改动请求」验收：停放。
+- 验收场景：第 2、3 段完成时，用 `today-study/spec/difftest.md` 里对应场景（D-04 主动消息、D-06 时间标签、D-11 记住和忘掉等）把 Her 和 Today 各跑一遍对照。
+- Today 试用期内要看的页面清单在 `today-study/spec/observation-plan.md`，需要你离开电脑时授权我只读浏览；过期后看不到。
+
+**暂时不做：** 长期记忆、委派功能继续扩展、方案第 1b 条（语音直接改草稿）、浏览记录和照片、IM 和手机端。
 
 ## 上一个交付：阶段 4 委派原生场景（2026-09-26）
 
