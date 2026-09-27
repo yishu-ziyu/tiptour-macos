@@ -43,4 +43,4 @@ tag 只在本地创建，未推送。仓库目录可在对应能力于 `os` 跑�
 
 本地产物（`out/` 被 gitignore）：
 - `out/research/2026-09-23-competitors.md`：Meta Muse、Incredible、Today AI 等 15 个产品的对比，每条带来源。
-- `out/research/2026-09-23-teardown.md`：Today、Incredible、Littlebird 安装包静态拆解（未运行）。原始文件在 `/tmp/her-teardown/`。
+- `out/research/2026-09-23-teardown.md` 与原始文件 `/tmp/her-teardown/`（Today、Incredible、Littlebird 安装包静态拆解）：2026-09-27 按用户决定删除，不再作为依据（见 `docs/PRODUCT.md` 取代关系）。Today 的行为研究在本地 `today-study/`，只看行为，不拆包。

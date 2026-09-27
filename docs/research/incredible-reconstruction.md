@@ -22,8 +22,8 @@
 | UNKNOWN | 还没有证据 |
 
 证据位置：
-- `T` = `out/research/2026-09-23-teardown.md`：Incredible 0.2.31 桌面包静态拆解。原始文件在 `/tmp/her-teardown/`，本地未入库。
-- `E` = Chrome 扩展 1.14.5（ID `ajhinphcdjpohilkmooikgbgcipmkopi`），包内的 `REVIEWERS.md`、`manifest.json`、`src/teach-capture.js`，原始文件在 `/tmp/her-teardown/ext/inc/`。
+- `T` = `out/research/2026-09-23-teardown.md`：Incredible 0.2.31 桌面包静态拆解。原始文件在 `/tmp/her-teardown/`，本地未入库。2026-09-27 按用户决定删除，标 `T` 的结论已无法复核。
+- `E` = Chrome 扩展 1.14.5（ID `ajhinphcdjpohilkmooikgbgcipmkopi`），包内的 `REVIEWERS.md`、`manifest.json`、`src/teach-capture.js`，原始文件在 `/tmp/her-teardown/ext/inc/`。2026-09-27 一并删除，标 `E` 的结论同样无法复核。
 - `P` = 公开资料。
 - `U` = 用户 2026-09-23 的溯源笔记（本对话），来源尚未逐条复核。
 
