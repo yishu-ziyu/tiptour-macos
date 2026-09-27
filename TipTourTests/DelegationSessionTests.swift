@@ -278,10 +278,27 @@ struct DelegationSessionTests {
         await session.sendCurrentDraft()
 
         let report = try #require(reports(session).last)
-        #expect(report.headline.hasSuffix("另有 1 个新建但没提交的文件，合并时不会带上。"))
-        #expect(try #require(notices.posted.first).body.contains("另有 1 个新建的文件没提交，合并时不会带上。"))
+        #expect(report.headline.hasSuffix("另有 1 个新建但没提交的文件（notes.txt），合并时不会带上；合进来或丢掉后都会随工作区删除，不进废纸篓。"))
+        #expect(try #require(notices.posted.first).body.contains("另有 1 个新建的文件没提交（notes.txt），合并时不会带上，之后会随工作区删除。"))
+        let worktree = report.receipt.workspace.worktreePath
         await session.mergePendingChange()
         #expect(!FileManager.default.fileExists(atPath: project.repositoryPath + "/notes.txt"), "As the receipt said")
+        #expect(!FileManager.default.fileExists(atPath: worktree + "/notes.txt"))
+        #expect(herLines(session).last?.hasSuffix("工作区清掉了。没提交的 notes.txt 也随工作区删了，不进废纸篓。") == true)
+    }
+
+    @Test func discardingSaysTheUncommittedNewFilesAreGoneToo() async throws {
+        let project = try await makeProject()
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print world > greeting.txt; print note > notes.txt"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改问候语，顺便记一笔")])
+        await session.send("改问候语，顺便记一笔")
+        await session.sendCurrentDraft()
+        let worktree = try #require(reports(session).last).receipt.workspace.worktreePath
+
+        await session.discardPendingChange()
+        #expect(!FileManager.default.fileExists(atPath: worktree + "/notes.txt"))
+        #expect(herLines(session).last == "丢掉了，项目没动。没提交的 notes.txt 也随工作区删了，不进废纸篓。")
     }
 
     @Test func aReceiptRebuiltAfterARestartShowsWhatItShowedBefore() async throws {
@@ -1416,8 +1433,11 @@ struct DelegationSessionTests {
 
         let notice = try #require(notices.posted.first)
         #expect(notice.category == .noChange)
-        #expect(notice.body.contains("没有提交任何改动；它新建的 1 个文件没提交，已随工作区清掉"))
+        #expect(notice.body.contains("没有提交任何改动；它新建的 1 个文件没提交（brand-new.txt），已随工作区删除，不进废纸篓"))
         #expect(!notice.body.contains("没有任何改动"))
+        let report = try #require(reports(session).last)
+        #expect(!FileManager.default.fileExists(atPath: report.receipt.workspace.worktreePath + "/brand-new.txt"))
+        #expect(report.headline.hasSuffix("说做完了，但没有提交任何改动，这次不算做成。它新建但没提交的 brand-new.txt 已随工作区删除，不进废纸篓。"))
     }
 
     @Test func whenNotificationsAreOffSheSaysSoOnce() async throws {

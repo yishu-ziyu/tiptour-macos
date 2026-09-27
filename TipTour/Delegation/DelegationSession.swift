@@ -365,7 +365,7 @@ final class DelegationSession: ObservableObject {
                 noticePoster?.withdraw(pendingRecordID)
             }
             pendingRecordID = nil
-            say("合好了（\(head.prefix(7))），工作区清掉了。")
+            say("合好了（\(head.prefix(7))），工作区清掉了。" + Self.uncommittedGone(reviewed))
             phase = .idle
         } catch DelegationError.changedSinceReview(let now) {
             // Only what the user has seen may be merged: show what is there now.
@@ -386,16 +386,20 @@ final class DelegationSession: ObservableObject {
     }
 
     func discardPendingChange() async {
-        guard phase == .awaitingDecision, let workspace = pendingWorkspace else { return }
-        await delegation.discard(workspace)
+        guard phase == .awaitingDecision, let receipt = pendingReceipt else { return }
+        await delegation.discard(receipt.workspace)
         pendingReceipt = nil
         if let pendingRecordID {
             history?.decide(pendingRecordID, .discarded)
             noticePoster?.withdraw(pendingRecordID)
         }
         pendingRecordID = nil
-        say("丢掉了，项目没动。")
+        say("丢掉了，项目没动。" + Self.uncommittedGone(receipt))
         phase = .idle
+    }
+
+    private static func uncommittedGone(_ receipt: DelegationReceipt) -> String {
+        receipt.untrackedFiles.isEmpty ? "" : "没提交的 \(DelegationReport.names(receipt.untrackedFiles)) 也随工作区删了，不进废纸篓。"
     }
 
     /// Clears the conversation. A change still waiting for a decision stays
@@ -499,15 +503,28 @@ struct DelegationReport: Equatable {
             let count = receipt.changedFiles.count
             let target = receipt.workspace.projectBranch.map { " \(receipt.workspace.project.name) 的 \($0) 分支" } ?? "项目"
             let leftOut = receipt.untrackedFiles.isEmpty ? ""
-                : "另有 \(receipt.untrackedFiles.count) 个新建但没提交的文件，合并时不会带上。"
+                : "另有 \(receipt.untrackedFiles.count) 个新建但没提交的文件（\(Self.names(receipt.untrackedFiles))），合并时不会带上；合进来或丢掉后都会随工作区删除，不进废纸篓。"
             return "工作区里有改动：涉及 \(count) 个文件。确认后再合进\(target)。" + leftOut
         case .noChange:
-            return "\(receipt.agentTool.displayName) 说做完了，但工作区里没有任何改动，这次不算做成。"
+            let nothing = receipt.untrackedFiles.isEmpty ? "工作区里没有任何改动" : "没有提交任何改动"
+            return "\(receipt.agentTool.displayName) 说做完了，但\(nothing)，这次不算做成。" + deletedWithWorkspace
         case .agentFailed(let reason):
-            return "没做成：\(reason)"
+            return "没做成：\(reason)" + deletedWithWorkspace
         case .cancelled:
-            return "停下了，没合进任何东西。"
+            return "停下了，没合进任何东西。" + deletedWithWorkspace
         }
+    }
+
+    /// The workspace of an unfinished run is removed at once, taking the
+    /// tool's uncommitted new files with it.
+    private var deletedWithWorkspace: String {
+        receipt.untrackedFiles.isEmpty ? "" : "它新建但没提交的 \(Self.names(receipt.untrackedFiles)) 已随工作区删除，不进废纸篓。"
+    }
+
+    /// Up to three file names, so the user can tell what is going away.
+    static func names(_ files: [String]) -> String {
+        let shown = files.prefix(3).joined(separator: "、")
+        return files.count > 3 ? "\(shown) 等 \(files.count) 个文件" : shown
     }
 
     /// The question Claude Code ended with, if any, so Her can relay it

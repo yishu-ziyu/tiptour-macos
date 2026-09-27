@@ -55,17 +55,18 @@ struct DelegationNotice: Equatable, Sendable {
         switch receipt.outcome {
         case .changed:
             title = "\(tool) 做完了 · \(project)"
-            let leftOut = receipt.untrackedFiles.isEmpty ? "" : "另有 \(receipt.untrackedFiles.count) 个新建的文件没提交，合并时不会带上。"
+            let leftOut = receipt.untrackedFiles.isEmpty ? "" : "另有 \(receipt.untrackedFiles.count) 个新建的文件没提交（\(DelegationReport.names(receipt.untrackedFiles))），合并时不会带上，之后会随工作区删除。"
             body = "\(quoted)改了 \(receipt.changedFiles.count) 个文件。\(leftOut)现在告诉你，是因为改动在单独的工作区里，等你决定合不合进项目。点开看改动。"
         case .noChange:
             title = "\(tool) 说做完了，但没有改动 · \(project)"
             let leftovers = receipt.untrackedFiles.isEmpty
                 ? "项目里没有任何改动"
-                : "没有提交任何改动；它新建的 \(receipt.untrackedFiles.count) 个文件没提交，已随工作区清掉"
+                : "没有提交任何改动；它新建的 \(receipt.untrackedFiles.count) 个文件没提交（\(DelegationReport.names(receipt.untrackedFiles))），已随工作区删除，不进废纸篓"
             body = "\(quoted)\(leftovers)，这次不算做成。现在告诉你，是免得你以为已经改好了。点开看它的说明。"
         case .agentFailed(let reason):
             title = "\(tool) 没做成 · \(project)"
-            body = "\(quoted)停下了：\(Self.clip(reason, 80))。现在告诉你，是因为要你决定重试还是换个做法。点开看原始报错。"
+            let leftovers = receipt.untrackedFiles.isEmpty ? "" : "它新建但没提交的 \(DelegationReport.names(receipt.untrackedFiles)) 已随工作区删除。"
+            body = "\(quoted)停下了：\(Self.clip(reason, 80))。\(leftovers)现在告诉你，是因为要你决定重试还是换个做法。点开看原始报错。"
         case .cancelled:
             return nil
         }

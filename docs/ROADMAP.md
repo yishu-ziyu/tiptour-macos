@@ -26,7 +26,7 @@ Her 主动告诉你在意的新东西（新模型、黑客松、电影……）�
 
 **第 1 段 她说的都是真的**
 - [x] 1.1 你：看 GIF，决定第 1 段是否验收（2026-09-27 用户：通过）（证据页 `out/acceptance/2026-09-27-phase1-truthful/`）
-- [ ] 1.2 「丢掉」和「没有改动」时，工具新建但没提交的文件会随工作区删除：先移到废纸篓或保留，并在回执里写明去向。参考：`today-study/refs-analysis/capabilities/task-execution.md`
+- [ ] 1.2 「丢掉」和「没有改动」时，工具新建但没提交的文件会随工作区删除：先移到废纸篓或保留，并在回执里写明去向（2026-09-28 用户选 C：不保留，只在回执、通知和合并/丢掉后那句里按文件名写明会删、不进废纸篓；依据是真实出现过的都是工具元数据或测试故意留的文件。代码与隔离测试完成（委派 88 项），待真实构建看一眼）。参考：`today-study/refs-analysis/capabilities/task-execution.md`
 - [ ] 1.3 工作区内容变了但文件列表相同时，回执要写明「内容和你上次看到的不一样」。参考：`today-study/refs-analysis/capabilities/safety-permissions.md`（确认后再核对）
 - [ ] 1.4 屏幕操作没真正开始前，她不说「正在点击」。参考：`today-study/refs-analysis/capabilities/tools-connectors.md`（结果类型）
 
