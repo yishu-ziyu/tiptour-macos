@@ -22,6 +22,7 @@ Three kinds of document, and how to treat them:
 | [research/decision-layer-comparison.md](research/decision-layer-comparison.md) | JEV vs local Cua-S1-4B as the decision layer; evidence for stage 7 |
 | [research/delegation-references.md](research/delegation-references.md) | How open-source projects hand work to Claude Code / Codex; evidence for Stage 4 decisions |
 | [research/full-duplex-echo.md](research/full-duplex-echo.md) | 全双工还是半双工：ChatGPT、Gemini、LiveKit、Pipecat、Samuel 怎么处理「听见自己」，以及 Her 的选项 |
+| [research/2026-09-27-architecture-from-references.md](research/2026-09-27-architecture-from-references.md) | 方案（未批准）：从 openhanako、CowAgent 源码学到的六条架构改造，以及顺带查出的 Her 现有缺陷 |
 | [design-references.md](design-references.md) | Where UI design references come from |
 | [design/her-continuity-interaction.md](design/her-continuity-interaction.md) | Interaction prototype: quiet updates while away, preserved context on return, and explicit simulation boundaries |
 
