@@ -48,6 +48,7 @@ final class DelegationSession: ObservableObject {
     private let delegation: CodingAgentDelegation
     private let findProject: @MainActor () async -> DelegationProject?
     private let onScreenGoal: @MainActor (String) -> Void
+    private let history: DelegationHistory?
     private struct Draft {
         let text: String
         let project: DelegationProject?
@@ -57,17 +58,22 @@ final class DelegationSession: ObservableObject {
     private var currentDraft: Draft?
     private var pendingWorkspace: DelegationWorkspace?
     private var explicitlySelectedProject: DelegationProject?
+    /// What the user said since the last hand-off, saved with the next one.
+    private var userWordsSinceLastSend: [String] = []
+    private var pendingRecordID: UUID?
 
     init(
         conversation: DelegationConversation,
         delegation: CodingAgentDelegation,
         findProject: @escaping @MainActor () async -> DelegationProject?,
-        onScreenGoal: @escaping @MainActor (String) -> Void
+        onScreenGoal: @escaping @MainActor (String) -> Void,
+        history: DelegationHistory? = nil
     ) {
         self.conversation = conversation
         self.delegation = delegation
         self.findProject = findProject
         self.onScreenGoal = onScreenGoal
+        self.history = history
     }
 
     var isBusy: Bool {
@@ -83,6 +89,7 @@ final class DelegationSession: ObservableObject {
         let trimmed = userText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isBusy else { return }
         entries.append(.message(id: UUID(), speaker: .user, text: trimmed))
+        userWordsSinceLastSend.append(trimmed)
         phase = .thinking
         let project: DelegationProject?
         if let currentDraft {
@@ -96,7 +103,8 @@ final class DelegationSession: ObservableObject {
         }
         let context = await Self.projectContext(for: project)
         do {
-            let turn = try await conversation.respond(to: trimmed, projectContext: context, tool: selectedAgentTool)
+            let turn = try await conversation.respond(to: trimmed, projectContext: context, tool: selectedAgentTool,
+                                                      recentHandOffs: history?.promptText() ?? "（还没有记录）")
             if case .draft = turn.action, pendingWorkspace != nil {
                 say("先决定上一份改动：点「合进来」或「丢掉」，再发新任务。")
                 phase = .awaitingDecision
@@ -177,6 +185,8 @@ final class DelegationSession: ObservableObject {
         }
         retireCurrentDraft()
         currentDraft = nil
+        let recordID = history?.begin(userWords: userWordsSinceLastSend, draft: draft.text, project: project, tool: draft.tool)
+        userWordsSinceLastSend = []
         say("交给 \(draft.tool.displayName) 了，在 \(project.name) 的单独工作区里改，你接着忙。")
         let startedAt = Date()
         phase = .running(startedAt: startedAt, latestProgress: "\(draft.tool.displayName) 正在执行任务")
@@ -195,10 +205,12 @@ final class DelegationSession: ObservableObject {
                 self.phase = .running(startedAt: startedAt, latestProgress: line)
             }
         }
+        if let recordID { history?.finish(recordID, receipt: receipt) }
         let report = DelegationReport(receipt: receipt)
         entries.append(.report(id: UUID(), report: report))
         if receipt.outcome == .changed {
             pendingWorkspace = workspace
+            pendingRecordID = recordID
             phase = .awaitingDecision
         } else {
             await delegation.discard(workspace)
@@ -216,6 +228,8 @@ final class DelegationSession: ObservableObject {
         do {
             let head = try await delegation.merge(workspace, commitMessage: "Apply change delegated from Her")
             pendingWorkspace = nil
+            if let pendingRecordID { history?.decide(pendingRecordID, .merged) }
+            pendingRecordID = nil
             say("合好了（\(head.prefix(7))），工作区清掉了。")
             phase = .idle
         } catch {
@@ -228,6 +242,8 @@ final class DelegationSession: ObservableObject {
         guard phase == .awaitingDecision, let workspace = pendingWorkspace else { return }
         await delegation.discard(workspace)
         pendingWorkspace = nil
+        if let pendingRecordID { history?.decide(pendingRecordID, .discarded) }
+        pendingRecordID = nil
         say("丢掉了，项目没动。")
         phase = .idle
     }
@@ -238,6 +254,7 @@ final class DelegationSession: ObservableObject {
         guard !isBusy else { return }
         conversation.reset()
         explicitlySelectedProject = nil
+        userWordsSinceLastSend = []
         currentDraft = nil
         entries = entries.filter {
             if case .report = $0, pendingWorkspace != nil { return true }

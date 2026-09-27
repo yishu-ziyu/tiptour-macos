@@ -1621,7 +1621,8 @@ final class CompanionManager: ObservableObject {
                 await DelegationProjectLocator.mostRecentProject(
                     excludedPathPrefixes: DelegationProjectLocator.defaultExcludedPathPrefixes(worktreesRootPath: worktreesRootPath))
             },
-            onScreenGoal: { [weak self] goal in self?.submitTextCommand(goal) }
+            onScreenGoal: { [weak self] goal in self?.submitTextCommand(goal) },
+            history: DelegationHistory(fileURL: DelegationHistory.defaultFileURL)
         )
         delegationSession = session
         return session

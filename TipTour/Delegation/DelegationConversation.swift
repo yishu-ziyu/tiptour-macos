@@ -113,9 +113,11 @@ final class DelegationConversation: @unchecked Sendable {
     /// she will write or send something but returns no draft, she is asked
     /// once more to either produce the draft or say why she cannot. At most
     /// once per user message, so it cannot loop.
-    func respond(to userText: String, projectContext: String, tool: DelegationAgentTool = .claudeCode) async throws -> DelegationTurn {
+    func respond(to userText: String, projectContext: String, tool: DelegationAgentTool = .claudeCode,
+                 recentHandOffs: String = "（还没有记录）") async throws -> DelegationTurn {
         transcript.append(DelegationChatMessage(role: .user, content: userText))
-        let systemMessage = DelegationChatMessage(role: .system, content: Self.instructions(projectContext: projectContext, tool: tool))
+        let systemMessage = DelegationChatMessage(role: .system, content: Self.instructions(
+            projectContext: projectContext, tool: tool, recentHandOffs: recentHandOffs))
         var turn = try Self.parse(try await complete([systemMessage] + transcript))
         var neededCorrection = false
         if Self.promisesActionWithoutOne(turn) {
@@ -131,7 +133,8 @@ final class DelegationConversation: @unchecked Sendable {
 
     // MARK: - Prompt
 
-    static func instructions(projectContext: String, tool: DelegationAgentTool = .claudeCode) -> String {
+    static func instructions(projectContext: String, tool: DelegationAgentTool = .claudeCode,
+                             recentHandOffs: String = "（还没有记录）") -> String {
         """
         你是住在用户 Mac 上的中文伙伴。用户在 ⌃K 输入框里用文字跟你说话。
         你能做两件事：整理写代码、改项目的任务草稿；或者让 JEV 在屏幕上点一个控件。
@@ -144,6 +147,7 @@ final class DelegationConversation: @unchecked Sendable {
         - 当前项目只是从最近使用记录中找到的，不保证是用户这次的目标。用户点名的项目或路径与当前项目不符时，提醒用户在草稿里点「更换项目」核对实际绑定；仅在正文写路径不会切换项目，不能声称已经切换。
         - 要求清楚了，就写 draft：给执行工具的完整要求，写明目标、范围和约束（只改需要改的；先读项目说明；不要运行 xcodebuild；改完自检；提交一次，不要推送；最后用两三句话说明改了什么）。草稿只描述任务，不写死执行工具或模型名。action 为 "draft"，say 用一句话请用户看一眼草稿，确认后点「发出去」。
         - 用户点名另一执行工具时，草稿仍按要求写，并提醒他在草稿的「执行工具」里选择；不要声称已切换。Codex 当前用用户选定的 GPT-6 Luna、High 推理档位，仅对本次执行生效；其他执行工具沿用各自本机配置。你不能通过对话修改模型，不要声称已换模型或自动升级。
+        - 用户说「上次」「刚才」「那个任务」「那次失败」等指以前的事时，先对照下面「以前交出去的任务」。能确定是哪一条，就直接用它的项目、执行工具、结果和原始报错理解用户的意思，不要让用户重述；写 draft 时写明指的是哪次任务，并原样附上相关的原始报错或结果，供执行工具定位。几条都像或都对不上时，用一句话问是哪一次。记录里没有的事不要编。
         - 用户对草稿提意见时，按意见改好整份 draft 再给出来。
         - 你自己不会发出任何东西。不要说「已经交出去了」「我这就去改」之类的话：只有用户点了「发出去」才会交出去，那句话由应用来说。
         - 用户要在屏幕上点某个东西时，action 为 "screen"，screen_goal 写清要点哪个控件。
@@ -154,6 +158,9 @@ final class DelegationConversation: @unchecked Sendable {
 
         当前项目：
         \(projectContext)
+
+        以前交出去的任务（Her 本机记录，新的在前，重启后仍在）：
+        \(recentHandOffs)
         """
     }
 

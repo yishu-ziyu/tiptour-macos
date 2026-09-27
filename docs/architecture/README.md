@@ -32,7 +32,7 @@ CompanionManager
 | Voice and text conversation | Separate provider sessions and histories | No shared conversation/context handoff across the two entries |
 | Task ownership | Voice coordinator, JEV task/loop, legacy harness owner and Coding Agent delegation coexist | Shared user-visible task identity and control are not yet implemented across paths |
 | Results | Desktop step verification and delegation git receipts exist | Each task type keeps its own evidence rules; a global success claim cannot be inferred from a model or diff alone |
-| Return after hiding | Text session and pending result remain while the app runs | No text/delegation restart recovery; voice continuity journal is opt-in recovery metadata, not long-term memory |
+| Return after hiding | Text session and pending result remain while the app runs; each delegation hand-off (words, draft, project, tool, result, decision) is recorded on disk and the newest five are given to the conversation, so a restart does not erase what was handed off | The conversation itself and a pending worktree are not restored after restart; the hand-off record is not general memory and has no view/edit/delete UI; voice continuity journal is opt-in recovery metadata, not long-term memory |
 | Project context and sources | Recent Claude session suggests a project; the draft can explicitly select a validated Git root, with branch/recent commits | No production case-library, browsing-history or cross-session recall reader |
 | Proactivity | Window/input monitoring supports current perception | No production follow-up/discovery inbox or quiet-notification flow; current UX is a simulation |
 

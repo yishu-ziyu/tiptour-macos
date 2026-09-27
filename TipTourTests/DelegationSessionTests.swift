@@ -76,7 +76,8 @@ struct DelegationSessionTests {
         step: String = "/nonexistent/step",
         replies: [String],
         findProject: (@MainActor () async -> DelegationProject?)? = nil,
-        screenGoals: ScreenGoalRecorder? = nil
+        screenGoals: ScreenGoalRecorder? = nil,
+        history: DelegationHistory? = nil
     ) throws -> DelegationSession {
         ScriptedStepFun.queue(replies)
         let configuration = URLSessionConfiguration.ephemeral
@@ -86,7 +87,8 @@ struct DelegationSessionTests {
         let delegation = CodingAgentDelegation(claudeCommand: claude, worktreesRootPath: try makeTemporaryDirectory(),
                                                codexCommand: codex, kimiCommand: kimi, stepCommand: step)
         return DelegationSession(conversation: conversation, delegation: delegation,
-                                 findProject: findProject ?? { project }, onScreenGoal: { screenGoals?.goals.append($0) })
+                                 findProject: findProject ?? { project }, onScreenGoal: { screenGoals?.goals.append($0) },
+                                 history: history)
     }
 
     private func herLines(_ session: DelegationSession) -> [String] {
@@ -782,6 +784,94 @@ struct DelegationSessionTests {
 
         #expect(try greeting(project) == "hello\n")
         #expect(herLines(session).last == "丢掉了，项目没动。")
+    }
+
+    // MARK: - Remembering hand-offs across restarts
+
+    @Test func aFailedHandOffIsStillKnownAfterARestart() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        let before = try makeSession(
+            project: project, claude: "/nonexistent/claude",
+            codex: try makeStubCodex(body: """
+            print -r -- '{"type":"turn.failed","error":{"message":"unexpected status 502 Bad Gateway"}}'
+            exit 1
+            """),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "把日志窗口改成中文")],
+            history: DelegationHistory(fileURL: historyURL))
+        await before.send("日志窗口改成中文")
+        before.selectAgentTool(.codex)
+        await before.sendCurrentDraft()
+        guard case .agentFailed = try #require(reports(before).first).receipt.outcome else {
+            Issue.record("The stub must fail like the real 502")
+            return
+        }
+
+        // A new app launch: a fresh session reading the same file.
+        let after = try makeSession(project: project, claude: "/nonexistent/claude",
+                                    replies: [modelReply(say: "好。")],
+                                    history: DelegationHistory(fileURL: historyURL))
+        await after.send("上次 Codex 那个失败提示我看不懂，改一下")
+        let seen = try #require(ScriptedStepFun.systemMessages.last)
+        #expect(seen.contains("日志窗口改成中文"))
+        #expect(seen.contains("把日志窗口改成中文"))
+        #expect(seen.contains("Codex"))
+        #expect(seen.contains(project.repositoryPath))
+        #expect(seen.contains("没做成。原始报错："))
+        #expect(seen.contains("502 Bad Gateway"))
+        #expect(try greeting(project) == "hello\n")
+    }
+
+    @Test(arguments: [false, true])
+    func theUsersDecisionIsRemembered(merge: Bool) async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        let session = try makeSession(
+            project: project,
+            claude: try makeStubClaude(body: "print world > greeting.txt"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改成 world")],
+            history: DelegationHistory(fileURL: historyURL))
+        await session.send("问候语改成 world")
+        await session.sendCurrentDraft()
+        if merge { await session.mergePendingChange() } else { await session.discardPendingChange() }
+
+        let reopened = DelegationHistory(fileURL: historyURL).promptText()
+        #expect(reopened.contains("改了 1 个文件（greeting.txt）"))
+        #expect(reopened.contains(merge ? "用户决定：已合进项目" : "用户决定：已丢掉"))
+        #expect(try greeting(project) == (merge ? "world\n" : "hello\n"))
+    }
+
+    @Test func aHandOffCutOffByQuittingIsNotShownAsDone() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        _ = DelegationHistory(fileURL: historyURL).begin(userWords: ["改问候语"], draft: "改成 world", project: project, tool: .kimiCode)
+
+        let reopened = DelegationHistory(fileURL: historyURL).promptText()
+        #expect(reopened.contains("没有收到结果：执行期间 Her 被关掉了"))
+        #expect(!reopened.contains("正在执行"))
+        #expect(reopened.contains("Kimi Code"))
+    }
+
+    @Test func anUnreadableHistoryIsKeptAsideNotOverwritten() async throws {
+        let project = try await makeProject()
+        let directory = try makeTemporaryDirectory()
+        let historyURL = URL(fileURLWithPath: directory + "/delegation-history.json")
+        try "not json".write(to: historyURL, atomically: true, encoding: .utf8)
+
+        let history = DelegationHistory(fileURL: historyURL)
+        #expect(history.promptText() == "（还没有记录）")
+        _ = history.begin(userWords: ["新任务"], draft: "新草稿", project: project, tool: .codex)
+        let kept = try FileManager.default.contentsOfDirectory(atPath: directory).filter { $0.contains("unreadable") }
+        #expect(kept.count == 1)
+        #expect(try String(contentsOfFile: directory + "/" + kept[0], encoding: .utf8) == "not json")
+        #expect(DelegationHistory(fileURL: historyURL).promptText().contains("新草稿"))
+    }
+
+    @Test func noHistoryMeansHerSaysSheHasNoRecord() async throws {
+        let project = try await makeProject()
+        let session = try makeSession(project: project, claude: "/nonexistent/claude", replies: [modelReply(say: "好。")])
+        await session.send("上次那个")
+        #expect(ScriptedStepFun.systemMessages.last?.contains("以前交出去的任务（Her 本机记录，新的在前，重启后仍在）：\n（还没有记录）") == true)
     }
 
     @Test func claudeCodesClosingQuestionIsRelayed() {

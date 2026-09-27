@@ -70,10 +70,11 @@ Keep the approximate line counts within 50 lines of the real file; `scripts/chec
 | `TipTour/Delegation/CodingAgentDelegation.swift` | Explicit Claude/Codex/Kimi/Step hand-off, current-project lookup, private worktree, concurrent process output, git receipt and merge/discard (~538 lines) |
 | `TipTour/Delegation/DelegationAgentOutput.swift` | Normalizes four CLI JSONL formats, terminal outcome, summary and session ID; rejects nonzero exit and incomplete output (~131 lines) |
 | `TipTourTests/CodingAgentDelegationTests.swift` | Real git outcomes with four CLI process stubs, failure/truncation, tool-error recovery, stderr and cancellation isolation (~548 lines) |
-| `TipTour/Delegation/DelegationConversation.swift` | Step Plan conversation, selected-tool context, task draft and say-do guard (~208 lines) |
-| `TipTour/Delegation/DelegationSession.swift` | Explicit project validation and conversation retention, project/tool-bound draft, isolated execution context, helper-file constraints, preparation, receipt and pending decisions (~313 lines) |
+| `TipTour/Delegation/DelegationConversation.swift` | Step Plan conversation, selected-tool context, recent hand-off records, task draft and say-do guard (~219 lines) |
+| `TipTour/Delegation/DelegationHistory.swift` | Hand-off records on disk (`~/Library/Application Support/Her/delegation-history.json`): user's words, draft, project, tool, result with raw failure, merge/discard; interrupted runs marked, unreadable file moved aside (~181 lines) |
+| `TipTour/Delegation/DelegationSession.swift` | Explicit project validation and conversation retention, project/tool-bound draft, isolated execution context, helper-file constraints, preparation, receipt, pending decisions and hand-off recording (~330 lines) |
 | `TipTour/UI/DelegationPanelView.swift` | Stable conversation layout, native project folder picker, tool/model confirmation, fixed composer and receipts (~506 lines) |
-| `TipTourTests/DelegationSessionTests.swift` | Explicit project selection, failed-task retry retention, four-tool binding and promise correction, isolation prompt, preparation and pending decisions with real Git readback (~858 lines) |
+| `TipTourTests/DelegationSessionTests.swift` | Explicit project selection, failed-task retry retention, four-tool binding and promise correction, isolation prompt, preparation, pending decisions and hand-off records across restarts with real Git readback (~948 lines) |
 | `TipTour/UI/TextCommandPanelManager.swift` | Separate conversation/JEV geometry, native header drag region, hidden conversation frame restoration and screen bounds; JEV cursor following (~345 lines) |
 | `TipTour/UI/TextCommandPanelView.swift` | JEV input, stop control and results |
 | `TipTour/Utilities/KeychainStore.swift` | Device-local provider credential storage; existence vs in-process readability states, DEBUG-only acceptance denial seam (~540 lines) |
