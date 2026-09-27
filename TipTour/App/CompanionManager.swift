@@ -1608,8 +1608,8 @@ final class CompanionManager: ObservableObject {
                     excludedPathPrefixes: DelegationProjectLocator.defaultExcludedPathPrefixes(worktreesRootPath: worktreesRootPath))
             },
             onScreenGoal: { [weak self] goal, finished in
-                guard let self else { return finished("Her 没能接下这件事。") }
-                self.submitTextCommand(goal, onFinish: finished)
+                guard let self else { return "Her 没能接下这件事。" }
+                return self.submitTextCommand(goal, onFinish: finished)
             },
             history: DelegationHistory(fileURL: DelegationHistory.defaultFileURL),
             noticePoster: delegationNoticeCenter,
@@ -2398,17 +2398,17 @@ final class CompanionManager: ObservableObject {
         return true
     }
 
-    /// `onFinish` hears once what happened, including a refusal to start.
-    func submitTextCommand(_ prompt: String, onFinish: (@MainActor (String) -> Void)? = nil) {
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    /// Returns why it did not start, decided before anything runs; nil once
+    /// started, after which `onFinish` hears once what happened.
+    @discardableResult
+    func submitTextCommand(_ prompt: String, onFinish: (@MainActor (String) -> Void)? = nil) -> String? {
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "没有要做的事。" }
         guard !isTextCommandRunning else {
-            onFinish?("没有开始：上一件屏幕上的事还在做。")
-            return
+            return "上一件屏幕上的事还在做。"
         }
         guard DesktopTaskAdmission.allowsCurrentTask else {
             textCommandActivityText = "当前任务仍保留桌面控制权，请先继续或取消该任务。"
-            onFinish?("没有开始：" + textCommandActivityText!)
-            return
+            return textCommandActivityText
         }
         // JEV needs its own key to talk to TypeSafe. A key that is saved but
         // unreadable gets a different sentence from one that was never saved.
@@ -2416,8 +2416,7 @@ final class CompanionManager: ObservableObject {
         guard jevKey.state == .available, !(jevKey.value ?? "").isEmpty else {
             publishedTextKeyFailure = jevKey.state.userMessage(subject: "JEV 密钥")
             textCommandActivityText = publishedTextKeyFailure
-            onFinish?("没有开始：" + (publishedTextKeyFailure ?? "JEV 密钥读不到。"))
-            return
+            return publishedTextKeyFailure ?? "JEV 密钥读不到。"
         }
         let runID = UUID()
         textCommandRunID = runID
@@ -2432,6 +2431,7 @@ final class CompanionManager: ObservableObject {
             guard self.textCommandRunID == runID else { return }
             self.finishTextCommand()
         }
+        return nil
     }
 
     /// Publish a key refusal and remember it so a later refresh can retire it.

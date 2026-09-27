@@ -97,7 +97,9 @@ struct DelegationSessionTests {
         return DelegationSession(conversation: conversation, delegation: delegation,
                                  findProject: findProject ?? { project }, onScreenGoal: { goal, finished in
                                      screenGoals?.goals.append(goal)
-                                     if let result = screenGoals?.result { finished(result) }
+                                     if let refusal = screenGoals?.refusal { return refusal }
+                                     screenGoals?.finish = finished
+                                     return nil
                                  },
                                  history: history, herBundleIdentifier: herBundleIdentifier,
                                  noticePoster: notices, noticeRules: noticeRules, isUserLooking: isUserLooking,
@@ -961,18 +963,40 @@ struct DelegationSessionTests {
     @Test func whatJevDidComesBackToTheConversation() async throws {
         let project = try await makeProject()
         let screenGoals = ScreenGoalRecorder()
-        screenGoals.result = "没有开始：上一件屏幕上的事还在做。"
         let session = try makeSession(project: project, claude: try makeStubClaude(body: ":"),
-                                      replies: [modelReply(say: "好。", action: "screen", screenGoal: "点击 保存 按钮"),
-                                                modelReply(say: "没点成，上一件还在做。")],
+                                      replies: [modelReply(say: "正在点击保存按钮。", action: "screen", screenGoal: "点击 保存 按钮"),
+                                                modelReply(say: "没点成。")],
                                       screenGoals: screenGoals)
 
         await session.send("帮我点一下保存")
-        #expect(herLines(session).last == "屏幕上那件事：没有开始：上一件屏幕上的事还在做。", "She said she would; the panel says it did not start")
+        let finish = try #require(screenGoals.finish)
+        finish("做了 12 步还没完成，先停下了。")
+        #expect(herLines(session).suffix(2) == ["正在点击保存按钮。", "屏幕上那件事：做了 12 步还没完成，先停下了。"])
 
         await session.send("弄好了吗")
         let seen = try #require(ScriptedStepFun.userMessages.last)
-        #expect(seen.contains("【应用记录，不是用户说的话】屏幕上那件事：没有开始"), "The model answers from what happened")
+        #expect(seen.contains("【应用记录，不是用户说的话】屏幕上那件事：做了 12 步还没完成"), "The model answers from what happened")
+    }
+
+    @Test(arguments: ["上一件屏幕上的事还在做。",
+                      "当前任务仍保留桌面控制权，请先继续或取消该任务。",
+                      "未保存 JEV 密钥：请在「设置 → 模型」保存密钥后重试。"])
+    func whenTheScreenGoalCannotStartSheDoesNotSayShesClicking(reason: String) async throws {
+        let project = try await makeProject()
+        let screenGoals = ScreenGoalRecorder()
+        screenGoals.refusal = reason
+        let session = try makeSession(project: project, claude: try makeStubClaude(body: ":"),
+                                      replies: [modelReply(say: "正在点击访达菜单栏的「前往」。", action: "screen", screenGoal: "点击 前往 菜单"),
+                                                modelReply(say: "还没点。")],
+                                      screenGoals: screenGoals)
+
+        await session.send("帮我在屏幕上点一下访达菜单栏里的「前往」")
+        #expect(!herLines(session).contains { $0.contains("正在点击") })
+        #expect(herLines(session).last == "没去点：\(reason)")
+
+        await session.send("点了吗")
+        let seen = try #require(ScriptedStepFun.userMessages.last)
+        #expect(seen.contains("【应用记录，不是用户说的话】没去点：\(reason)"), "The model answers from what happened")
     }
 
     @Test func missingProjectIsSaidPlainlyAndNothingRuns() async throws {
@@ -1642,8 +1666,10 @@ struct DelegationSessionTests {
 @MainActor
 final class ScreenGoalRecorder {
     var goals: [String] = []
-    /// What JEV reports back; nil leaves the goal unfinished.
-    var result: String?
+    /// Why it did not start; nil means it started.
+    var refusal: String?
+    /// Reports what JEV did, later, as the real run does.
+    var finish: (@MainActor (String) -> Void)?
 }
 
 /// Answers the StepFun chat endpoint with queued model contents, in order.

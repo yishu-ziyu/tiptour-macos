@@ -49,7 +49,8 @@ final class DelegationSession: ObservableObject {
     private let findProject: @MainActor () async -> DelegationProject?
     /// Hands a screen goal to JEV; the second argument is called once with
     /// what happened, including when it never started.
-    private let onScreenGoal: @MainActor (String, @escaping @MainActor (String) -> Void) -> Void
+    /// Hands a goal to JEV; returns why it did not start, or nil once it has.
+    private let onScreenGoal: @MainActor (String, @escaping @MainActor (String) -> Void) -> String?
     private let history: DelegationHistory?
     /// Her's own bundle identifier, used to recognize her source repository.
     private let herBundleIdentifier: String?
@@ -88,7 +89,7 @@ final class DelegationSession: ObservableObject {
         conversation: DelegationConversation,
         delegation: CodingAgentDelegation,
         findProject: @escaping @MainActor () async -> DelegationProject?,
-        onScreenGoal: @escaping @MainActor (String, @escaping @MainActor (String) -> Void) -> Void,
+        onScreenGoal: @escaping @MainActor (String, @escaping @MainActor (String) -> Void) -> String?,
         history: DelegationHistory? = nil,
         herBundleIdentifier: String? = Bundle.main.bundleIdentifier,
         noticePoster: DelegationNoticePoster? = nil,
@@ -163,7 +164,10 @@ final class DelegationSession: ObservableObject {
                 phase = .awaitingDecision
                 return
             }
-            if !turn.say.isEmpty { entries.append(.message(id: UUID(), speaker: .her, text: turn.say)) }
+            // A screen reply ("正在点击…") is shown only once the goal has started.
+            var isScreen = false
+            if case .screen = turn.action { isScreen = true }
+            if !turn.say.isEmpty, !isScreen { entries.append(.message(id: UUID(), speaker: .her, text: turn.say)) }
             switch turn.action {
             case .reply:
                 phase = restingPhase
@@ -191,7 +195,13 @@ final class DelegationSession: ObservableObject {
                 }
             case .screen(let goal):
                 phase = pendingWorkspace == nil ? .idle : .awaitingDecision
-                onScreenGoal(goal) { [weak self] result in self?.screenGoalEnded(result) }
+                if let refusal = onScreenGoal(goal, { [weak self] result in self?.screenGoalEnded(result) }) {
+                    let line = "没去点：\(refusal)"
+                    say(line)
+                    conversation.noteAppEvent(line)
+                } else if !turn.say.isEmpty {
+                    entries.append(.message(id: UUID(), speaker: .her, text: turn.say))
+                }
             }
             if currentDraft != nil, let reminder = Self.toolReminder(words: trimmed, say: turn.say, selected: selectedAgentTool) {
                 say(reminder)
