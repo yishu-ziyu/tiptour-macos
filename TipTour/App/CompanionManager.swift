@@ -12,7 +12,6 @@ import AVFoundation
 import Combine
 import CuaDriverCore
 import Foundation
-import PostHog
 import ScreenCaptureKit
 import SwiftUI
 
@@ -796,7 +795,6 @@ final class CompanionManager: ObservableObject {
         TipTourDefaults.hasCompletedOnboarding = true
         NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
         hasCompletedOnboarding = true
-        TipTourAnalytics.trackOnboardingStarted()
         overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
         isOverlayVisible = true
     }
@@ -1206,7 +1204,6 @@ final class CompanionManager: ObservableObject {
         let previouslyHadAccessibility = hasAccessibilityPermission
         let previouslyHadScreenRecording = hasScreenRecordingPermission
         let previouslyHadMicrophone = hasMicrophonePermission
-        let previouslyHadAll = allPermissionsGranted
 
         let currentlyHasAccessibility = WindowPositionManager.hasAccessibilityPermission()
         hasAccessibilityPermission = currentlyHasAccessibility
@@ -1234,22 +1231,9 @@ final class CompanionManager: ObservableObject {
             print("🔑 Permissions — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission)")
         }
 
-        if !previouslyHadAccessibility && hasAccessibilityPermission {
-            TipTourAnalytics.trackPermissionGranted(permission: "accessibility")
-        }
-        if !previouslyHadScreenRecording && hasScreenRecordingPermission {
-            TipTourAnalytics.trackPermissionGranted(permission: "screen_recording")
-        }
-        if !previouslyHadMicrophone && hasMicrophonePermission {
-            TipTourAnalytics.trackPermissionGranted(permission: "microphone")
-        }
         // Screen content permission is persisted — once approved it sticks.
         if !hasScreenContentPermission {
             hasScreenContentPermission = TipTourDefaults.hasScreenContentPermission
-        }
-
-        if !previouslyHadAll && allPermissionsGranted {
-            TipTourAnalytics.trackAllPermissionsGranted()
         }
     }
 
@@ -1277,7 +1261,6 @@ final class CompanionManager: ObservableObject {
                     guard didCapture else { return }
                     hasScreenContentPermission = true
                     TipTourDefaults.hasScreenContentPermission = true
-                    TipTourAnalytics.trackPermissionGranted(permission: "screen_content")
 
                     if hasCompletedOnboarding && hasDesktopPermissions && !isOverlayVisible {
                         overlayWindowManager.hasShownOverlayBefore = true
@@ -1406,14 +1389,8 @@ final class CompanionManager: ObservableObject {
     }
 
     private func handleShortcutTransition(_ transition: PushToTalkShortcut.ShortcutTransition) {
-        switch transition {
-        case .pressed:
-            startVoiceInputFromUserGesture(reason: "hotkey press")
-        case .released:
-            TipTourAnalytics.trackPushToTalkReleased()
-        case .none:
-            break
-        }
+        guard case .pressed = transition else { return }
+        startVoiceInputFromUserGesture(reason: "hotkey press")
     }
 
     private func startVoiceInputFromUserGesture(reason: String) {
@@ -1438,8 +1415,6 @@ final class CompanionManager: ObservableObject {
         showOnboardingPrompt = false
         onboardingPromptText = ""
         onboardingPromptOpacity = 0.0
-
-        TipTourAnalytics.trackPushToTalkStarted()
 
         // Voice is intentionally a single realtime path. Text commands can
         // use JEV, while speech should not branch into

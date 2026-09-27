@@ -66,9 +66,6 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
         TipTourDefaults.registerDefaults()
 
-        TipTourAnalytics.configure()
-        TipTourAnalytics.trackAppOpened()
-
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         companionManager.start()
         let harnessServer = TipTourHarnessServer(

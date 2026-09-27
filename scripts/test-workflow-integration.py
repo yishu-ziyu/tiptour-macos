@@ -23,10 +23,8 @@ def main() -> int:
     derived = args.derived_data.expanduser().resolve()
     products = derived / "Build/Products/Debug"
     generated = derived / "Build/Intermediates.noindex/tiptour-macos.build/Debug/tiptour-macos.build/DerivedSources"
-    maps = derived / "Build/Intermediates.noindex/GeneratedModuleMaps"
-    objects = [products / f"{name}.o" for name in ("CuaDriverCore", "PostHog", "CrashReporter", "phlibwebp")]
-    module_maps = [maps / f"{name}.modulemap" for name in ("CrashReporter", "phlibwebp")]
-    required = objects + module_maps + [generated / "GeneratedAssetSymbols.swift"]
+    core = products / "CuaDriverCore.o"
+    required = [core, generated / "GeneratedAssetSymbols.swift"]
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         parser.error("Existing dependency build required; nothing was built: " + ", ".join(missing))
@@ -55,9 +53,7 @@ def main() -> int:
         compiler_help = subprocess.check_output(["xcrun", "swiftc", "-help"], text=True)
         if "-default-isolation" in compiler_help:
             swift_flags += ["-default-isolation", "MainActor"]
-        for module_map in module_maps:
-            swift_flags += ["-Xcc", f"-fmodule-map-file={module_map}"]
-        linker_flags = [str(path) for path in objects] + ["-lc++"]
+        linker_flags = [str(core), "-lc++"]
         manifest = f'''// swift-tools-version: 6.0
 import PackageDescription
 let settings: [SwiftSetting] = [.unsafeFlags({json.dumps(swift_flags)})]

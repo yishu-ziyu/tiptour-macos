@@ -22,10 +22,8 @@ def main() -> int:
     derived = options.derived_data.expanduser().resolve()
     products = derived / "Build/Products/Debug"
     generated = derived / "Build/Intermediates.noindex/tiptour-macos.build/Debug/tiptour-macos.build/DerivedSources"
-    module_maps = derived / "Build/Intermediates.noindex/GeneratedModuleMaps"
-    required = [products / "CuaDriverCore.swiftmodule", products / "PostHog.swiftmodule",
-                products / "Sparkle.framework", generated / "GeneratedAssetSymbols.swift",
-                module_maps / "CrashReporter.modulemap", module_maps / "phlibwebp.modulemap"]
+    required = [products / "CuaDriverCore.swiftmodule", products / "Sparkle.framework",
+                generated / "GeneratedAssetSymbols.swift"]
     missing = [path for path in required if not path.exists()]
     if missing:
         print("An existing Xcode dependency build is required; nothing was built or changed.", file=sys.stderr)
@@ -41,8 +39,6 @@ def main() -> int:
     compiler_help = subprocess.check_output(["xcrun", "swiftc", "-help"], text=True)
     if "-default-isolation" in compiler_help:
         command += ["-default-isolation", "MainActor"]
-    for name in ("CrashReporter", "phlibwebp"):
-        command += ["-Xcc", f"-fmodule-map-file={module_maps / (name + '.modulemap')}"]
     command += [str(path) for path in sources]
     with tempfile.NamedTemporaryFile(prefix="tiptour-app-typecheck-", suffix=".log", delete=False) as log:
         print(f"Type-checking {len(sources)} source files. Log: {log.name}", flush=True)
