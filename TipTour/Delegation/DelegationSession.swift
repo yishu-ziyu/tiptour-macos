@@ -112,14 +112,14 @@ final class DelegationSession: ObservableObject {
     /// A change still waiting for merge or discard when Her last quit comes
     /// back with its buttons, so the decision is never lost to a restart.
     private func restorePendingDecision() {
-        guard let (id, receipt) = history?.pendingDecision() else { return }
+        guard let (id, receipt, sinceShown) = history?.pendingDecision() else { return }
         pendingReceipt = receipt
         pendingRecordID = id
         lastReportRecordID = id
         if let summary = history?.summary(of: id) {
             say("Her 重启前的这件事还在等你决定：\(summary)。")
         }
-        entries.append(.report(id: UUID(), report: DelegationReport(receipt: receipt)))
+        entries.append(.report(id: UUID(), report: DelegationReport(receipt: receipt, sinceShown: sinceShown)))
         phase = .awaitingDecision
     }
 
@@ -369,12 +369,13 @@ final class DelegationSession: ObservableObject {
             phase = .idle
         } catch DelegationError.changedSinceReview(let now) {
             // Only what the user has seen may be merged: show what is there now.
+            let sinceShown = DelegationChangeSinceShown(shown: reviewed, now: now)
             pendingReceipt = now
-            if let pendingRecordID { history?.reviewAgain(pendingRecordID, receipt: now) }
+            if let pendingRecordID { history?.reviewAgain(pendingRecordID, receipt: now, sinceShown: sinceShown) }
             say(reviewed.diffDigest.isEmpty
                 ? "这份改动是重启前记下的，没法确认你看到的还是不是现在的内容，所以没有合进去。下面是工作区现在的改动，看过再决定。"
                 : "你看过之后工作区又变了，没有合进去。下面是现在的改动，看过再决定。")
-            entries.append(.report(id: UUID(), report: DelegationReport(receipt: now)))
+            entries.append(.report(id: UUID(), report: DelegationReport(receipt: now, sinceShown: sinceShown)))
             phase = .awaitingDecision
         } catch DelegationError.branchMoved(let expected, let current) {
             say("任务开始时 \(reviewed.workspace.project.name) 在 \(expected) 分支，现在在 \(current.isEmpty ? "一个没有分支名的提交上" : current + " 分支")，所以没有合进去。切回 \(expected) 再点「合进来」，或者丢掉。")
@@ -492,10 +493,31 @@ final class DelegationSession: ObservableObject {
     }
 }
 
+/// How a receipt differs from the one the user saw before it.
+enum DelegationChangeSinceShown: Codable, Equatable, Sendable {
+    case sameFiles
+    case differentFiles(added: [String], removed: [String])
+    /// The earlier receipt came from before a restart and had no fingerprint to compare.
+    case unverifiable
+
+    init(shown: DelegationReceipt, now: DelegationReceipt) {
+        if shown.diffDigest.isEmpty {
+            self = .unverifiable
+        } else if Set(shown.changedFiles) == Set(now.changedFiles) {
+            self = .sameFiles
+        } else {
+            self = .differentFiles(added: now.changedFiles.filter { !shown.changedFiles.contains($0) },
+                                   removed: shown.changedFiles.filter { !now.changedFiles.contains($0) })
+        }
+    }
+}
+
 /// What Her tells the user about one hand-off. Every sentence is chosen from
 /// the git readback; Claude Code's own words are shown only as a quote.
 struct DelegationReport: Equatable {
     let receipt: DelegationReceipt
+    /// Set when this receipt replaced one the user had already seen.
+    var sinceShown: DelegationChangeSinceShown? = nil
 
     var headline: String {
         switch receipt.outcome {
@@ -528,14 +550,60 @@ struct DelegationReport: Equatable {
     }
 
     /// The question Claude Code ended with, if any, so Her can relay it
-    /// instead of treating the run as finished business.
+    /// instead of treating the run as finished business. Code spans such as
+    /// `?? notes.txt` from `git status` are not questions.
     var followUpQuestion: String? {
         let sentences = receipt.agentSummary
             .replacingOccurrences(of: "\n", with: "。")
             .split(whereSeparator: { "。！!".contains($0) })
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let markers = ["？", "?", "要不要", "要的话", "需要我", "是否"]
-        return sentences.last(where: { sentence in markers.contains { sentence.contains($0) } })
+        return sentences.last(where: { sentence in
+            let prose = sentence.replacingOccurrences(of: "`[^`]*`", with: "", options: .regularExpression)
+            return markers.contains { prose.contains($0) }
+        })
+    }
+
+    /// The first line of the notice on a receipt that replaced one the user saw.
+    var sinceShownTitle: String? {
+        switch sinceShown {
+        case nil: return nil
+        case .sameFiles, .differentFiles: return "和你上次看到的不一样"
+        case .unverifiable: return "没法确认是不是你上次看到的"
+        }
+    }
+
+    var sinceShownDetail: String? {
+        switch sinceShown {
+        case nil:
+            return nil
+        case .sameFiles:
+            return "文件还是这 \(receipt.changedFiles.count) 个，里面的改动变了。下面的改动统计是现在的。"
+        case .differentFiles(let added, let removed):
+            let parts = [added.isEmpty ? nil : "多了 \(Self.names(added))", removed.isEmpty ? nil : "少了 \(Self.names(removed))"]
+            return "涉及的文件也变了：\(parts.compactMap { $0 }.joined(separator: "，"))。下面的改动统计是现在的。"
+        case .unverifiable:
+            return "这份是 Her 重启前记下的，下面是现在工作区的改动。"
+        }
+    }
+
+    /// A note after a file name, only where it is certain.
+    func sinceShownNote(for file: String) -> String? {
+        switch sinceShown {
+        case .sameFiles where receipt.changedFiles.count == 1: return "内容变了"
+        case .differentFiles(let added, _) where added.contains(file): return "新出现"
+        default: return nil
+        }
+    }
+
+    /// Who wrote the quoted summary, and whether it predates what is shown.
+    var agentSummaryCaption: String {
+        let tool = receipt.agentTool.displayName
+        switch sinceShown {
+        case nil: return "\(tool) 说"
+        case .sameFiles, .differentFiles: return "\(tool) 做完时说 · 写在内容变动之前"
+        case .unverifiable: return "\(tool) 做完时说 · 之后内容可能变过"
+        }
     }
 
     var costText: String? {

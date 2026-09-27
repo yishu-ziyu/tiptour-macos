@@ -164,9 +164,21 @@ struct DelegationPanelView: View {
                       onRevise: { isInputFocused = true })
         case .report(let id, let report):
             ReportCard(report: report,
+                       isSuperseded: isSuperseded(id, report),
                        isAwaitingDecision: session.phase == .awaitingDecision && isLatestReport(id),
                        onMerge: { Task { await session.mergePendingChange() } },
                        onDiscard: { Task { await session.discardPendingChange() } })
+        }
+    }
+
+    /// A later receipt for the same workspace replaces this one.
+    private func isSuperseded(_ id: UUID, _ report: DelegationReport) -> Bool {
+        guard let index = session.entries.firstIndex(where: { $0.id == id }) else { return false }
+        return session.entries[(index + 1)...].contains { entry in
+            if case .report(_, let later) = entry {
+                return later.receipt.workspace.worktreePath == report.receipt.workspace.worktreePath
+            }
+            return false
         }
     }
 
@@ -375,9 +387,11 @@ private struct DraftCard: View {
 
 private struct ReportCard: View {
     let report: DelegationReport
+    let isSuperseded: Bool
     let isAwaitingDecision: Bool
     let onMerge: () -> Void
     let onDiscard: () -> Void
+    @State private var showsDiffStat = false
 
     /// Coding tools answer in Markdown; bold and code spans are shown, not their asterisks.
     static func inlineMarkdown(_ text: String) -> AttributedString {
@@ -386,7 +400,46 @@ private struct ReportCard: View {
     }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            card
+                .opacity(isSuperseded ? 0.45 : 1)
+            if isSuperseded {
+                Label("你之前看的那份，已被下面这份取代", systemImage: "arrow.up")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .onAppear { if report.sinceShown != nil { showsDiffStat = true } }
+    }
+
+    @ViewBuilder
+    private var sinceShownNotice: some View {
+        if let title = report.sinceShownTitle, let detail = report.sinceShownDetail {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(ConversationColors.warning)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(ConversationColors.warning)
+                    Text(detail)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.primary.opacity(0.75))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(ConversationColors.warning.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    private var card: some View {
         VStack(alignment: .leading, spacing: 12) {
+            sinceShownNotice
             Text(report.headline)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.primary)
@@ -394,11 +447,18 @@ private struct ReportCard: View {
             if !report.receipt.changedFiles.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(report.receipt.changedFiles.prefix(6), id: \.self) { file in
-                        Text(file)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                        HStack(spacing: 6) {
+                            Text(file)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            if let note = report.sinceShownNote(for: file) {
+                                Text(note)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(ConversationColors.warning)
+                            }
+                        }
                     }
                     if report.receipt.changedFiles.count > 6 {
                         Text("还有 \(report.receipt.changedFiles.count - 6) 个文件")
@@ -414,7 +474,7 @@ private struct ReportCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if !report.receipt.diffStat.isEmpty {
-                DisclosureGroup("改动统计") {
+                DisclosureGroup("改动统计", isExpanded: $showsDiffStat) {
                     ScrollView(.horizontal) {
                         Text(report.receipt.diffStat)
                             .font(.system(size: 10, design: .monospaced))
@@ -426,12 +486,23 @@ private struct ReportCard: View {
                 .foregroundStyle(.secondary)
             }
             if !report.receipt.agentSummary.isEmpty {
-                Text(Self.inlineMarkdown("\(report.receipt.agentTool.displayName) 说：\(report.receipt.agentSummary)"))
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .lineSpacing(4)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(report.agentSummaryCaption)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text(Self.inlineMarkdown(report.receipt.agentSummary))
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(4)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                .padding(.leading, 10)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.12))
+                        .frame(width: 2)
+                }
             }
             if let costText = report.costText {
                 Text(costText)

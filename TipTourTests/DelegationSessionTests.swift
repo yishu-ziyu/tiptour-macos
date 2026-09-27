@@ -242,6 +242,11 @@ struct DelegationSessionTests {
         #expect(herLines(session).last == "你看过之后工作区又变了，没有合进去。下面是现在的改动，看过再决定。")
         let now = try #require(reports(session).last)
         #expect(now.receipt.diffStat != shown.receipt.diffStat || now.receipt.diffDigest != shown.receipt.diffDigest)
+        #expect(now.sinceShownTitle == "和你上次看到的不一样")
+        #expect(now.sinceShownDetail == "文件还是这 1 个，里面的改动变了。下面的改动统计是现在的。")
+        #expect(now.sinceShownNote(for: "greeting.txt") == "内容变了")
+        #expect(now.agentSummaryCaption.hasSuffix("做完时说 · 写在内容变动之前"))
+        #expect(shown.sinceShownTitle == nil && shown.agentSummaryCaption.hasSuffix(" 说"), "The first receipt carries no notice")
 
         await session.mergePendingChange()
         #expect(try greeting(project) == "world, and more\n", "Once seen, the new content can be merged")
@@ -1568,6 +1573,57 @@ struct DelegationSessionTests {
         let session = try makeSession(project: project, claude: "/nonexistent/claude", replies: [modelReply(say: "好。")])
         await session.send("上次那个")
         #expect(ScriptedStepFun.systemMessages.last?.contains("以前交出去的任务（Her 本机记录，新的在前，重启后仍在）：\n（还没有记录）") == true)
+    }
+
+    @Test func theChangedSinceShownNoticeSurvivesARestart() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        let before = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print world > greeting.txt; git commit -qam greet"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改成 world")],
+            history: DelegationHistory(fileURL: historyURL))
+        await before.send("问候语改成 world")
+        await before.sendCurrentDraft()
+        let shown = try #require(reports(before).last)
+        try "world, and more\n".write(toFile: shown.receipt.workspace.worktreePath + "/greeting.txt", atomically: true, encoding: .utf8)
+        await before.mergePendingChange()
+        let refused = try #require(reports(before).last)
+
+        let after = try makeSession(project: project, claude: "/nonexistent/claude", replies: [],
+                                    history: DelegationHistory(fileURL: historyURL))
+        let restored = try #require(reports(after).last)
+        #expect(restored.sinceShownTitle == refused.sinceShownTitle)
+        #expect(restored.sinceShownDetail == refused.sinceShownDetail)
+        await after.mergePendingChange()
+        #expect(try greeting(project) == "world, and more\n", "What the restored receipt shows is what merges")
+    }
+
+    @Test func aReceiptWhoseFilesChangedSaysWhichOnes() {
+        let workspace = DelegationWorkspace(project: DelegationProject(repositoryPath: "/p"), branchName: "b", worktreePath: "/w", baseCommit: "c")
+        func receipt(_ files: [String], digest: String) -> DelegationReceipt {
+            DelegationReceipt(workspace: workspace, outcome: .changed, agentSummary: "改好了。", changedFiles: files, untrackedFiles: [],
+                              diffStat: "", costInUSD: nil, durationMilliseconds: nil, agentSessionID: nil, diffDigest: digest)
+        }
+        let shown = receipt(["a.swift", "b.swift"], digest: "1")
+        let now = receipt(["a.swift", "c.swift"], digest: "2")
+
+        let report = DelegationReport(receipt: now, sinceShown: DelegationChangeSinceShown(shown: shown, now: now))
+        #expect(report.sinceShownDetail == "涉及的文件也变了：多了 c.swift，少了 b.swift。下面的改动统计是现在的。")
+        #expect(report.sinceShownNote(for: "c.swift") == "新出现")
+        #expect(report.sinceShownNote(for: "a.swift") == nil, "Whether a.swift itself changed is not known")
+
+        let restored = DelegationReport(receipt: now, sinceShown: DelegationChangeSinceShown(shown: receipt(["a.swift"], digest: ""), now: now))
+        #expect(restored.sinceShownTitle == "没法确认是不是你上次看到的")
+        #expect(restored.agentSummaryCaption.hasSuffix("之后内容可能变过"))
+    }
+
+    @Test func gitOutputInTheSummaryIsNotTakenForAQuestion() {
+        let workspace = DelegationWorkspace(project: DelegationProject(repositoryPath: "/p"), branchName: "b", worktreePath: "/w", baseCommit: "c")
+        let receipt = DelegationReceipt(workspace: workspace, outcome: .changed,
+            agentSummary: "完成。\n- greeting.txt：内容覆盖为 world\n- `notes.txt` 按要求保持未跟踪状态（`git status` 显示 `?? notes.txt`），未纳入提交",
+            changedFiles: ["greeting.txt"], untrackedFiles: ["notes.txt"], diffStat: "", costInUSD: nil, durationMilliseconds: nil, agentSessionID: nil)
+
+        #expect(DelegationReport(receipt: receipt).followUpQuestion == nil)
     }
 
     @Test func claudeCodesClosingQuestionIsRelayed() {

@@ -44,6 +44,8 @@ struct DelegationRecord: Codable, Equatable, Sendable {
     var diffStat: String? = nil
     var untrackedFiles: [String]? = nil
     var diffDigest: String? = nil
+    /// Set when the shown receipt replaced an earlier one, so the notice survives a restart.
+    var sinceShown: DelegationChangeSinceShown? = nil
 }
 
 @MainActor
@@ -108,9 +110,10 @@ final class DelegationHistory {
     }
 
     /// The workspace changed after the user was shown it; keep what is shown now.
-    func reviewAgain(_ id: UUID, receipt: DelegationReceipt) {
+    func reviewAgain(_ id: UUID, receipt: DelegationReceipt, sinceShown: DelegationChangeSinceShown) {
         update(id) { record in
             Self.keepContents(of: receipt, in: &record)
+            record.sinceShown = sinceShown
             record.shownToUser = DelegationReport(receipt: receipt).headline
         }
     }
@@ -174,7 +177,7 @@ final class DelegationHistory {
 
     /// The newest change still waiting for the user to merge or discard it,
     /// with its worktree still on disk, rebuilt as the receipt Her showed.
-    func pendingDecision() -> (id: UUID, receipt: DelegationReceipt)? {
+    func pendingDecision() -> (id: UUID, receipt: DelegationReceipt, sinceShown: DelegationChangeSinceShown?)? {
         guard let record = records.last(where: { $0.result == .changed && $0.decision == nil }),
               let branchName = record.branchName, let worktreePath = record.worktreePath, let baseCommit = record.baseCommit,
               FileManager.default.fileExists(atPath: worktreePath) else { return nil }
@@ -187,7 +190,7 @@ final class DelegationHistory {
                                         costInUSD: nil, durationMilliseconds: nil, agentSessionID: nil,
                                         agentTool: DelegationAgentTool(rawValue: record.tool) ?? .claudeCode,
                                         diffDigest: record.diffDigest ?? "")
-        return (record.id, receipt)
+        return (record.id, receipt, record.sinceShown)
     }
 
     /// One line about a recorded hand-off, for when its receipt is no longer on screen.
