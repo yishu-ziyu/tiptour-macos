@@ -65,15 +65,16 @@ Keep the approximate line counts within 50 lines of the real file; `scripts/chec
 | `scripts/acceptance/voice_consistency_report.py` | Pitch/MFCC speaker-drift measurement between those replies; `--self-check` proves it flags a `say` speaker change |
 | `scripts/acceptance/voice_latency_report.py` | Streams VoiceTask telemetry during a real-mic session and reports speech-stop→first-audio and estimated barge-in p50 |
 | `TipTour/UI/TipTourSettingsView.swift` | Models, desktop actions, privacy, permissions and advanced options |
-| `TipTour/UI/TipTourSettingsWindowManager.swift` | Settings and log windows; default pipeline events store only diagnostic IDs, statuses and counts |
+| `TipTour/UI/TipTourSettingsWindowManager.swift` | Settings and log windows, Chinese diagnostic log viewer; default pipeline events store only diagnostic IDs, statuses and counts (~653 lines) |
 | `TipTourTests/PipelineLogIntegrationTests.swift` | Serialized default-log privacy regression without writing to the user's log files |
-| `TipTour/Delegation/CodingAgentDelegation.swift` | Claude Code hand-off: current-project lookup, private worktree, stream-json progress, git readback receipt, merge/discard (~479 lines) |
-| `TipTourTests/CodingAgentDelegationTests.swift` | Outcome tests with a stubbed `claude` at the process seam and real git repositories (~250 lines) |
-| `TipTour/Delegation/DelegationConversation.swift` | Ctrl+K conversation model call (Step Plan, JSON mode), happy-style instructions and the say-do guard (~206 lines) |
-| `TipTour/Delegation/DelegationSession.swift` | Conversation → draft → send → receipt → merge/discard state; app-owned hand-off sentences (~241 lines) |
-| `TipTour/UI/DelegationPanelView.swift` | Ctrl+K conversation panel: bubbles, draft card, running row, report card (~369 lines) |
-| `TipTourTests/DelegationSessionTests.swift` | Conversation outcomes with the model stubbed at its URL seam and a stub `claude` (~238 lines) |
-| `TipTour/UI/TextCommandPanelManager.swift` | Cursor-following, resizable command panel |
+| `TipTour/Delegation/CodingAgentDelegation.swift` | Explicit Claude/Codex/Kimi/Step hand-off, current-project lookup, private worktree, concurrent process output, git receipt and merge/discard (~538 lines) |
+| `TipTour/Delegation/DelegationAgentOutput.swift` | Normalizes four CLI JSONL formats, terminal outcome, summary and session ID; rejects nonzero exit and incomplete output (~131 lines) |
+| `TipTourTests/CodingAgentDelegationTests.swift` | Real git outcomes with four CLI process stubs, failure/truncation, tool-error recovery, stderr and cancellation isolation (~548 lines) |
+| `TipTour/Delegation/DelegationConversation.swift` | Step Plan conversation, selected-tool context, task draft and say-do guard (~208 lines) |
+| `TipTour/Delegation/DelegationSession.swift` | Explicit project validation and conversation retention, project/tool-bound draft, isolated execution context, helper-file constraints, preparation, receipt and pending decisions (~313 lines) |
+| `TipTour/UI/DelegationPanelView.swift` | Stable conversation layout, native project folder picker, tool/model confirmation, fixed composer and receipts (~506 lines) |
+| `TipTourTests/DelegationSessionTests.swift` | Explicit project selection, failed-task retry retention, four-tool binding and promise correction, isolation prompt, preparation and pending decisions with real Git readback (~858 lines) |
+| `TipTour/UI/TextCommandPanelManager.swift` | Separate conversation/JEV geometry, native header drag region, hidden conversation frame restoration and screen bounds; JEV cursor following (~345 lines) |
 | `TipTour/UI/TextCommandPanelView.swift` | JEV input, stop control and results |
 | `TipTour/Utilities/KeychainStore.swift` | Device-local provider credential storage; existence vs in-process readability states, DEBUG-only acceptance denial seam (~540 lines) |
 

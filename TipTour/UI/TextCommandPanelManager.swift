@@ -16,12 +16,31 @@ private final class TextCommandKeyablePanel: NSPanel {
     }
 }
 
+struct ConversationPanelDragRegion: NSViewRepresentable {
+    final class DragView: NSView {
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func mouseDown(with event: NSEvent) {
+            window?.performDrag(with: event)
+        }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: .openHand)
+        }
+    }
+
+    func makeNSView(context: Context) -> DragView { DragView() }
+
+    func updateNSView(_ nsView: DragView, context: Context) {}
+}
+
 @MainActor
 final class TextCommandPanelManager {
     private weak var companionManager: CompanionManager?
     private var panel: NSPanel?
     private var mouseTrackingTimer: Timer?
     private var currentPanelOrigin: CGPoint?
+    private var conversationPanelFrame: NSRect?
 
     // Grows when the Jev loop has results to draw under the input. Every
     // consumer reads this property, and positionPanel re-asserts the frame at
@@ -50,18 +69,21 @@ final class TextCommandPanelManager {
             createPanel(companionManager: companionManager)
         }
 
-        let mouseLocation = NSEvent.mouseLocation
-        currentPanelOrigin = nil
-
         panel?.alphaValue = 0
-        positionPanel(at: mouseLocation, animated: false)
+        if isConversationLayout, let conversationPanelFrame {
+            restoreConversationFrame(conversationPanelFrame)
+        } else {
+            currentPanelOrigin = nil
+            positionPanel(at: NSEvent.mouseLocation, animated: false)
+        }
         panel?.makeKeyAndOrderFront(nil)
         panel?.orderFrontRegardless()
         fadePanel(to: 1)
-        startMouseTracking()
+        if !isConversationLayout { startMouseTracking() }
     }
 
     func hide() {
+        if isConversationLayout { conversationPanelFrame = panel?.frame }
         panel?.orderOut(nil)
         stopMouseTracking()
     }
@@ -92,10 +114,11 @@ final class TextCommandPanelManager {
         commandPanel.level = .floating
         commandPanel.isOpaque = false
         commandPanel.backgroundColor = .clear
-        commandPanel.hasShadow = false
+        commandPanel.hasShadow = isConversationLayout
         commandPanel.hidesOnDeactivate = false
         commandPanel.isExcludedFromWindowsMenu = true
         commandPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        commandPanel.isMovable = true
         commandPanel.isMovableByWindowBackground = false
         commandPanel.titleVisibility = .hidden
         commandPanel.titlebarAppearsTransparent = true
@@ -106,6 +129,7 @@ final class TextCommandPanelManager {
 
     private func startMouseTracking() {
         stopMouseTracking()
+        guard !isConversationLayout else { return }
         let trackingTimer = Timer(timeInterval: trackingInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.handleMouseTrackingTick()
@@ -146,11 +170,26 @@ final class TextCommandPanelManager {
     /// The Ctrl+K conversation with Her is wider and taller than the JEV input.
     func setConversationSize(_ size: NSSize) {
         isConversationLayout = true
-        resizePanel(to: size)
+        stopMouseTracking()
+        panel?.hasShadow = true
+        let currentFrame = panel?.isVisible == true ? panel?.frame : conversationPanelFrame
+        let screen = currentFrame.flatMap { frame in
+            NSScreen.screens.first { $0.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) }
+        } ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
+        if let visibleFrame = screen?.visibleFrame {
+            resizePanel(to: NSSize(
+                width: min(size.width, max(1, visibleFrame.width - screenEdgeInset * 2)),
+                height: min(size.height, max(1, visibleFrame.height - screenEdgeInset * 2))
+            ))
+        } else {
+            resizePanel(to: size)
+        }
     }
 
     func useJevLayout() {
+        if isConversationLayout { conversationPanelFrame = panel?.frame }
         isConversationLayout = false
+        panel?.hasShadow = false
         setResultsHeight(0)
     }
 
@@ -161,7 +200,9 @@ final class TextCommandPanelManager {
             // The hosting view is generic over the wrapped root view type, so
             // resize it as a plain NSView rather than casting.
             panel.contentView?.frame = NSRect(origin: .zero, size: panelSize)
-            if isTrackingFrozen {
+            if isConversationLayout {
+                restoreConversationFrame(panel.isVisible ? panel.frame : conversationPanelFrame ?? panel.frame)
+            } else if isTrackingFrozen {
                 let visibleFrame = panel.screen?.visibleFrame ?? panel.frame
                 let origin = CGPoint(
                     x: min(max(panel.frame.minX, visibleFrame.minX), visibleFrame.maxX - panelSize.width),
@@ -176,8 +217,23 @@ final class TextCommandPanelManager {
     }
 
     private func handleMouseTrackingTick() {
-        guard let panel, panel.isVisible, !isTrackingFrozen else { return }
+        guard let panel, panel.isVisible, !isTrackingFrozen, !isConversationLayout else { return }
         positionPanel(at: NSEvent.mouseLocation, animated: true)
+    }
+
+    private func restoreConversationFrame(_ previousFrame: NSRect) {
+        guard let panel else { return }
+        let previousCenter = CGPoint(x: previousFrame.midX, y: previousFrame.midY)
+        let visibleFrame = NSScreen.screens.first { $0.frame.contains(previousCenter) }?.visibleFrame
+            ?? NSScreen.main?.visibleFrame
+            ?? previousFrame
+        let origin = CGPoint(
+            x: min(max(previousFrame.minX, visibleFrame.minX + screenEdgeInset), visibleFrame.maxX - panelSize.width - screenEdgeInset),
+            y: min(max(previousFrame.maxY - panelSize.height, visibleFrame.minY + screenEdgeInset), visibleFrame.maxY - panelSize.height - screenEdgeInset)
+        )
+        let frame = NSRect(origin: origin, size: panelSize)
+        panel.setFrame(frame, display: true)
+        conversationPanelFrame = frame
     }
 
     private func positionPanel(at mouseLocation: CGPoint, animated: Bool) {
@@ -185,7 +241,7 @@ final class TextCommandPanelManager {
         let targetScreen = NSScreen.screens.first { screen in
             screen.frame.contains(mouseLocation)
         } ?? NSScreen.main
-        guard let screenFrame = targetScreen?.frame else { return }
+        guard let screenFrame = isConversationLayout ? targetScreen?.visibleFrame : targetScreen?.frame else { return }
 
         let targetOrigin = targetPanelOrigin(
             mouseLocation: mouseLocation,
@@ -242,21 +298,21 @@ final class TextCommandPanelManager {
             height: cursorClearance * 2
         )
 
-        let preferredOrigin = candidateOrigins.first { candidateOrigin in
+        let clampedOrigin: (CGPoint) -> CGPoint = { origin in
+            CGPoint(
+                x: min(max(origin.x, screenFrame.minX + self.screenEdgeInset),
+                       screenFrame.maxX - panelSize.width - self.screenEdgeInset),
+                y: min(max(origin.y, screenFrame.minY + self.screenEdgeInset),
+                       screenFrame.maxY - panelSize.height - self.screenEdgeInset)
+            )
+        }
+        let placementCandidates = isConversationLayout ? candidateOrigins.map(clampedOrigin) : candidateOrigins
+        let preferredOrigin = placementCandidates.first { candidateOrigin in
             let panelRect = CGRect(origin: candidateOrigin, size: panelSize)
             return screenFrame.contains(panelRect) && !panelRect.intersects(cursorSafetyRect)
-        } ?? candidateOrigins[0]
+        } ?? placementCandidates[0]
 
-        return CGPoint(
-            x: min(
-                max(preferredOrigin.x, screenFrame.minX + screenEdgeInset),
-                screenFrame.maxX - panelSize.width - screenEdgeInset
-            ),
-            y: min(
-                max(preferredOrigin.y, screenFrame.minY + screenEdgeInset),
-                screenFrame.maxY - panelSize.height - screenEdgeInset
-            )
-        )
+        return clampedOrigin(preferredOrigin)
     }
 
     private func smoothedOrigin(

@@ -1461,7 +1461,7 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    private func presentTextCommandPanel() {
+    func presentTextCommandPanel() {
         guard hasCompletedOnboarding else {
             presentTransientOverlayHint("先点菜单栏里的 Her 完成设置。")
             return
@@ -1470,16 +1470,14 @@ final class CompanionManager: ObservableObject {
         // mode (Stage 4); without one it stays the JEV click input.
         let conversation = delegationSessionIfAvailable()
         guard conversation != nil || selectedMode == .jev else {
-            presentTransientOverlayHint("⌃K 打字和她对话需要阶跃密钥；在「设置 → 模型」里存一个。")
             return
         }
         captureTargetAppContextForShortcutPress(reason: "text command")
         NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
         textCommandActivityText = nil
         if let conversation {
-            // The view reports its real height once it lays out; this only
-            // puts the panel into the conversation layout before it appears.
-            resizeConversationPanel(height: TextCommandPanelManager.baseHeight, hasEntries: !conversation.entries.isEmpty)
+            // Reopening must not reset a conversation to the compact JEV height.
+            resizeConversationPanel(height: DelegationPanelView.preferredHeight, hasEntries: !conversation.entries.isEmpty)
         } else {
             textCommandPanelManager.useJevLayout()
         }
@@ -1607,7 +1605,13 @@ final class CompanionManager: ObservableObject {
     private func delegationSessionIfAvailable() -> DelegationSession? {
         if let delegationSession { return delegationSession }
         let read = KeychainStore.readItem(forKey: TipTourMode.stepfun.keyName)
-        guard read.state == .available, let apiKey = read.value, !apiKey.isEmpty else { return nil }
+        if selectedMode == .stepfun { applySelectedModeKeyState(read.state) }
+        guard read.state == .available, let apiKey = read.value, !apiKey.isEmpty else {
+            if selectedMode != .jev {
+                presentTransientOverlayHint(read.state.userMessage(subject: "阶跃密钥"))
+            }
+            return nil
+        }
         let modelClient = DelegationModelClient(apiKey: apiKey)
         let worktreesRootPath = CodingAgentDelegation.defaultWorktreesRootPath
         let session = DelegationSession(

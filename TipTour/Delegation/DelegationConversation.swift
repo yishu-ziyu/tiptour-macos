@@ -113,9 +113,9 @@ final class DelegationConversation: @unchecked Sendable {
     /// she will write or send something but returns no draft, she is asked
     /// once more to either produce the draft or say why she cannot. At most
     /// once per user message, so it cannot loop.
-    func respond(to userText: String, projectContext: String) async throws -> DelegationTurn {
+    func respond(to userText: String, projectContext: String, tool: DelegationAgentTool = .claudeCode) async throws -> DelegationTurn {
         transcript.append(DelegationChatMessage(role: .user, content: userText))
-        let systemMessage = DelegationChatMessage(role: .system, content: Self.instructions(projectContext: projectContext))
+        let systemMessage = DelegationChatMessage(role: .system, content: Self.instructions(projectContext: projectContext, tool: tool))
         var turn = try Self.parse(try await complete([systemMessage] + transcript))
         var neededCorrection = false
         if Self.promisesActionWithoutOne(turn) {
@@ -131,18 +131,21 @@ final class DelegationConversation: @unchecked Sendable {
 
     // MARK: - Prompt
 
-    static func instructions(projectContext: String) -> String {
+    static func instructions(projectContext: String, tool: DelegationAgentTool = .claudeCode) -> String {
         """
         你是住在用户 Mac 上的中文伙伴。用户在 ⌃K 输入框里用文字跟你说话。
-        你能做两件事：把写代码、改项目的活交给 Claude Code；或者让 JEV 在屏幕上点一个控件。
-        Claude Code 会在当前项目的一个单独工作区里改，改完由用户看差异再决定合不合，所以用户手上的改动不会被碰。
+        你能做两件事：整理写代码、改项目的任务草稿；或者让 JEV 在屏幕上点一个控件。
+        用户在草稿里选择执行工具，当前选的是 \(tool.displayName)。可选 \(DelegationAgentTool.allCases.map(\.displayName).joined(separator: "、"))，你不能自行切换。
+        执行工具会在当前项目的一个单独工作区里改，改完由用户看差异再决定合不合，所以用户手上的改动不会被碰。
 
         规则：
         - 默认先听。用户想要的效果、取舍或范围没说清时，用一句话问清楚，action 为 "none"。
-        - 不要问文件名、路径或代码细节：Claude Code 会自己在项目里找。只问用户才知道的事，比如想要什么效果、有没有参考、哪些不能动。
-        - 要求清楚了，就写 draft：给 Claude Code 的完整要求，写明目标、范围和约束（只改需要改的；先读项目说明；不要运行 xcodebuild；改完自检；提交一次，不要推送；最后用两三句话说明改了什么）。action 为 "draft"，say 用一句话请用户看一眼草稿，确认后点「发出去」。
+        - 不要问文件名、路径或代码细节：执行工具会自己在项目里找。只问用户才知道的事，比如想要什么效果、有没有参考、哪些不能动。
+        - 当前项目只是从最近使用记录中找到的，不保证是用户这次的目标。用户点名的项目或路径与当前项目不符时，提醒用户在草稿里点「更换项目」核对实际绑定；仅在正文写路径不会切换项目，不能声称已经切换。
+        - 要求清楚了，就写 draft：给执行工具的完整要求，写明目标、范围和约束（只改需要改的；先读项目说明；不要运行 xcodebuild；改完自检；提交一次，不要推送；最后用两三句话说明改了什么）。草稿只描述任务，不写死执行工具或模型名。action 为 "draft"，say 用一句话请用户看一眼草稿，确认后点「发出去」。
+        - 用户点名另一执行工具时，草稿仍按要求写，并提醒他在草稿的「执行工具」里选择；不要声称已切换。Codex 当前用用户选定的 GPT-6 Luna、High 推理档位，仅对本次执行生效；其他执行工具沿用各自本机配置。你不能通过对话修改模型，不要声称已换模型或自动升级。
         - 用户对草稿提意见时，按意见改好整份 draft 再给出来。
-        - 你自己不会发出任何东西。不要说「已经交给 Claude Code 了」「我这就去改」之类的话：只有用户点了「发出去」才会交出去，那句话由应用来说。
+        - 你自己不会发出任何东西。不要说「已经交出去了」「我这就去改」之类的话：只有用户点了「发出去」才会交出去，那句话由应用来说。
         - 用户要在屏幕上点某个东西时，action 为 "screen"，screen_goal 写清要点哪个控件。
         - 闲聊或问问题时 action 为 "none"，简短自然地回一两句。
         - say 不超过两句，不空夸，不用「好问题」这类客套。
@@ -200,7 +203,10 @@ final class DelegationConversation: @unchecked Sendable {
         let say = turn.say
         let waitsForUser = ["请你", "等你", "你确认", "确认吗", "你先", "你看", "？", "?"].contains { say.contains($0) }
         if waitsForUser { return false }
-        let commitments = ["交给 Claude Code", "交给Claude Code", "我这就", "马上", "这就去", "我来写", "我去改", "我来改", "写好草稿", "发给"]
-        return commitments.contains { say.contains($0) }
+        let namesTool = DelegationAgentTool.allCases.contains {
+            say.contains("交给 \($0.displayName)") || say.contains("交给\($0.displayName)")
+        }
+        let commitments = ["我这就", "马上", "这就去", "我来写", "我去改", "我来改", "写好草稿", "发给"]
+        return namesTool || commitments.contains { say.contains($0) }
     }
 }

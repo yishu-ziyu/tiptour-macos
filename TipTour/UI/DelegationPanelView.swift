@@ -1,81 +1,106 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
-/// The Ctrl+K conversation with Her: talk, review her draft for Claude Code,
+/// The Ctrl+K conversation with Her: talk, review the task draft,
 /// watch it work, then merge or discard what it changed.
 struct DelegationPanelView: View {
     @ObservedObject var session: DelegationSession
     @ObservedObject var companionManager: CompanionManager
     @FocusState private var isInputFocused: Bool
     @State private var inputText: String = ""
-    @State private var transcriptContentHeight: CGFloat = 0
-
-    static let width: CGFloat = 440
-    static let maximumHeight: CGFloat = 540
-
-    /// The panel grows with the conversation instead of opening at full
-    /// height around two short lines; past the maximum the transcript scrolls.
-    private var panelHeight: CGFloat {
-        guard !session.entries.isEmpty else { return TextCommandPanelManager.baseHeight }
-        let headerHeight: CGFloat = 34
-        let runningRowHeight: CGFloat = { if case .running = session.phase { return 34 }; return 0 }()
-        let inputHeight: CGFloat = companionManager.textCommandActivityText?.isEmpty == false ? 64 : 46
-        let natural = headerHeight + transcriptContentHeight + 16 + runningRowHeight + inputHeight
-        return min(Self.maximumHeight, max(TextCommandPanelManager.baseHeight, natural))
-    }
+    @State private var isChoosingProject = false
+    @State private var projectSelectionError: String?
+    static let width: CGFloat = 560
+    static let preferredHeight: CGFloat = 480
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if !session.entries.isEmpty {
-                header
+            header
+            Divider().overlay(ConversationColors.border)
+            if session.entries.isEmpty {
+                VStack(alignment: .leading, spacing: 9) {
+                    Text("在这里。")
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundStyle(.primary)
+                    Text("今天想一起做什么？")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else {
                 transcript
-                Rectangle().fill(DS.Colors.borderSubtle.opacity(0.6)).frame(height: 0.5)
             }
             if case .running(let startedAt, let latestProgress) = session.phase {
                 RunningRow(startedAt: startedAt, latestProgress: latestProgress) { session.stop() }
             }
             inputRow
         }
-        .frame(width: Self.width, height: panelHeight, alignment: .bottomLeading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(DS.Colors.background.opacity(0.97))
-                .shadow(color: Color.black.opacity(0.32), radius: 18, x: 0, y: 10)
-        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(ConversationColors.background)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(DS.Colors.borderSubtle.opacity(0.72), lineWidth: 0.8)
+                .strokeBorder(ConversationColors.border, lineWidth: 1)
         )
+        .tint(ConversationColors.accent)
         .onExitCommand { companionManager.dismissTextCommandPanel() }
         .onAppear {
-            companionManager.resizeConversationPanel(height: panelHeight, hasEntries: !session.entries.isEmpty)
+            companionManager.resizeConversationPanel(height: Self.preferredHeight, hasEntries: !session.entries.isEmpty)
             DispatchQueue.main.async { isInputFocused = true }
         }
-        .onChange(of: panelHeight) { _, height in
-            companionManager.resizeConversationPanel(height: height, hasEntries: !session.entries.isEmpty)
+        .onChange(of: companionManager.textCommandFocusRequest) { _, _ in
+            isInputFocused = false
+            DispatchQueue.main.async { isInputFocused = !session.isBusy }
+        }
+        .fileImporter(isPresented: $isChoosingProject, allowedContentTypes: [.folder]) { result in
+            switch result {
+            case .success(let url):
+                Task { await session.selectDraftProject(url.path) }
+            case .failure(let error):
+                if (error as NSError).code != NSUserCancelledError {
+                    projectSelectionError = error.localizedDescription
+                }
+            }
+        }
+        .fileDialogConfirmationLabel("选择项目")
+        .alert("无法选择项目", isPresented: Binding(
+            get: { projectSelectionError != nil },
+            set: { if !$0 { projectSelectionError = nil } }
+        )) {
+            Button("好") { projectSelectionError = nil }
+        } message: {
+            Text(projectSelectionError ?? "")
         }
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 7, height: 7)
-            Text(statusText)
-                .font(.system(size: 11))
-                .foregroundColor(DS.Colors.textSecondary)
-            Spacer()
+        HStack(spacing: 6) {
+            ConversationPanelDragRegion()
+                .overlay(alignment: .leading) {
+                    HStack(spacing: 12) {
+                        Text(companionManager.companionName.isEmpty ? "Her" : companionManager.companionName)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.primary)
+                        Circle().fill(statusColor).frame(width: 5, height: 5)
+                        Text(statusText)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .allowsHitTesting(false)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .help("拖动窗口")
             if !session.isBusy {
-                Button("新对话") { session.startOver() }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11))
-                    .foregroundColor(DS.Colors.textTertiary)
-                    .pointerCursor()
-                    .help("清空这段对话（等你决定的改动会保留）")
+                PanelIconButton(symbol: "square.and.pencil", title: "新对话") { session.startOver() }
             }
+            PanelIconButton(symbol: "xmark", title: "收起") { companionManager.dismissTextCommandPanel() }
         }
-        .padding(.horizontal, 14)
-        .padding(.top, 10)
-        .padding(.bottom, 6)
+        .padding(.leading, 20)
+        .padding(.trailing, 12)
+        .frame(height: 54)
     }
 
     private var statusText: String {
@@ -83,43 +108,44 @@ struct DelegationPanelView: View {
         case .idle: return "在听"
         case .thinking: return "在想"
         case .awaitingSend: return "草稿等你确认"
-        case .running: return "Claude Code 在干活"
-        case .awaitingDecision: return "改好了，等你决定"
+        case .choosingProject: return "在核对目标项目"
+        case .preparing: return "在准备工作区"
+        case .running: return "\(session.selectedAgentTool.displayName) 在干活"
+        case .awaitingDecision: return "有改动，等你决定"
         case .merging: return "在合并"
         }
     }
 
     private var statusColor: Color {
         switch session.phase {
-        case .awaitingSend, .awaitingDecision: return DS.Colors.warning
-        case .running, .thinking, .merging: return DS.Colors.accent
-        case .idle: return DS.Colors.textTertiary
+        case .awaitingSend, .awaitingDecision: return ConversationColors.warning
+        case .choosingProject, .preparing, .running, .thinking, .merging: return ConversationColors.accent
+        case .idle: return Color(nsColor: .systemGreen)
         }
     }
 
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 18) {
                     ForEach(session.entries) { entry in
                         entryView(entry).id(entry.id)
                     }
                     if session.phase == .thinking {
-                        Text("…")
-                            .font(.system(size: 13))
-                            .foregroundColor(DS.Colors.textTertiary)
-                            .id("thinking")
+                        HStack(spacing: 9) {
+                            ProgressView().controlSize(.small)
+                            Text("在想").font(.system(size: 12)).foregroundStyle(.secondary)
+                        }
+                        .id("thinking")
                     }
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(GeometryReader { geometry in
-                    Color.clear.preference(key: TranscriptHeightKey.self, value: geometry.size.height)
-                })
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(22)
             }
-            .onPreferenceChange(TranscriptHeightKey.self) { transcriptContentHeight = $0 }
+            .scrollIndicators(.hidden)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onChange(of: session.entries.count) { _, _ in
-                withAnimation(.easeOut(duration: 0.16)) { proxy.scrollTo(session.entries.last?.id, anchor: .bottom) }
+                proxy.scrollTo(session.entries.last?.id, anchor: .bottom)
             }
         }
     }
@@ -129,8 +155,11 @@ struct DelegationPanelView: View {
         switch entry {
         case .message(_, let speaker, let text):
             MessageBubble(text: text, isUser: speaker == .user)
-        case .draft(_, let text, let isCurrent):
-            DraftCard(text: text, isCurrent: isCurrent && session.phase == .awaitingSend,
+        case .draft(_, let text, let project, let tool, let isCurrent):
+            DraftCard(text: text, project: project, tool: tool, isCurrent: isCurrent,
+                      canSend: isCurrent && session.phase == .awaitingSend,
+                      onSelectTool: { session.selectAgentTool($0) },
+                      onChooseProject: { isChoosingProject = true },
                       onSend: { Task { await session.sendCurrentDraft() } },
                       onRevise: { isInputFocused = true })
         case .report(let id, let report):
@@ -146,30 +175,49 @@ struct DelegationPanelView: View {
     }
 
     private var inputRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 9) {
-                Image(systemName: "command")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(DS.Colors.textTertiary)
-                    .frame(width: 16, height: 16)
-                TextField(placeholder, text: $inputText)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .bottom, spacing: 12) {
+                TextField(placeholder, text: $inputText, axis: .vertical)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .foregroundColor(DS.Colors.textPrimary)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1...4)
+                    .padding(.vertical, 6)
                     .focused($isInputFocused)
                     .disabled(session.isBusy)
                     .onSubmit(submit)
+                Button(action: submit) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(canSubmit ? Color.white : Color.secondary)
+                        .frame(width: 32, height: 32)
+                        .background(canSubmit ? ConversationColors.accent : ConversationColors.border, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSubmit)
+                .pointerCursor()
+                .help("发送")
+                .accessibilityLabel("发送")
             }
+            .padding(12)
+            .background(ConversationColors.input, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(
+                isInputFocused ? ConversationColors.accent.opacity(0.55) : ConversationColors.border, lineWidth: 1))
             if let activity = companionManager.textCommandActivityText, !activity.isEmpty {
                 Text(activity)
                     .font(.system(size: 11))
-                    .foregroundColor(DS.Colors.textSecondary)
-                    .lineLimit(1)
-                    .padding(.leading, 25)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 18)
+        .padding(.top, 12)
+        .padding(.bottom, 18)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var canSubmit: Bool {
+        !session.isBusy && !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var placeholder: String {
@@ -182,15 +230,40 @@ struct DelegationPanelView: View {
 
     private func submit() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard canSubmit else { return }
         inputText = ""
         Task { await session.send(text) }
     }
 }
 
-private struct TranscriptHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+private enum ConversationColors {
+    static let background = Color(nsColor: .windowBackgroundColor)
+    static let input = Color(nsColor: .textBackgroundColor)
+    static let border = Color.primary.opacity(0.10)
+    static let accent = Color(nsColor: .systemBlue)
+    static let warning = Color(nsColor: .systemOrange)
+}
+
+private struct PanelIconButton: View {
+    let symbol: String
+    let title: String
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 30, height: 30)
+                .background(isHovered ? ConversationColors.border : .clear, in: RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .onHover { isHovered = $0 }
+        .help(title)
+        .accessibilityLabel(title)
+    }
 }
 
 private struct MessageBubble: View {
@@ -198,54 +271,105 @@ private struct MessageBubble: View {
     let isUser: Bool
 
     var body: some View {
-        HStack {
-            if isUser { Spacer(minLength: 48) }
+        HStack(alignment: .top) {
+            if isUser { Spacer(minLength: 64) }
             Text(text)
-                .font(.system(size: 13))
-                .foregroundColor(isUser ? DS.Colors.textPrimary : DS.Colors.textPrimary.opacity(0.92))
+                .font(.system(size: 15))
+                .foregroundStyle(.primary)
+                .lineSpacing(5)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
+                .padding(.horizontal, isUser ? 13 : 0)
+                .padding(.vertical, isUser ? 10 : 2)
                 .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(isUser ? DS.Colors.accentSubtle : DS.Colors.surface2)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(isUser ? ConversationColors.accent.opacity(0.08) : Color.clear)
                 )
-            if !isUser { Spacer(minLength: 48) }
+            if !isUser { Spacer(minLength: 20) }
         }
     }
 }
 
 private struct DraftCard: View {
     let text: String
+    let project: DelegationProject?
+    let tool: DelegationAgentTool
     let isCurrent: Bool
+    let canSend: Bool
+    let onSelectTool: (DelegationAgentTool) -> Void
+    let onChooseProject: () -> Void
     let onSend: () -> Void
     let onRevise: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(isCurrent ? "要交给 Claude Code 的内容" : "之前的草稿")
-                .font(.system(size: 11))
-                .foregroundColor(DS.Colors.textTertiary)
-            ScrollView {
-                Text(text)
-                    .font(.system(size: 12))
-                    .foregroundColor(isCurrent ? DS.Colors.textPrimary : DS.Colors.textTertiary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 12) {
+            Text(isCurrent ? "要交给 \(tool.displayName) 的内容" : "之前的草稿 · \(tool.displayName)")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            if isCurrent {
+                Picker("执行工具", selection: Binding(get: { tool }, set: onSelectTool)) {
+                    ForEach(DelegationAgentTool.allCases, id: \.self) { candidate in
+                        Text(candidate.displayName).tag(candidate)
+                    }
+                }
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .disabled(!canSend)
+                .pointerCursor()
+                .accessibilityLabel("执行工具")
+                Text(tool == .codex ? "模型：GPT-6 Luna · High" : "模型：跟随 \(tool.displayName) 配置")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
             }
-            .frame(maxHeight: isCurrent ? 170 : 44)
+            HStack {
+                if let project {
+                    Label(project.name, systemImage: "folder")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.primary)
+                } else {
+                    Label("尚未确定项目", systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(ConversationColors.warning)
+                }
+                Spacer(minLength: 8)
+                if isCurrent {
+                    Button(action: onChooseProject) {
+                        Label(project == nil ? "选择项目" : "更换项目", systemImage: "folder.badge.gearshape")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(!canSend)
+                    .pointerCursor()
+                    .help("选择这份草稿实际使用的 Git 项目")
+                }
+            }
+            if let project {
+                Text(project.repositoryPath)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(text)
+                .font(.system(size: 14))
+                .foregroundStyle(isCurrent ? Color.primary : Color.secondary)
+                .lineSpacing(4)
+                .lineLimit(isCurrent ? nil : 2)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
             if isCurrent {
                 HStack(spacing: 8) {
                     CardButton(title: "发出去", isPrimary: true, action: onSend)
                     CardButton(title: "再改改", isPrimary: false, action: onRevise)
                 }
+                .disabled(!canSend)
             }
         }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(DS.Colors.surface1))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .stroke(isCurrent ? DS.Colors.warning.opacity(0.55) : DS.Colors.borderSubtle, lineWidth: 0.8))
+        .padding(16)
+        .background(ConversationColors.input, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8)
+            .strokeBorder(isCurrent ? ConversationColors.accent.opacity(0.28) : ConversationColors.border, lineWidth: 1))
     }
 }
 
@@ -256,44 +380,57 @@ private struct ReportCard: View {
     let onDiscard: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             Text(report.headline)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundColor(DS.Colors.textPrimary)
+                .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
             if !report.receipt.changedFiles.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(report.receipt.changedFiles.prefix(6), id: \.self) { file in
                         Text(file)
                             .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(DS.Colors.textSecondary)
+                            .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
                     if report.receipt.changedFiles.count > 6 {
                         Text("还有 \(report.receipt.changedFiles.count - 6) 个文件")
                             .font(.system(size: 11))
-                            .foregroundColor(DS.Colors.textTertiary)
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
             if let question = report.followUpQuestion {
                 Text("它最后问你：\(question)")
                     .font(.system(size: 12))
-                    .foregroundColor(DS.Colors.warningText)
+                    .foregroundStyle(ConversationColors.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if !report.receipt.diffStat.isEmpty {
+                DisclosureGroup("改动统计") {
+                    ScrollView(.horizontal) {
+                        Text(report.receipt.diffStat)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            }
             if !report.receipt.agentSummary.isEmpty {
-                Text("Claude Code 说：\(report.receipt.agentSummary)")
-                    .font(.system(size: 11))
-                    .foregroundColor(DS.Colors.textTertiary)
-                    .lineLimit(4)
+                Text("\(report.receipt.agentTool.displayName) 说：\(report.receipt.agentSummary)")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(4)
+                    .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
             if let costText = report.costText {
                 Text(costText)
                     .font(.system(size: 11))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundStyle(.secondary)
             }
             if isAwaitingDecision {
                 HStack(spacing: 8) {
@@ -302,12 +439,11 @@ private struct ReportCard: View {
                 }
             }
         }
-        .padding(10)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(DS.Colors.surface1))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .stroke(report.receipt.outcome == .changed ? DS.Colors.success.opacity(0.45) : DS.Colors.borderSubtle,
-                    lineWidth: 0.8))
+        .background(ConversationColors.input, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8)
+            .strokeBorder(ConversationColors.border, lineWidth: 1))
     }
 }
 
@@ -322,22 +458,23 @@ private struct RunningRow: View {
                 ProgressView().controlSize(.small).scaleEffect(0.7)
                 Text(latestProgress)
                     .font(.system(size: 11))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer()
                 Text("\(Int(context.date.timeIntervalSince(startedAt))) 秒")
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundStyle(.secondary)
                 Button(action: onStop) { Image(systemName: "stop.fill").font(.system(size: 10)) }
                     .buttonStyle(.plain)
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundStyle(.secondary)
                     .pointerCursor()
-                    .help("让 Claude Code 停下")
+                    .help("停止当前执行任务")
                     .accessibilityLabel("停下")
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+            .background(ConversationColors.accent.opacity(0.05))
         }
     }
 }
@@ -352,13 +489,13 @@ private struct CardButton: View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundColor(isPrimary ? DS.Colors.textPrimary : DS.Colors.textSecondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 5)
+                .foregroundStyle(isPrimary ? Color.white : Color.primary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
                 .background(
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(isPrimary ? DS.Colors.accentSubtle.opacity(isHovered ? 1 : 0.8)
-                                        : DS.Colors.surface3.opacity(isHovered ? 1 : 0.7))
+                        .fill(isPrimary ? ConversationColors.accent.opacity(isHovered ? 0.85 : 1)
+                                        : Color.primary.opacity(isHovered ? 0.10 : 0.06))
                 )
         }
         .buttonStyle(.plain)

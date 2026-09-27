@@ -17,10 +17,20 @@ struct TipTourApp: App {
 
     var body: some Scene {
         // The app lives entirely in the menu bar panel managed by the AppDelegate.
-        // This empty Settings scene satisfies SwiftUI's requirement for at least
-        // one scene but is never shown (LSUIElement=true removes the app menu).
+        // The required scene delegates its menu command to the existing settings window.
         Settings {
             EmptyView()
+        }
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("设置…") {
+                    NotificationCenter.default.post(name: .tipTourOpenSettings, object: nil)
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
+            CommandGroup(after: .appSettings) {
+                Button("打开对话") { appDelegate.openConversation() }
+            }
         }
     }
 }
@@ -85,6 +95,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         menuBarPanelManager?.showPanelOnLaunch()
         return true
+    }
+
+    func openConversation() {
+        companionManager.presentTextCommandPanel()
     }
 
     func applicationWillTerminate(_ notification: Notification) {

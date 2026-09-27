@@ -8,16 +8,19 @@ She is always present on your Mac: call her and she answers, she can do short ta
 | Mode | Shortcut | What it does |
 | --- | --- | --- |
 | StepFun realtime voice (default) | Ctrl+Option | Full-duplex Chinese voice conversation. She can describe the current window and perform short desktop actions, then reads back what was actually confirmed. |
-| Conversation with Her | Ctrl+K | With a StepFun key: type to her in Chinese. Coding requests become a draft for Claude Code; after you press 发出去 it works in a private git worktree, and you merge or discard the result. Screen clicks go to JEV. |
+| Conversation with Her | Ctrl+K or Her → 打开对话 | With a readable StepFun key: review the draft, choose/correct its Git project and select Claude Code, Codex, Kimi Code or Step Code before pressing 发出去. Codex uses GPT-6 Luna / High; the other tools use their own local model configuration and login. No global model change or automatic model/tool fallback. Work runs in a private git worktree; the report shows observed changes for your merge/discard decision. A pending change stays available until decided. Screen clicks go to JEV. |
 | JEV text | Ctrl+K | Without a StepFun key: type a click-based task. JEV chooses from locally detected controls; each action is executed and validated by the shared engine. |
 
 First launch: save your StepFun API key (the panel links to where to get one) → allow the microphone and Accessibility → press ⌃⌥ and talk. Screen Recording is asked for when you first want her to look at the screen. Name her and choose another mode in **Settings → 模型**. Keys stay in macOS Keychain.
+
+Open settings from **Her → 设置…** or **⌘,**; both open Her's existing settings window.
 
 ## Privacy and permissions
 
 - Voice modes send microphone audio to the provider. The StepFun realtime model never receives images directly; when screenshots are enabled, a screen question sends one captured image of the target window to StepFun's vision model.
 - JEV receives your typed task, locally detected labels and locations, and recent action history; screenshots stay local.
 - Accessibility is needed to inspect and control apps. Screen Recording enables screenshots and local screen detection; nothing records video.
+- Confirmed coding tasks use the selected CLI's existing authentication and headless execution policy. Step Code's per-task automatic approval was explicitly authorized; a Git worktree is not a system sandbox. Her does not copy CLI credentials or automatically merge changes.
 
 ## Build
 

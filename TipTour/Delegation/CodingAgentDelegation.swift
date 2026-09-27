@@ -2,7 +2,7 @@
 //  CodingAgentDelegation.swift
 //  TipTour
 //
-//  Hands one piece of coding work to Claude Code and reports what really
+//  Hands one piece of coding work to an external CLI and reports what really
 //  changed. Stage 4 minimal version (docs/development/2026-09-25-claude-code-delegation-map.md).
 //
 //  The shape follows the open-source orchestrators studied in
@@ -10,7 +10,7 @@
 //  worktree and branch (vibe-kanban), so the user's own uncommitted work is
 //  never touched and nothing reaches their branch until they approve a merge.
 //  Whether the work was done is decided by reading the worktree back with git,
-//  never by what Claude Code says about itself.
+//  never by what the agent says about itself.
 //
 
 import Foundation
@@ -33,17 +33,30 @@ struct DelegationWorkspace: Equatable, Sendable {
 enum DelegationOutcome: Equatable, Sendable {
     /// Independent readback found commits or tracked edits since the base.
     case changed
-    /// Claude Code finished, but the worktree holds nothing new.
+    /// The agent finished, but the worktree holds nothing new.
     case noChange
-    /// Claude Code could not be started or ended with an error.
+    /// The agent could not be started or ended with an error.
     case agentFailed(reason: String)
     case cancelled
+}
+
+enum DelegationAgentTool: String, CaseIterable, Sendable {
+    case claudeCode, codex, kimiCode, stepCode
+
+    var displayName: String {
+        switch self {
+        case .claudeCode: return "Claude Code"
+        case .codex: return "Codex"
+        case .kimiCode: return "Kimi Code"
+        case .stepCode: return "Step Code"
+        }
+    }
 }
 
 struct DelegationReceipt: Equatable, Sendable {
     let workspace: DelegationWorkspace
     let outcome: DelegationOutcome
-    /// Claude Code's own closing words. Shown to the user, never used to decide
+    /// The agent's own closing words. Shown to the user, never used to decide
     /// the outcome.
     let agentSummary: String
     /// Tracked files that differ from the base, read back with git.
@@ -54,8 +67,9 @@ struct DelegationReceipt: Equatable, Sendable {
     let diffStat: String
     let costInUSD: Double?
     let durationMilliseconds: Int?
-    /// Lets a later request resume the same Claude Code conversation.
+    /// Identifies the selected CLI's conversation for later reference.
     let agentSessionID: String?
+    var agentTool: DelegationAgentTool = .claudeCode
 }
 
 enum DelegationProgress: Equatable, Sendable {
@@ -253,13 +267,20 @@ final class CodingAgentDelegation: @unchecked Sendable {
     /// The command that starts Claude Code. It is resolved through the user's
     /// login shell, so `claude` finds the same install the user's terminal does.
     private let claudeCommand: String
+    private let codexCommand: String
+    private let kimiCommand: String
+    private let stepCommand: String
     private let worktreesRootPath: String
     private let processLock = NSLock()
     private var runningAgentProcess: Process?
     private var cancellationRequested = false
 
-    init(claudeCommand: String = "claude", worktreesRootPath: String = CodingAgentDelegation.defaultWorktreesRootPath) {
+    init(claudeCommand: String = "claude", worktreesRootPath: String = CodingAgentDelegation.defaultWorktreesRootPath,
+         codexCommand: String = "codex", kimiCommand: String = "kimi", stepCommand: String = "step") {
         self.claudeCommand = claudeCommand
+        self.codexCommand = codexCommand
+        self.kimiCommand = kimiCommand
+        self.stepCommand = stepCommand
         self.worktreesRootPath = worktreesRootPath
     }
 
@@ -298,20 +319,62 @@ final class CodingAgentDelegation: @unchecked Sendable {
 
     // MARK: - Run
 
-    /// Runs Claude Code headless inside the workspace and reads the result back.
+    /// Runs the selected CLI headless inside the workspace and reads the result back.
     ///
-    /// `--permission-mode auto` lets it edit and run commands on its own while
-    /// its classifier still blocks risky actions; the worktree is what keeps
-    /// the user's own branch safe.
+    /// Each CLI keeps its own authentication. Codex uses workspace-write;
+    /// the other tools use their headless approval policies in the private worktree.
     func run(
         prompt: String,
         in workspace: DelegationWorkspace,
+        tool: DelegationAgentTool = .claudeCode,
         onProgress: @escaping @Sendable (DelegationProgress) -> Void
     ) async -> DelegationReceipt {
-        let claudeArguments = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "auto"]
+        let command: String
+        let arguments: [String]
+        switch tool {
+        case .claudeCode:
+            command = claudeCommand
+            arguments = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "auto"]
+        case .codex:
+            command = codexCommand
+            arguments = ["--no-daemon", "-a", "never", "exec", "--sandbox", "workspace-write", "--json",
+                         "-m", "gpt-6-luna", "-c", "model_reasoning_effort=\"high\"", "--", prompt]
+        case .kimiCode:
+            command = kimiCommand
+            arguments = ["-p", prompt, "--output-format", "stream-json"]
+        case .stepCode:
+            command = stepCommand
+            arguments = ["--mode", "json", "--print", "--approval-mode", "auto",
+                         "--non-interactive-approval", "allow", "--no-update-check", "--", prompt]
+        }
+        let fallbackCommand: String
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        switch (tool, command) {
+        case (.kimiCode, "kimi"):
+            fallbackCommand = home.appendingPathComponent(".local/bin/kimi").path
+        case (.stepCode, "step"):
+            fallbackCommand = home.appendingPathComponent(".stepcode/bin/step").path
+        default:
+            fallbackCommand = ""
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-lc", "exec \"$0\" \"$@\"", claudeCommand] + claudeArguments
+        process.arguments = ["-lc", """
+        readonly her_tool_command="$0"
+        readonly her_tool_fallback="$1"
+        readonly her_worktree="$2"
+        shift 2
+        readonly -a her_tool_arguments=("$@")
+        if [[ "$her_tool_command" == step && -n "$her_tool_fallback" && -r "$HOME/.zshrc" ]]; then
+            source "$HOME/.zshrc" >/dev/null
+        fi
+        builtin cd -- "$her_worktree" || exit 126
+        executable="$her_tool_command"
+        if ! command -v -- "$executable" >/dev/null 2>&1 && [[ -n "$her_tool_fallback" ]]; then
+            executable="$her_tool_fallback"
+        fi
+        exec "$executable" "${her_tool_arguments[@]}"
+        """, command, fallbackCommand, workspace.worktreePath] + arguments
         process.currentDirectoryURL = URL(fileURLWithPath: workspace.worktreePath)
         let outputPipe = Pipe()
         let errorPipe = Pipe()
@@ -321,50 +384,44 @@ final class CodingAgentDelegation: @unchecked Sendable {
 
         let agentExit = DelegationProcessExit()
         agentExit.attach(to: process)
-        let alreadyCancelled: Bool = processLock.withLock {
-            runningAgentProcess = process
-            return cancellationRequested
-        }
-        if alreadyCancelled {
-            return await readBack(workspace, agentResult: nil, failure: nil, cancelled: true)
-        }
         do {
-            try process.run()
+            let launched = try processLock.withLock {
+                guard !cancellationRequested else { return false }
+                try process.run()
+                runningAgentProcess = process
+                return true
+            }
+            if !launched {
+                return await readBack(workspace, tool: tool, agentResult: DelegationAgentOutput(), failure: nil, cancelled: true)
+            }
         } catch {
             processLock.withLock { runningAgentProcess = nil }
-            return await readBack(workspace, agentResult: nil,
-                                  failure: "没能启动 Claude Code：\(error.localizedDescription)", cancelled: false)
+            return await readBack(workspace, tool: tool, agentResult: DelegationAgentOutput(),
+                                  failure: "没能启动 \(tool.displayName)：\(error.localizedDescription)", cancelled: false)
         }
 
-        var agentResult: [String: Any]?
+        let errorReader = Task.detached { errorPipe.fileHandleForReading.readDataToEndOfFile() }
+        var agentResult = DelegationAgentOutput()
         do {
             for try await line in outputPipe.fileHandleForReading.bytes.lines {
                 guard let data = line.data(using: .utf8),
                       let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-                if let progress = Self.progress(from: event) { onProgress(progress) }
-                if event["type"] as? String == "result" { agentResult = event }
+                if tool == .claudeCode, let progress = Self.progress(from: event) { onProgress(progress) }
+                agentResult.consume(event, tool: tool)
             }
         } catch {
             // The pipe closes when the process ends; a read error here only
             // means the stream stopped early, which the exit status reports.
         }
-        let errorOutput = String(decoding: errorPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let errorOutput = String(decoding: await errorReader.value, as: UTF8.self)
         let agentExitStatus = await agentExit.wait()
         let wasCancelled: Bool = processLock.withLock {
             runningAgentProcess = nil
             return cancellationRequested
         }
 
-        var failure: String?
-        if !wasCancelled {
-            if agentResult == nil {
-                let detail = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-                failure = detail.isEmpty ? "Claude Code 没有给出结果（退出码 \(agentExitStatus)）" : String(detail.suffix(400))
-            } else if agentResult?["is_error"] as? Bool == true {
-                failure = (agentResult?["result"] as? String) ?? "Claude Code 报告出错"
-            }
-        }
-        return await readBack(workspace, agentResult: agentResult, failure: failure, cancelled: wasCancelled)
+        let failure = agentResult.failure(tool: tool, exitStatus: agentExitStatus, standardError: errorOutput)
+        return await readBack(workspace, tool: tool, agentResult: agentResult, failure: failure, cancelled: wasCancelled)
     }
 
     /// Stops the running hand-off. The receipt it returns says cancelled.
@@ -373,7 +430,7 @@ final class CodingAgentDelegation: @unchecked Sendable {
             cancellationRequested = true
             return runningAgentProcess
         }
-        process?.terminate()
+        if let process, process.isRunning { process.terminate() }
     }
 
     private static func progress(from event: [String: Any]) -> DelegationProgress? {
@@ -401,7 +458,8 @@ final class CodingAgentDelegation: @unchecked Sendable {
 
     private func readBack(
         _ workspace: DelegationWorkspace,
-        agentResult: [String: Any]?,
+        tool: DelegationAgentTool,
+        agentResult: DelegationAgentOutput,
         failure: String?,
         cancelled: Bool
     ) async -> DelegationReceipt {
@@ -423,13 +481,14 @@ final class CodingAgentDelegation: @unchecked Sendable {
         return DelegationReceipt(
             workspace: workspace,
             outcome: outcome,
-            agentSummary: (agentResult?["result"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+            agentSummary: agentResult.summary.trimmingCharacters(in: .whitespacesAndNewlines),
             changedFiles: changedFiles,
             untrackedFiles: Self.lines(untracked.standardOutput),
             diffStat: stat.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines),
-            costInUSD: agentResult?["total_cost_usd"] as? Double,
-            durationMilliseconds: agentResult?["duration_ms"] as? Int,
-            agentSessionID: agentResult?["session_id"] as? String
+            costInUSD: agentResult.costInUSD,
+            durationMilliseconds: agentResult.durationMilliseconds,
+            agentSessionID: agentResult.sessionID,
+            agentTool: tool
         )
     }
 

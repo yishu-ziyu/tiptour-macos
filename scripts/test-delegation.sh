@@ -1,6 +1,6 @@
 #!/bin/bash
-# Run the Claude Code delegation tests without building, signing, or launching
-# Her. Claude Code is replaced by stub executables at the process seam; git and
+# Run the coding delegation tests without building, signing, or launching
+# Her. The four coding tools use stub executables at the process seam; git and
 # the worktrees are real, created under a temporary directory.
 set -euo pipefail
 
