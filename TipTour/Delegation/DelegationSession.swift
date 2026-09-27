@@ -47,33 +47,80 @@ final class DelegationSession: ObservableObject {
     private let conversation: DelegationConversation
     private let delegation: CodingAgentDelegation
     private let findProject: @MainActor () async -> DelegationProject?
-    private let onScreenGoal: @MainActor (String) -> Void
+    /// Hands a screen goal to JEV; the second argument is called once with
+    /// what happened, including when it never started.
+    private let onScreenGoal: @MainActor (String, @escaping @MainActor (String) -> Void) -> Void
     private let history: DelegationHistory?
+    /// Her's own bundle identifier, used to recognize her source repository.
+    private let herBundleIdentifier: String?
+    private let noticePoster: DelegationNoticePoster?
+    private let noticeRules: DelegationNoticeRules?
+    /// Whether the user is looking at the panel right now; then the receipt is enough.
+    private let isUserLooking: @MainActor () -> Bool
+    private let keepAwake: DelegationKeepAwake?
     private struct Draft {
-        let text: String
-        let project: DelegationProject?
-        let tool: DelegationAgentTool
+        /// The user's words that asked for this task; a notice quotes them.
+        let request: String
+        /// What the model wrote; the hand-off record keeps only this.
+        let body: String
+        /// Her's recorded background, put first when the draft is about an earlier hand-off.
+        let background: String?
+        var project: DelegationProject?
+        var tool: DelegationAgentTool
+        var text: String { DelegationSession.draftText(body, background: background) }
     }
 
     private var currentDraft: Draft?
-    private var pendingWorkspace: DelegationWorkspace?
+    /// The change waiting for the user, as last shown to them.
+    private var pendingReceipt: DelegationReceipt?
+    private var pendingWorkspace: DelegationWorkspace? { pendingReceipt?.workspace }
     private var explicitlySelectedProject: DelegationProject?
     /// What the user said since the last hand-off, saved with the next one.
     private var userWordsSinceLastSend: [String] = []
     private var pendingRecordID: UUID?
+    /// The record whose receipt is the latest one on screen.
+    private var lastReportRecordID: UUID?
+    /// Set by 「停止」, so a run the user stopped is never announced.
+    private var stopRequested = false
+    private var hasToldNoticesAreOff = false
 
     init(
         conversation: DelegationConversation,
         delegation: CodingAgentDelegation,
         findProject: @escaping @MainActor () async -> DelegationProject?,
-        onScreenGoal: @escaping @MainActor (String) -> Void,
-        history: DelegationHistory? = nil
+        onScreenGoal: @escaping @MainActor (String, @escaping @MainActor (String) -> Void) -> Void,
+        history: DelegationHistory? = nil,
+        herBundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        noticePoster: DelegationNoticePoster? = nil,
+        noticeRules: DelegationNoticeRules? = nil,
+        isUserLooking: @escaping @MainActor () -> Bool = { false },
+        keepAwake: DelegationKeepAwake? = nil
     ) {
         self.conversation = conversation
         self.delegation = delegation
         self.findProject = findProject
         self.onScreenGoal = onScreenGoal
         self.history = history
+        self.herBundleIdentifier = herBundleIdentifier
+        self.noticePoster = noticePoster
+        self.noticeRules = noticeRules
+        self.isUserLooking = isUserLooking
+        self.keepAwake = keepAwake
+        restorePendingDecision()
+    }
+
+    /// A change still waiting for merge or discard when Her last quit comes
+    /// back with its buttons, so the decision is never lost to a restart.
+    private func restorePendingDecision() {
+        guard let (id, receipt) = history?.pendingDecision() else { return }
+        pendingReceipt = receipt
+        pendingRecordID = id
+        lastReportRecordID = id
+        if let summary = history?.summary(of: id) {
+            say("Her 重启前的这件事还在等你决定：\(summary)。")
+        }
+        entries.append(.report(id: UUID(), report: DelegationReport(receipt: receipt)))
+        phase = .awaitingDecision
     }
 
     var isBusy: Bool {
@@ -91,6 +138,8 @@ final class DelegationSession: ObservableObject {
         entries.append(.message(id: UUID(), speaker: .user, text: trimmed))
         userWordsSinceLastSend.append(trimmed)
         phase = .thinking
+        // Only a project found from recent use is a guess the model may replace.
+        let projectIsGuess = currentDraft == nil && pendingWorkspace == nil && explicitlySelectedProject == nil
         let project: DelegationProject?
         if let currentDraft {
             project = currentDraft.project
@@ -102,9 +151,13 @@ final class DelegationSession: ObservableObject {
             project = await findProject()
         }
         let context = await Self.projectContext(for: project)
+        let herProject = Self.herOwnProject(bundleIdentifier: herBundleIdentifier,
+                                            among: [project?.repositoryPath].compactMap { $0 } + (history?.projectPaths ?? []))
         do {
-            let turn = try await conversation.respond(to: trimmed, projectContext: context, tool: selectedAgentTool,
-                                                      recentHandOffs: history?.promptText() ?? "（还没有记录）")
+            let turn = try await conversation.respond(
+                to: trimmed, projectContext: context, tool: selectedAgentTool,
+                recentHandOffs: history?.promptText() ?? "（还没有记录）",
+                herCode: herProject.map { "\($0.name)（\($0.repositoryPath)）" } ?? "（不知道在哪：最近用过的项目里没有 Her 的代码）")
             if case .draft = turn.action, pendingWorkspace != nil {
                 say("先决定上一份改动：点「合进来」或「丢掉」，再发新任务。")
                 phase = .awaitingDecision
@@ -113,26 +166,94 @@ final class DelegationSession: ObservableObject {
             if !turn.say.isEmpty { entries.append(.message(id: UUID(), speaker: .her, text: turn.say)) }
             switch turn.action {
             case .reply:
-                phase = currentDraft == nil ? (pendingWorkspace == nil ? .idle : .awaitingDecision) : .awaitingSend
-            case .draft(let draft):
+                phase = restingPhase
+            case .draft(let body):
+                // A revision keeps the background of the draft it revises.
+                let background = turn.refersTo.flatMap { history?.background(forNumber: $0) } ?? currentDraft?.background
+                let bound = projectIsGuess ? (chosenProject(for: turn, herProject: herProject) ?? project) : project
+                let request = currentDraft?.request ?? turn.refersTo.flatMap { history?.request(forNumber: $0) } ?? trimmed
+                // Carrying on a change in its own project keeps the tool that made it,
+                // unless the user names another. Said aloud, since the picker otherwise
+                // shows the last choice.
+                if currentDraft == nil, Self.toolAskedFor(in: trimmed) == nil,
+                   let number = turn.refersTo, bound?.repositoryPath == history?.projectPath(forNumber: number),
+                   let earlierTool = history?.toolThatMadeChange(forNumber: number), earlierTool != selectedAgentTool {
+                    selectedAgentTool = earlierTool
+                    say("执行工具沿用那次的 \(earlierTool.displayName)；要换，在草稿的「执行工具」里选。")
+                }
+                let draft = Draft(request: request, body: body, background: background, project: bound, tool: selectedAgentTool)
                 retireCurrentDraft()
-                currentDraft = Draft(text: draft, project: project, tool: selectedAgentTool)
-                entries.append(.draft(id: UUID(), text: draft, project: project, tool: selectedAgentTool, isCurrent: true))
+                currentDraft = draft
+                entries.append(.draft(id: UUID(), text: draft.text, project: bound, tool: selectedAgentTool, isCurrent: true))
                 phase = .awaitingSend
+                if projectIsGuess, turn.project == .her, herProject == nil, let bound {
+                    say("没找到 Her 自己的代码在哪，草稿先绑在 \(bound.name)；发出去前点「更换项目」选 Her 的仓库。")
+                }
             case .screen(let goal):
                 phase = pendingWorkspace == nil ? .idle : .awaitingDecision
-                onScreenGoal(goal)
+                onScreenGoal(goal) { [weak self] result in self?.screenGoalEnded(result) }
+            }
+            if currentDraft != nil, let reminder = Self.toolReminder(words: trimmed, say: turn.say, selected: selectedAgentTool) {
+                say(reminder)
             }
         } catch {
-            say("没连上阶跃，这句没处理：\(error.localizedDescription)")
-            phase = currentDraft == nil ? (pendingWorkspace == nil ? .idle : .awaitingDecision) : .awaitingSend
+            if (error as? DelegationConversationError)?.isUnusableAnswer == true {
+                say("阶跃这次的回答没法用，这句没处理：\(error.localizedDescription)。再说一遍试试。")
+            } else {
+                say("没连上阶跃，这句没处理：\(error.localizedDescription)")
+            }
+            phase = restingPhase
         }
+    }
+
+    /// The repository the model chose for a draft, when it names one Her can resolve.
+    private func chosenProject(for turn: DelegationTurn, herProject: DelegationProject?) -> DelegationProject? {
+        switch turn.project {
+        case .current: return nil
+        case .her: return herProject
+        case .record:
+            guard let path = turn.refersTo.flatMap({ history?.projectPath(forNumber: $0) }),
+                  FileManager.default.fileExists(atPath: path) else { return nil }
+            return DelegationProject(repositoryPath: path)
+        }
+    }
+
+    /// One notice for a hand-off that ended while the user was not looking,
+    /// unless they silenced this kind. A cancelled run is never announced.
+    private func tellIfAway(recordID: UUID?, receipt: DelegationReceipt, task: String) {
+        guard !stopRequested,
+              let notice = DelegationNotice(recordID: recordID, receipt: receipt, task: task),
+              noticeRules?.silences(notice.category) != true,
+              !isUserLooking() else { return }
+        noticePoster?.post(notice)
+    }
+
+    /// The user clicked a notice. When its receipt is no longer on screen
+    /// (a restart, or 「重新开始」), say from the record what it was about.
+    func openNotice(for recordID: UUID?) {
+        guard let recordID else { return }
+        noticePoster?.withdraw(recordID)
+        guard recordID != lastReportRecordID, let summary = history?.summary(of: recordID) else { return }
+        say("你点开的是这件事：\(summary)。")
+    }
+
+    /// JEV's result, said in the panel and kept where the model will see it,
+    /// so "弄好了吗" is answered from what happened, not from her own promise.
+    private func screenGoalEnded(_ result: String) {
+        let line = "屏幕上那件事：\(result)"
+        say(line)
+        conversation.noteAppEvent(line)
+    }
+
+    /// Where the panel rests after a turn: offering the draft, the pending change, or nothing.
+    private var restingPhase: Phase {
+        currentDraft == nil ? (pendingWorkspace == nil ? .idle : .awaitingDecision) : .awaitingSend
     }
 
     // MARK: - The user's decisions
 
     func selectDraftProject(_ path: String) async {
-        guard phase == .awaitingSend, let draft = currentDraft, pendingWorkspace == nil else { return }
+        guard phase == .awaitingSend, currentDraft != nil, pendingWorkspace == nil else { return }
         phase = .choosingProject
         let result = await DelegationCommand.git(["rev-parse", "--show-toplevel"], inDirectory: path)
         let repositoryPath = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -144,7 +265,7 @@ final class DelegationSession: ObservableObject {
         }
         let project = DelegationProject(repositoryPath: repositoryPath)
         explicitlySelectedProject = project
-        currentDraft = Draft(text: draft.text, project: project, tool: draft.tool)
+        currentDraft?.project = project
         entries = entries.map {
             if case .draft(let id, let text, _, let tool, true) = $0 {
                 return .draft(id: id, text: text, project: project, tool: tool, isCurrent: true)
@@ -156,9 +277,9 @@ final class DelegationSession: ObservableObject {
     }
 
     func selectAgentTool(_ tool: DelegationAgentTool) {
-        guard phase == .awaitingSend, let draft = currentDraft else { return }
+        guard phase == .awaitingSend, currentDraft != nil else { return }
         selectedAgentTool = tool
-        currentDraft = Draft(text: draft.text, project: draft.project, tool: tool)
+        currentDraft?.tool = tool
         entries = entries.map {
             if case .draft(let id, let text, let project, _, true) = $0 {
                 return .draft(id: id, text: text, project: project, tool: tool, isCurrent: true)
@@ -185,9 +306,15 @@ final class DelegationSession: ObservableObject {
         }
         retireCurrentDraft()
         currentDraft = nil
-        let recordID = history?.begin(userWords: userWordsSinceLastSend, draft: draft.text, project: project, tool: draft.tool)
+        let recordID = history?.begin(userWords: userWordsSinceLastSend, draft: draft.body, project: project,
+                                      tool: draft.tool, workspace: workspace)
         userWordsSinceLastSend = []
+        stopRequested = false
         say("交给 \(draft.tool.displayName) 了，在 \(project.name) 的单独工作区里改，你接着忙。")
+        if let noticePoster, !(await noticePoster.prepare()), !hasToldNoticesAreOff {
+            hasToldNoticesAreOff = true
+            say("系统通知被关了：这次做完我不会弹提醒，回来看这里就行。要开的话去 系统设置 → 通知 → Her。")
+        }
         let startedAt = Date()
         phase = .running(startedAt: startedAt, latestProgress: "\(draft.tool.displayName) 正在执行任务")
         let executionPrompt = """
@@ -198,6 +325,7 @@ final class DelegationSession: ObservableObject {
 
         \(draft.text)
         """
+        keepAwake?.begin(reason: "Her：\(draft.tool.displayName) 正在执行交给它的任务")
         let receipt = await delegation.run(prompt: executionPrompt, in: workspace, tool: draft.tool) { [weak self] progress in
             guard case .working(let line) = progress else { return }
             Task { @MainActor in
@@ -205,11 +333,14 @@ final class DelegationSession: ObservableObject {
                 self.phase = .running(startedAt: startedAt, latestProgress: line)
             }
         }
+        keepAwake?.end()
         if let recordID { history?.finish(recordID, receipt: receipt) }
+        tellIfAway(recordID: recordID, receipt: receipt, task: draft.request)
         let report = DelegationReport(receipt: receipt)
         entries.append(.report(id: UUID(), report: report))
+        lastReportRecordID = recordID
         if receipt.outcome == .changed {
-            pendingWorkspace = workspace
+            pendingReceipt = receipt
             pendingRecordID = recordID
             phase = .awaitingDecision
         } else {
@@ -219,19 +350,35 @@ final class DelegationSession: ObservableObject {
     }
 
     func stop() {
+        stopRequested = true
         delegation.cancel()
     }
 
     func mergePendingChange() async {
-        guard phase == .awaitingDecision, let workspace = pendingWorkspace else { return }
+        guard phase == .awaitingDecision, let reviewed = pendingReceipt else { return }
         phase = .merging
         do {
-            let head = try await delegation.merge(workspace, commitMessage: "Apply change delegated from Her")
-            pendingWorkspace = nil
-            if let pendingRecordID { history?.decide(pendingRecordID, .merged) }
+            let head = try await delegation.merge(reviewed, commitMessage: "Apply change delegated from Her")
+            pendingReceipt = nil
+            if let pendingRecordID {
+                history?.decide(pendingRecordID, .merged)
+                noticePoster?.withdraw(pendingRecordID)
+            }
             pendingRecordID = nil
             say("合好了（\(head.prefix(7))），工作区清掉了。")
             phase = .idle
+        } catch DelegationError.changedSinceReview(let now) {
+            // Only what the user has seen may be merged: show what is there now.
+            pendingReceipt = now
+            if let pendingRecordID { history?.reviewAgain(pendingRecordID, receipt: now) }
+            say(reviewed.diffDigest.isEmpty
+                ? "这份改动是重启前记下的，没法确认你看到的还是不是现在的内容，所以没有合进去。下面是工作区现在的改动，看过再决定。"
+                : "你看过之后工作区又变了，没有合进去。下面是现在的改动，看过再决定。")
+            entries.append(.report(id: UUID(), report: DelegationReport(receipt: now)))
+            phase = .awaitingDecision
+        } catch DelegationError.branchMoved(let expected, let current) {
+            say("任务开始时 \(reviewed.workspace.project.name) 在 \(expected) 分支，现在在 \(current.isEmpty ? "一个没有分支名的提交上" : current + " 分支")，所以没有合进去。切回 \(expected) 再点「合进来」，或者丢掉。")
+            phase = .awaitingDecision
         } catch {
             say("\(error.localizedDescription)。工作区还留着，你先处理手上的改动，再点「合进来」。")
             phase = .awaitingDecision
@@ -241,8 +388,11 @@ final class DelegationSession: ObservableObject {
     func discardPendingChange() async {
         guard phase == .awaitingDecision, let workspace = pendingWorkspace else { return }
         await delegation.discard(workspace)
-        pendingWorkspace = nil
-        if let pendingRecordID { history?.decide(pendingRecordID, .discarded) }
+        pendingReceipt = nil
+        if let pendingRecordID {
+            history?.decide(pendingRecordID, .discarded)
+            noticePoster?.withdraw(pendingRecordID)
+        }
         pendingRecordID = nil
         say("丢掉了，项目没动。")
         phase = .idle
@@ -278,6 +428,35 @@ final class DelegationSession: ObservableObject {
         }
     }
 
+    nonisolated static func draftText(_ body: String, background: String?) -> String {
+        background.map { $0 + "\n\n" + body } ?? body
+    }
+
+    /// Her's own line naming the tool actually selected, when the user asks for
+    /// another one or her reply claims one.
+    static func toolReminder(words: String, say: String, selected: DelegationAgentTool) -> String? {
+        guard let named = toolAskedFor(in: words) ?? toolAskedFor(in: say), named != selected else { return nil }
+        return "现在选的还是 \(selected.displayName)；要用 \(named.displayName)，在草稿的「执行工具」里选。"
+    }
+
+    private static let toolRequest = try! Regex("(换成?|改用|改为|改成|选的是|用|让|交给)\\s*(claude|codex|kimi|step code)")
+    private static let toolsByName: [String: DelegationAgentTool] = [
+        "claude": .claudeCode, "codex": .codex, "kimi": .kimiCode, "step code": .stepCode,
+    ]
+
+    /// The coding tool asked for in so many words ("换 Kimi", "执行工具改为 Kimi Code"),
+    /// the last one if several. Recalling a past hand-off ("上次用 Codex 那个"),
+    /// ruling a tool out ("不用 Codex") or describing a call ("调用 Codex") is not a request.
+    static func toolAskedFor(in text: String) -> DelegationAgentTool? {
+        DelegationConversation.clausesAboutNow(text.lowercased()).flatMap { clause in
+            clause.matches(of: toolRequest).compactMap { match -> DelegationAgentTool? in
+                let before = clause[..<match.range.lowerBound]
+                guard !before.contains("不"), !before.contains("别"), !before.hasSuffix("调") else { return nil }
+                return match.output[2].substring.flatMap { toolsByName[String($0)] }
+            }
+        }.last
+    }
+
     static func projectContext(for project: DelegationProject?) async -> String {
         guard let project else { return "（还没找到项目：用户最近没有在任何 git 仓库里用过 Claude Code）" }
         let branch = await DelegationCommand.git(["branch", "--show-current"], inDirectory: project.repositoryPath)
@@ -290,6 +469,23 @@ final class DelegationSession: ObservableObject {
         \(log.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines))
         """
     }
+
+    /// Her's own source repository among `paths`: the first whose Xcode project builds this bundle identifier.
+    static func herOwnProject(bundleIdentifier: String?, among paths: [String]) -> DelegationProject? {
+        paths.first { buildsApp(bundleIdentifier, at: $0) }.map(DelegationProject.init(repositoryPath:))
+    }
+
+    /// Whether an Xcode project at the repository root builds the app with
+    /// this bundle identifier, i.e. the repository is Her's own source.
+    private static func buildsApp(_ bundleIdentifier: String?, at repositoryPath: String) -> Bool {
+        guard let bundleIdentifier, !bundleIdentifier.isEmpty,
+              let entries = try? FileManager.default.contentsOfDirectory(atPath: repositoryPath) else { return false }
+        return entries.filter { $0.hasSuffix(".xcodeproj") }.contains { name in
+            let file = URL(fileURLWithPath: repositoryPath).appendingPathComponent(name).appendingPathComponent("project.pbxproj")
+            let text = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+            return text.contains("PRODUCT_BUNDLE_IDENTIFIER = \(bundleIdentifier);")
+        }
+    }
 }
 
 /// What Her tells the user about one hand-off. Every sentence is chosen from
@@ -301,7 +497,10 @@ struct DelegationReport: Equatable {
         switch receipt.outcome {
         case .changed:
             let count = receipt.changedFiles.count
-            return "工作区里有改动：涉及 \(count) 个文件。确认后再合进项目。"
+            let target = receipt.workspace.projectBranch.map { " \(receipt.workspace.project.name) 的 \($0) 分支" } ?? "项目"
+            let leftOut = receipt.untrackedFiles.isEmpty ? ""
+                : "另有 \(receipt.untrackedFiles.count) 个新建但没提交的文件，合并时不会带上。"
+            return "工作区里有改动：涉及 \(count) 个文件。确认后再合进\(target)。" + leftOut
         case .noChange:
             return "\(receipt.agentTool.displayName) 说做完了，但工作区里没有任何改动，这次不算做成。"
         case .agentFailed(let reason):

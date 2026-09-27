@@ -63,8 +63,11 @@ struct DelegationSessionTests {
         return path
     }
 
-    private func modelReply(say: String, action: String = "none", draft: String = "", screenGoal: String = "") -> String {
-        let content = try! JSONSerialization.data(withJSONObject: ["say": say, "action": action, "draft": draft, "screen_goal": screenGoal])
+    private func modelReply(say: String, action: String = "none", draft: String = "", screenGoal: String = "",
+                            refersTo: Int = 0, project: String = "current") -> String {
+        let content = try! JSONSerialization.data(withJSONObject: ["say": say, "action": action, "draft": draft,
+                                                                   "screen_goal": screenGoal, "refers_to": refersTo,
+                                                                   "project": project])
         return String(decoding: content, as: UTF8.self)
     }
 
@@ -77,7 +80,12 @@ struct DelegationSessionTests {
         replies: [String],
         findProject: (@MainActor () async -> DelegationProject?)? = nil,
         screenGoals: ScreenGoalRecorder? = nil,
-        history: DelegationHistory? = nil
+        history: DelegationHistory? = nil,
+        herBundleIdentifier: String? = nil,
+        notices: RecordingNoticePoster? = nil,
+        noticeRules: DelegationNoticeRules? = nil,
+        isUserLooking: @escaping @MainActor () -> Bool = { false },
+        keepAwake: DelegationKeepAwake? = nil
     ) throws -> DelegationSession {
         ScriptedStepFun.queue(replies)
         let configuration = URLSessionConfiguration.ephemeral
@@ -87,8 +95,13 @@ struct DelegationSessionTests {
         let delegation = CodingAgentDelegation(claudeCommand: claude, worktreesRootPath: try makeTemporaryDirectory(),
                                                codexCommand: codex, kimiCommand: kimi, stepCommand: step)
         return DelegationSession(conversation: conversation, delegation: delegation,
-                                 findProject: findProject ?? { project }, onScreenGoal: { screenGoals?.goals.append($0) },
-                                 history: history)
+                                 findProject: findProject ?? { project }, onScreenGoal: { goal, finished in
+                                     screenGoals?.goals.append(goal)
+                                     if let result = screenGoals?.result { finished(result) }
+                                 },
+                                 history: history, herBundleIdentifier: herBundleIdentifier,
+                                 noticePoster: notices, noticeRules: noticeRules, isUserLooking: isUserLooking,
+                                 keepAwake: keepAwake)
     }
 
     private func herLines(_ session: DelegationSession) -> [String] {
@@ -103,6 +116,62 @@ struct DelegationSessionTests {
             if case .report(_, let report) = $0 { return report }
             return nil
         }
+    }
+
+    /// The repository the current draft is bound to.
+    private func currentDraftProject(_ session: DelegationSession) -> DelegationProject? {
+        session.entries.compactMap {
+            if case .draft(_, _, let project, _, true) = $0 { return project }
+            return nil
+        }.last
+    }
+
+    /// The draft the panel currently offers to send, as the user sees it.
+    private func currentDraftText(_ session: DelegationSession) -> String? {
+        session.entries.compactMap {
+            if case .draft(_, let text, _, _, true) = $0 { return text }
+            return nil
+        }.last
+    }
+
+    /// Hands "把日志窗口改成中文" to a Codex stub that fails like the real 502, recording it in `historyURL`.
+    private func recordFailedCodexHandOff(project: DelegationProject, historyURL: URL) async throws -> DelegationReport {
+        let session = try makeSession(
+            project: project, claude: "/nonexistent/claude",
+            codex: try makeStubCodex(body: """
+            print -r -- '{"type":"turn.failed","error":{"message":"unexpected status 502 Bad Gateway"}}'
+            exit 1
+            """),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "把日志窗口改成中文")],
+            history: DelegationHistory(fileURL: historyURL))
+        await session.send("日志窗口改成中文")
+        session.selectAgentTool(.codex)
+        await session.sendCurrentDraft()
+        let report = try #require(reports(session).first)
+        guard case .agentFailed = report.receipt.outcome else {
+            Issue.record("The stub must fail like the real 502")
+            return report
+        }
+        return report
+    }
+
+    private func failedReceipt(_ project: DelegationProject) -> DelegationReceipt {
+        let workspace = DelegationWorkspace(project: project, branchName: "b", worktreePath: "/w", baseCommit: "c")
+        return DelegationReceipt(workspace: workspace, outcome: .agentFailed(reason: "502"), agentSummary: "", changedFiles: [],
+                                 untrackedFiles: [], diffStat: "", costInUSD: nil, durationMilliseconds: nil, agentSessionID: nil)
+    }
+
+    /// The id of the only record in a history file.
+    private func noticeRecordID(_ historyURL: URL) -> UUID? {
+        guard let data = try? Data(contentsOf: historyURL),
+              let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return nil }
+        return (array.last?["id"] as? String).flatMap(UUID.init(uuidString:))
+    }
+
+    private func addXcodeProject(to project: DelegationProject, named name: String, bundleIdentifier: String) throws {
+        let bundle = project.repositoryPath + "/\(name).xcodeproj"
+        try FileManager.default.createDirectory(atPath: bundle, withIntermediateDirectories: true)
+        try "PRODUCT_BUNDLE_IDENTIFIER = \(bundleIdentifier);\n".write(toFile: bundle + "/project.pbxproj", atomically: true, encoding: .utf8)
     }
 
     private func greeting(_ project: DelegationProject) throws -> String {
@@ -147,13 +216,119 @@ struct DelegationSessionTests {
         #expect(session.phase == .awaitingDecision)
         let report = try #require(reports(session).first)
         #expect(report.receipt.outcome == .changed)
-        #expect(report.headline == "工作区里有改动：涉及 1 个文件。确认后再合进项目。")
+        #expect(report.headline == "工作区里有改动：涉及 1 个文件。确认后再合进 \(project.name) 的 main 分支。")
         #expect(herLines(session).contains { $0.hasPrefix("交给 Claude Code 了") })
         #expect(try greeting(project) == "hello\n", "Nothing reaches the project before the user merges")
 
         await session.mergePendingChange()
         #expect(try greeting(project) == "world\n")
         #expect(session.phase == .idle)
+    }
+
+    @Test func aChangeMadeAfterTheUserLookedIsNotMerged() async throws {
+        let project = try await makeProject()
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print world > greeting.txt; git commit -qam greet"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "把 greeting.txt 改成 world")])
+        await session.send("把问候语改成 world")
+        await session.sendCurrentDraft()
+        let shown = try #require(reports(session).last)
+        // Something edits the workspace after the receipt was shown.
+        try "world, and more\n".write(toFile: shown.receipt.workspace.worktreePath + "/greeting.txt", atomically: true, encoding: .utf8)
+
+        await session.mergePendingChange()
+        #expect(try greeting(project) == "hello\n", "What the user did not see stays out of the project")
+        #expect(session.phase == .awaitingDecision)
+        #expect(herLines(session).last == "你看过之后工作区又变了，没有合进去。下面是现在的改动，看过再决定。")
+        let now = try #require(reports(session).last)
+        #expect(now.receipt.diffStat != shown.receipt.diffStat || now.receipt.diffDigest != shown.receipt.diffDigest)
+
+        await session.mergePendingChange()
+        #expect(try greeting(project) == "world, and more\n", "Once seen, the new content can be merged")
+        #expect(session.phase == .idle)
+    }
+
+    @Test func aChangeIsMergedOnlyIntoTheBranchTheTaskStartedFrom() async throws {
+        let project = try await makeProject()
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print world > greeting.txt; git commit -qam greet"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "把 greeting.txt 改成 world")])
+        await session.send("把问候语改成 world")
+        await session.sendCurrentDraft()
+        _ = await DelegationCommand.git(["checkout", "-q", "-b", "experiment"], inDirectory: project.repositoryPath)
+
+        await session.mergePendingChange()
+        #expect(try greeting(project) == "hello\n")
+        #expect(session.phase == .awaitingDecision)
+        #expect(herLines(session).last == "任务开始时 \(project.name) 在 main 分支，现在在 experiment 分支，所以没有合进去。切回 main 再点「合进来」，或者丢掉。")
+
+        _ = await DelegationCommand.git(["checkout", "-q", "main"], inDirectory: project.repositoryPath)
+        await session.mergePendingChange()
+        #expect(try greeting(project) == "world\n")
+    }
+
+    @Test func newFilesThatWillNotBeMergedAreNamedInTheReceiptAndNotice() async throws {
+        let project = try await makeProject()
+        let notices = RecordingNoticePoster()
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print world > greeting.txt; print note > notes.txt"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改问候语，顺便记一笔")],
+            notices: notices)
+        await session.send("改问候语，顺便记一笔")
+        await session.sendCurrentDraft()
+
+        let report = try #require(reports(session).last)
+        #expect(report.headline.hasSuffix("另有 1 个新建但没提交的文件，合并时不会带上。"))
+        #expect(try #require(notices.posted.first).body.contains("另有 1 个新建的文件没提交，合并时不会带上。"))
+        await session.mergePendingChange()
+        #expect(!FileManager.default.fileExists(atPath: project.repositoryPath + "/notes.txt"), "As the receipt said")
+    }
+
+    @Test func aReceiptRebuiltAfterARestartShowsWhatItShowedBefore() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        let before = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print world > greeting.txt; print note > notes.txt"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改成 world")],
+            history: DelegationHistory(fileURL: historyURL))
+        await before.send("问候语改成 world")
+        await before.sendCurrentDraft()
+        let shown = try #require(reports(before).last)
+
+        let after = try makeSession(project: project, claude: "/nonexistent/claude", replies: [],
+                                    history: DelegationHistory(fileURL: historyURL))
+        let restored = try #require(reports(after).last)
+        #expect(restored.receipt.diffStat == shown.receipt.diffStat)
+        #expect(restored.receipt.untrackedFiles == ["notes.txt"])
+        #expect(restored.headline == shown.headline)
+        await after.mergePendingChange()
+        #expect(try greeting(project) == "world\n", "Unchanged since it was shown, so it merges")
+    }
+
+    @Test func aRecordDeletedByHandWhileHerRunsStaysDeleted() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        let history = DelegationHistory(fileURL: historyURL)
+        let old = history.begin(userWords: ["旧的"], draft: "旧的", project: project, tool: .claudeCode)
+        let kept = history.begin(userWords: ["新的"], draft: "新的", project: project, tool: .claudeCode)
+        // The user opens the file and removes the old record while Her is running.
+        var array = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [[String: Any]])
+        array.removeAll { $0["id"] as? String == old.uuidString }
+        try JSONSerialization.data(withJSONObject: array).write(to: historyURL)
+
+        history.decide(kept, .discarded)
+        let text = DelegationHistory(fileURL: historyURL).promptText()
+        #expect(!text.contains("草稿：旧的"))
+        #expect(text.contains("用户决定：已丢掉"))
+    }
+
+    @Test func aRuleRemovedByHandStopsApplyingAtOnce() throws {
+        let url = URL(fileURLWithPath: try makeTemporaryDirectory() + "/notice-rules.json")
+        let rules = DelegationNoticeRules(fileURL: url)
+        rules.silence(.failed)
+        #expect(rules.silences(.failed))
+        try "[]".write(to: url, atomically: true, encoding: .utf8)
+        #expect(!rules.silences(.failed))
     }
 
     @Test func claimedSuccessWithoutChangesIsReportedAsNotDone() async throws {
@@ -761,6 +936,23 @@ struct DelegationSessionTests {
         #expect(reports(session).isEmpty)
     }
 
+    @Test func whatJevDidComesBackToTheConversation() async throws {
+        let project = try await makeProject()
+        let screenGoals = ScreenGoalRecorder()
+        screenGoals.result = "没有开始：上一件屏幕上的事还在做。"
+        let session = try makeSession(project: project, claude: try makeStubClaude(body: ":"),
+                                      replies: [modelReply(say: "好。", action: "screen", screenGoal: "点击 保存 按钮"),
+                                                modelReply(say: "没点成，上一件还在做。")],
+                                      screenGoals: screenGoals)
+
+        await session.send("帮我点一下保存")
+        #expect(herLines(session).last == "屏幕上那件事：没有开始：上一件屏幕上的事还在做。", "She said she would; the panel says it did not start")
+
+        await session.send("弄好了吗")
+        let seen = try #require(ScriptedStepFun.userMessages.last)
+        #expect(seen.contains("【应用记录，不是用户说的话】屏幕上那件事：没有开始"), "The model answers from what happened")
+    }
+
     @Test func missingProjectIsSaidPlainlyAndNothingRuns() async throws {
         let session = try makeSession(project: nil, claude: try makeStubClaude(body: ":"),
                                       replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改点什么")])
@@ -791,21 +983,7 @@ struct DelegationSessionTests {
     @Test func aFailedHandOffIsStillKnownAfterARestart() async throws {
         let project = try await makeProject()
         let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
-        let before = try makeSession(
-            project: project, claude: "/nonexistent/claude",
-            codex: try makeStubCodex(body: """
-            print -r -- '{"type":"turn.failed","error":{"message":"unexpected status 502 Bad Gateway"}}'
-            exit 1
-            """),
-            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "把日志窗口改成中文")],
-            history: DelegationHistory(fileURL: historyURL))
-        await before.send("日志窗口改成中文")
-        before.selectAgentTool(.codex)
-        await before.sendCurrentDraft()
-        guard case .agentFailed = try #require(reports(before).first).receipt.outcome else {
-            Issue.record("The stub must fail like the real 502")
-            return
-        }
+        let failed = try await recordFailedCodexHandOff(project: project, historyURL: historyURL)
 
         // A new app launch: a fresh session reading the same file.
         let after = try makeSession(project: project, claude: "/nonexistent/claude",
@@ -819,7 +997,186 @@ struct DelegationSessionTests {
         #expect(seen.contains(project.repositoryPath))
         #expect(seen.contains("没做成。原始报错："))
         #expect(seen.contains("502 Bad Gateway"))
+        #expect(seen.contains("Her 当时在回执里给用户看的原话：「\(failed.headline)」"))
         #expect(try greeting(project) == "hello\n")
+    }
+
+    @Test func aDraftAboutAnEarlierHandOffStartsWithWhatHerRecorded() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        let shown = try await recordFailedCodexHandOff(project: project, historyURL: historyURL).headline
+
+        let after = try makeSession(
+            project: project, claude: "/nonexistent/claude",
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改 Her 显示失败的写法", refersTo: 1),
+                      modelReply(say: "改好了，再看一眼。", action: "draft", draft: "改 Her 显示失败的写法，下一步写在前面")],
+            history: DelegationHistory(fileURL: historyURL))
+        await after.send("上次 Codex 那个失败提示我看不懂，改一下")
+        let first = try #require(currentDraftText(after))
+        #expect(first.hasPrefix("背景：接着 "))
+        #expect(first.contains("交给 Codex 的任务（项目 \(project.name)）：把日志窗口改成中文"))
+        #expect(first.contains("Her 当时给用户看的原话：「\(shown)」"))
+        #expect(first.hasSuffix("\n\n改 Her 显示失败的写法"))
+
+        await after.send("下一步写在前面")
+        let revised = try #require(currentDraftText(after))
+        #expect(revised.contains("Her 当时给用户看的原话：「\(shown)」"), "A revision keeps the background")
+        #expect(revised.hasSuffix("改 Her 显示失败的写法，下一步写在前面"))
+    }
+
+    @Test func carryingOnAMergedChangeKeepsItsToolAndAShortBackground() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        let before = try makeSession(
+            project: project, claude: "/nonexistent/claude",
+            codex: try makeStubCodex(body: """
+            print world > greeting.txt
+            print -r -- '{"type":"item.completed","item":{"type":"agent_message","text":"- **修改位置**: greeting.txt 第 1 行"}}'
+            """),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "目标：问候语改成 world\n范围：只改 greeting.txt")],
+            history: DelegationHistory(fileURL: historyURL))
+        await before.send("问候语改成 world")
+        before.selectAgentTool(.codex)
+        await before.sendCurrentDraft()
+        await before.mergePendingChange()
+        #expect(try greeting(project) == "world\n")
+
+        let after = try makeSession(
+            project: project, claude: "/nonexistent/claude",
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "问候语改成 world!", refersTo: 1)],
+            history: DelegationHistory(fileURL: historyURL))
+        await after.send("刚才那个再调一下，加个感叹号")
+        #expect(after.selectedAgentTool == .codex, "The earlier task went to Codex and the user named no other tool")
+        #expect(herLines(after).contains("执行工具沿用那次的 Codex；要换，在草稿的「执行工具」里选。"))
+        let draft = try #require(currentDraftText(after))
+        #expect(draft.hasPrefix("背景：接着 "))
+        #expect(draft.contains("交给 Codex 的任务（项目 \(project.name)）：目标：问候语改成 world\n"), "Only the draft's first line")
+        #expect(draft.contains("当时的结果：改了 1 个文件（greeting.txt），用户已合进项目\n"))
+        #expect(!draft.contains("修改位置") && !draft.contains("Changed the greeting"), "The tool's explanation stays out of the draft")
+        #expect(!draft.contains("Her 当时给用户看的原话"), "A change that was made needs no quote")
+    }
+
+    @Test func aFailedRunPassesOnNoTool() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        _ = try await recordFailedCodexHandOff(project: project, historyURL: historyURL)
+        let after = try makeSession(
+            project: project, claude: "/nonexistent/claude",
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "把日志窗口改成中文", refersTo: 1)],
+            history: DelegationHistory(fileURL: historyURL))
+        await after.send("上次那个失败的，重做一遍")
+        #expect(after.selectedAgentTool == .claudeCode, "Codex failed that run; which tool to try is the user's call")
+        #expect(herLines(after) == ["看一眼草稿。"])
+    }
+
+    @Test func aSentDraftIsRecordedWithoutItsBackground() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        _ = try await recordFailedCodexHandOff(project: project, historyURL: historyURL)
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print world > greeting.txt"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改 Her 显示失败的写法", refersTo: 1)],
+            history: DelegationHistory(fileURL: historyURL))
+        await session.send("上次那个失败提示改一下")
+        await session.sendCurrentDraft()
+        await session.discardPendingChange()
+
+        let text = DelegationHistory(fileURL: historyURL).promptText()
+        #expect(text.contains("草稿：改 Her 显示失败的写法"))
+        #expect(!text.contains("背景："), "The record keeps the model's draft, not Her's background")
+    }
+
+    @Test func aReferenceOutsideTheRecordAddsNothing() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        let session = try makeSession(project: project, claude: "/nonexistent/claude",
+                                      replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改问候语", refersTo: 3)],
+                                      history: DelegationHistory(fileURL: historyURL))
+        await session.send("上次那个")
+        #expect(currentDraftText(session) == "改问候语")
+    }
+
+    @Test func aFailureRecordedBeforeTheShownWordsWereKeptStillShowsThem() throws {
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        let failure = "Codex 退出码 1：unexpected status 502 Bad Gateway: Unknown error, url: http://127.0.0.1:10101/backend-api/codex/responses"
+        let legacy = """
+        [{"id":"6F9D2C1E-6C1B-4E1F-9E1A-000000000001","sentAt":"2026-09-26T14:03:00Z","userWords":["日志窗口改成中文"],\
+        "draft":"把日志窗口改成中文","projectPath":"/p/os","tool":"codex","result":"failed","failure":"\(failure)","changedFiles":[]}]
+        """
+        try legacy.write(to: historyURL, atomically: true, encoding: .utf8)
+
+        let text = DelegationHistory(fileURL: historyURL).promptText()
+        #expect(text.contains("Her 当时在回执里给用户看的原话：「没做成：\(failure)」"))
+    }
+
+    @Test func aComplaintAboutHerOwnWordsIsBoundToHerOwnCode() async throws {
+        let herSource = try await makeProject()
+        try addXcodeProject(to: herSource, named: "Her", bundleIdentifier: "com.example.her")
+        let testsOnly = try await makeProject()
+        try addXcodeProject(to: testsOnly, named: "Other", bundleIdentifier: "com.example.her.tests")
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        _ = try await recordFailedCodexHandOff(project: herSource, historyURL: historyURL)
+        let session = try makeSession(
+            project: testsOnly, claude: "/nonexistent/claude",
+            replies: [modelReply(say: "那句是说本机服务返回了 502。", action: "draft", draft: "改 Her 显示失败的写法",
+                                 refersTo: 1, project: "her")],
+            history: DelegationHistory(fileURL: historyURL), herBundleIdentifier: "com.example.her")
+
+        await session.send("上次 Codex 那个失败提示我看不懂，改一下")
+
+        #expect(currentDraftProject(session) == herSource, "Not the recently used repository")
+        #expect(herLines(session) == ["那句是说本机服务返回了 502。"])
+        let seen = try #require(ScriptedStepFun.systemMessages.last)
+        #expect(seen.contains("Her 自己的代码（你说的话、回执和这些规则都在这里）：\n\(herSource.name)（\(herSource.repositoryPath)）"))
+    }
+
+    @Test func aRedoIsBoundToTheProjectOfThatHandOff() async throws {
+        let original = try await makeProject()
+        let recent = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        _ = try await recordFailedCodexHandOff(project: original, historyURL: historyURL)
+        let session = try makeSession(
+            project: recent, claude: "/nonexistent/claude",
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "重做：把日志窗口改成中文", refersTo: 1, project: "record")],
+            history: DelegationHistory(fileURL: historyURL))
+
+        await session.send("上次 Codex 那个任务再交一次")
+
+        #expect(currentDraftProject(session) == original)
+    }
+
+    @Test func whenHerOwnCodeIsUnknownTheDraftStaysAndSheSaysSo() async throws {
+        let recent = try await makeProject()
+        let session = try makeSession(
+            project: recent, claude: "/nonexistent/claude",
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改 Her 显示失败的写法", project: "her")],
+            herBundleIdentifier: "com.example.her")
+
+        await session.send("你那个失败提示我看不懂，改一下")
+
+        #expect(currentDraftProject(session) == recent)
+        #expect(herLines(session).last == "没找到 Her 自己的代码在哪，草稿先绑在 \(recent.name)；发出去前点「更换项目」选 Her 的仓库。")
+        #expect(ScriptedStepFun.systemMessages.last?.contains("（不知道在哪：最近用过的项目里没有 Her 的代码）") == true)
+    }
+
+    @Test func theUsersOwnProjectChoiceIsNeverReplaced() async throws {
+        let herSource = try await makeProject()
+        try addXcodeProject(to: herSource, named: "Her", bundleIdentifier: "com.example.her")
+        let recent = try await makeProject()
+        let chosen = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        _ = try await recordFailedCodexHandOff(project: herSource, historyURL: historyURL)
+        let session = try makeSession(
+            project: recent, claude: "/nonexistent/claude",
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改问候语"),
+                      modelReply(say: "改好了。", action: "draft", draft: "改问候语和提示", refersTo: 1, project: "her")],
+            history: DelegationHistory(fileURL: historyURL), herBundleIdentifier: "com.example.her")
+        await session.send("问候语改一下")
+        await session.selectDraftProject(chosen.repositoryPath)
+
+        await session.send("顺便把 Her 的失败提示也改了")
+
+        #expect(currentDraftProject(session) == chosen)
     }
 
     @Test(arguments: [false, true])
@@ -867,6 +1224,325 @@ struct DelegationSessionTests {
         #expect(DelegationHistory(fileURL: historyURL).promptText().contains("新草稿"))
     }
 
+    @Test(arguments: ["上次交给 Codex 的任务没做成：这台 Mac 上的本机服务返回了 502。",
+                      "上次发给 Codex 的那份马上就失败了，本机服务返回了 502。"])
+    func recallingAnEarlierHandOffIsNotTakenForAPromise(recall: String) async throws {
+        let project = try await makeProject()
+        let session = try makeSession(project: project, claude: "/nonexistent/claude", replies: [modelReply(say: recall)])
+
+        await session.send("上次 Codex 为什么失败了？")
+
+        #expect(herLines(session) == [recall])
+        #expect(ScriptedStepFun.remaining == 0)
+    }
+
+    @Test(arguments: [
+        ("上次那个日志窗口改中文的活，换 Kimi 再做一次", DelegationAgentTool?.some(.kimiCode)),
+        ("上次用 Codex 失败了，这次换 Kimi", .some(.kimiCode)),
+        ("上次 Codex 那个失败提示我看不懂，改一下", nil),
+        ("还是用 Claude，不用 Codex", nil),
+        ("不要用 Codex", nil),
+        ("Her 想调用 Codex 帮你干活，那句提示我看不懂", nil),
+    ])
+    func askingForAnotherToolGetsHerOwnReminder(words: String, asked: DelegationAgentTool?) async throws {
+        let project = try await makeProject()
+        let session = try makeSession(project: project, claude: "/nonexistent/claude",
+                                      replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "把日志窗口改成中文")])
+
+        await session.send(words)
+
+        let reminder = asked.map { "现在选的还是 Claude Code；要用 \($0.displayName)，在草稿的「执行工具」里选。" }
+        #expect(herLines(session) == ["看一眼草稿。"] + (reminder.map { [$0] } ?? []))
+        let draft = try #require(session.entries.first { if case .draft = $0 { return true } else { return false } })
+        guard case .draft(_, _, _, let tool, _) = draft else { return }
+        #expect(tool == .claudeCode, "Only the user switches the tool")
+    }
+
+    @Test func herClaimingAToolSwitchIsFollowedByWhatIsActuallySelected() async throws {
+        let project = try await makeProject()
+        let session = try makeSession(project: project, claude: "/nonexistent/claude",
+                                      replies: [modelReply(say: "这是重做版草稿，执行工具改为 Kimi Code，请核对后点「发出去」。",
+                                                           action: "draft", draft: "重做：把日志窗口改成中文")])
+
+        await session.send("上次那个任务再做一次")
+
+        #expect(herLines(session).last == "现在选的还是 Claude Code；要用 Kimi Code，在草稿的「执行工具」里选。")
+        #expect(session.selectedAgentTool == .claudeCode)
+    }
+
+    @Test func anEmptyModelAnswerIsNotReportedAsNoConnection() async throws {
+        let project = try await makeProject()
+        let session = try makeSession(project: project, claude: "/nonexistent/claude", replies: [""])
+
+        await session.send("上次那个")
+
+        let line = try #require(herLines(session).last)
+        #expect(line.hasPrefix("阶跃这次的回答没法用"))
+        #expect(line.contains("模型没给出回答"))
+        #expect(!line.contains("没连上"))
+        #expect(session.phase == .idle)
+    }
+
+    // MARK: - Telling the user when a hand-off ends
+
+    @Test func aHandOffThatEndsWhileYouAreAwayIsToldOnceInPlainWords() async throws {
+        let project = try await makeProject()
+        let notices = RecordingNoticePoster()
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print world > greeting.txt"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改成 world")], notices: notices)
+        await session.send("问候语改成 world")
+        await session.sendCurrentDraft()
+
+        #expect(notices.prepared == 1, "Permission is asked when a hand-off starts")
+        #expect(notices.posted.count == 1)
+        let notice = try #require(notices.posted.first)
+        #expect(notice.category == .changed)
+        #expect(notice.title == "Claude Code 做完了 · \(project.name)")
+        #expect(notice.body == "「问候语改成 world」改了 1 个文件。现在告诉你，是因为改动在单独的工作区里，等你决定合不合进项目。点开看改动。")
+        #expect(try greeting(project) == "hello\n", "Nothing is merged until the user decides")
+    }
+
+    @Test func aFailureIsToldWithTheReasonAndWhatToDecide() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        let notices = RecordingNoticePoster()
+        let session = try makeSession(
+            project: project, claude: "/nonexistent/claude",
+            codex: try makeStubCodex(body: """
+            print -r -- '{"type":"turn.failed","error":{"message":"unexpected status 502 Bad Gateway"}}'
+            exit 1
+            """),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "把日志窗口改成中文")],
+            history: DelegationHistory(fileURL: historyURL), notices: notices)
+        await session.send("日志窗口改成中文")
+        session.selectAgentTool(.codex)
+        await session.sendCurrentDraft()
+
+        let notice = try #require(notices.posted.first)
+        #expect(notices.posted.count == 1)
+        #expect(notice.category == .failed)
+        #expect(notice.title == "Codex 没做成 · \(project.name)")
+        #expect(notice.body.hasPrefix("「日志窗口改成中文」停下了："))
+        #expect(notice.body.contains("502 Bad Gateway"))
+        #expect(notice.body.hasSuffix("现在告诉你，是因为要你决定重试还是换个做法。点开看原始报错。"))
+        #expect(notice.recordID != nil, "The notice points at the recorded hand-off")
+    }
+
+    @Test func nothingPopsUpWhileYouAreLookingAtThePanel() async throws {
+        let project = try await makeProject()
+        let notices = RecordingNoticePoster()
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print world > greeting.txt"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改成 world")],
+            notices: notices, isUserLooking: { true })
+        await session.send("问候语改成 world")
+        await session.sendCurrentDraft()
+
+        #expect(notices.posted.isEmpty)
+        #expect(reports(session).count == 1, "The receipt in the panel is how she tells you")
+    }
+
+    @Test func aSilencedKindStaysSilentAfterARestartAndOtherKindsStillCome() async throws {
+        let project = try await makeProject()
+        let rulesURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/notice-rules.json")
+        let notices = RecordingNoticePoster()
+        // What the 「这类不再提醒」 button does, through the notification's own payload.
+        let failedNotice = try #require(DelegationNotice(recordID: UUID(), receipt: failedReceipt(project), task: "改成 world"))
+        let tapped = try #require(DelegationNotice.decode(userInfo: failedNotice.userInfo))
+        #expect(tapped.category == .failed && tapped.recordID == failedNotice.recordID)
+        DelegationNoticeRules(fileURL: rulesURL).silence(tapped.category, from: tapped.recordID)
+
+        // A new app launch reads the same rules file.
+        let failing = try makeSession(
+            project: project, claude: "/nonexistent/claude",
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改成 world")],
+            notices: notices, noticeRules: DelegationNoticeRules(fileURL: rulesURL))
+        await failing.send("问候语改成 world")
+        await failing.sendCurrentDraft()
+        #expect(reports(failing).first.map { if case .agentFailed = $0.receipt.outcome { true } else { false } } == true)
+        #expect(notices.posted.isEmpty, "The silenced kind stays silent after a restart")
+
+        let succeeding = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print world > greeting.txt"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改成 world")],
+            notices: notices, noticeRules: DelegationNoticeRules(fileURL: rulesURL))
+        await succeeding.send("问候语改成 world")
+        await succeeding.sendCurrentDraft()
+        #expect(notices.posted.map(\.category) == [.changed])
+        #expect(DelegationNoticeRules(fileURL: rulesURL).rules.map(\.category) == [.failed])
+    }
+
+    @Test func theNoticeQuotesTheRequestNotSmallTalkBeforeIt() async throws {
+        let project = try await makeProject()
+        let notices = RecordingNoticePoster()
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print world > greeting.txt"),
+            replies: [modelReply(say: "现在是下午。"),
+                      modelReply(say: "看一眼草稿。", action: "draft", draft: "改成 world"),
+                      modelReply(say: "改好了。", action: "draft", draft: "改成 world，并保留换行")],
+            notices: notices)
+        await session.send("现在几点")
+        await session.send("问候语改成 world")
+        await session.send("换行留着")
+        await session.sendCurrentDraft()
+
+        #expect(try #require(notices.posted.first).body.hasPrefix("「问候语改成 world」"))
+    }
+
+    @Test func aRedoQuotesTheOriginalRequest() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        _ = try await recordFailedCodexHandOff(project: project, historyURL: historyURL)
+        let notices = RecordingNoticePoster()
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print world > greeting.txt"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "重做", refersTo: 1, project: "record")],
+            history: DelegationHistory(fileURL: historyURL), notices: notices)
+        await session.send("上次那个再做一次")
+        await session.sendCurrentDraft()
+
+        #expect(try #require(notices.posted.first).body.hasPrefix("「日志窗口改成中文」"))
+    }
+
+    @Test func newFilesLeftUncommittedAreNotCalledNoChange() async throws {
+        let project = try await makeProject()
+        let notices = RecordingNoticePoster()
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print new > brand-new.txt"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "加一个文件")], notices: notices)
+        await session.send("加一个文件")
+        await session.sendCurrentDraft()
+
+        let notice = try #require(notices.posted.first)
+        #expect(notice.category == .noChange)
+        #expect(notice.body.contains("没有提交任何改动；它新建的 1 个文件没提交，已随工作区清掉"))
+        #expect(!notice.body.contains("没有任何改动"))
+    }
+
+    @Test func whenNotificationsAreOffSheSaysSoOnce() async throws {
+        let project = try await makeProject()
+        let notices = RecordingNoticePoster()
+        notices.allowed = false
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print world > greeting.txt"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改成 world"),
+                      modelReply(say: "看一眼草稿。", action: "draft", draft: "再改一次")],
+            notices: notices)
+        await session.send("问候语改成 world")
+        await session.sendCurrentDraft()
+        await session.discardPendingChange()
+        await session.send("再改一次")
+        await session.sendCurrentDraft()
+
+        let told = herLines(session).filter { $0.hasPrefix("系统通知被关了") }
+        #expect(told == ["系统通知被关了：这次做完我不会弹提醒，回来看这里就行。要开的话去 系统设置 → 通知 → Her。"])
+    }
+
+    @Test func aDecisionStillOwedComesBackAfterARestartAndCanBeMerged() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        let notices = RecordingNoticePoster()
+        let before = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print world > greeting.txt", summary: "- **修改位置**: greeting.txt 第 1 行"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改成 world")],
+            history: DelegationHistory(fileURL: historyURL), notices: notices)
+        await before.send("问候语改成 world")
+        await before.sendCurrentDraft()
+        let recordID = try #require(notices.posted.first?.recordID)
+
+        // Her quits before the user decides; a new launch reads the same record.
+        let after = try makeSession(project: project, claude: "/nonexistent/claude", replies: [],
+                                    history: DelegationHistory(fileURL: historyURL), notices: notices)
+        #expect(after.phase == .awaitingDecision)
+        let resumed = try #require(herLines(after).first)
+        #expect(resumed.hasPrefix("Her 重启前的这件事还在等你决定："))
+        #expect(resumed.hasSuffix("的「问候语改成 world」：改了 1 个文件（greeting.txt）。"),
+                "One short line; the tool's own explanation is in the receipt below it")
+        #expect(reports(after).first?.receipt.changedFiles == ["greeting.txt"])
+
+        await after.mergePendingChange()
+        #expect(try greeting(project) == "world\n")
+        #expect(notices.withdrawn == [recordID], "The notice leaves Notification Center once decided")
+        let again = try makeSession(project: project, claude: "/nonexistent/claude", replies: [],
+                                    history: DelegationHistory(fileURL: historyURL))
+        #expect(again.phase == .idle, "A decided change does not come back")
+    }
+
+    @Test func clickingANoticeWhoseReceiptIsGoneSaysWhatItWas() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        _ = try await recordFailedCodexHandOff(project: project, historyURL: historyURL)
+        let notices = RecordingNoticePoster()
+        let session = try makeSession(project: project, claude: "/nonexistent/claude", replies: [],
+                                      history: DelegationHistory(fileURL: historyURL), notices: notices)
+        let id = try #require(noticeRecordID(historyURL))
+
+        session.openNotice(for: id)
+
+        let line = try #require(herLines(session).last)
+        #expect(line.hasPrefix("你点开的是这件事："))
+        #expect(line.contains("交给 Codex 的「日志窗口改成中文」：没做成。原始报错："))
+        #expect(notices.withdrawn == [id])
+    }
+
+    @Test func anEditMadeByHandWhileHerRunsIsKept() throws {
+        let rulesURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/notice-rules.json")
+        let rules = DelegationNoticeRules(fileURL: rulesURL)
+        rules.silence(.failed)
+        let handEdited = """
+        [{"category":"failed","createdAt":"2026-09-27T10:00:00Z"},{"category":"noChange","createdAt":"2026-09-27T10:01:00Z"}]
+        """
+        try handEdited.write(to: rulesURL, atomically: true, encoding: .utf8)
+
+        rules.restore(.failed)
+
+        #expect(DelegationNoticeRules(fileURL: rulesURL).rules.map(\.category) == [.noChange])
+    }
+
+    @Test func aHandOffYouStoppedIsNotAnnounced() async throws {
+        let project = try await makeProject()
+        let notices = RecordingNoticePoster()
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: "sleep 30"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "慢慢改")], notices: notices)
+        await session.send("慢慢改")
+        async let sent: Void = session.sendCurrentDraft()
+        try await Task.sleep(nanoseconds: 500_000_000)
+        session.stop()
+        await sent
+
+        #expect(reports(session).first?.receipt.outcome == .cancelled)
+        #expect(notices.posted.isEmpty)
+    }
+
+    @Test func theMacIsKeptAwakeOnlyWhileTheToolRuns() async throws {
+        let project = try await makeProject()
+        let marker = try makeTemporaryDirectory() + "/tool-ran"
+        let keepAwake = RecordingKeepAwake(marker: marker)
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: "touch '\(marker)'; print world > greeting.txt"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改成 world")], keepAwake: keepAwake)
+        await session.send("问候语改成 world")
+        await session.sendCurrentDraft()
+
+        #expect(keepAwake.events == ["begin before the tool ran", "end after the tool ran"])
+    }
+
+    @Test func anUnreadableRulesFileIsKeptAsideNotOverwritten() async throws {
+        let directory = try makeTemporaryDirectory()
+        let rulesURL = URL(fileURLWithPath: directory + "/notice-rules.json")
+        try "not json".write(to: rulesURL, atomically: true, encoding: .utf8)
+
+        let rules = DelegationNoticeRules(fileURL: rulesURL)
+        #expect(rules.rules.isEmpty)
+        rules.silence(.noChange)
+        let kept = try FileManager.default.contentsOfDirectory(atPath: directory).filter { $0.contains("unreadable") }
+        #expect(kept.count == 1)
+        #expect(try String(contentsOfFile: directory + "/" + kept[0], encoding: .utf8) == "not json")
+        #expect(DelegationNoticeRules(fileURL: rulesURL).silences(.noChange))
+    }
+
     @Test func noHistoryMeansHerSaysSheHasNoRecord() async throws {
         let project = try await makeProject()
         let session = try makeSession(project: project, claude: "/nonexistent/claude", replies: [modelReply(say: "好。")])
@@ -890,22 +1566,49 @@ struct DelegationSessionTests {
 @MainActor
 final class ScreenGoalRecorder {
     var goals: [String] = []
+    /// What JEV reports back; nil leaves the goal unfinished.
+    var result: String?
 }
 
 /// Answers the StepFun chat endpoint with queued model contents, in order.
+@MainActor
+final class RecordingNoticePoster: DelegationNoticePoster {
+    var allowed = true
+    private(set) var prepared = 0
+    private(set) var posted: [DelegationNotice] = []
+    private(set) var withdrawn: [UUID] = []
+    func prepare() async -> Bool { prepared += 1; return allowed }
+    func post(_ notice: DelegationNotice) { posted.append(notice) }
+    func withdraw(_ recordID: UUID) { withdrawn.append(recordID) }
+}
+
+/// Notes whether the stub tool had run at each begin and end.
+@MainActor
+final class RecordingKeepAwake: DelegationKeepAwake {
+    private let marker: String
+    private(set) var events: [String] = []
+    init(marker: String) { self.marker = marker }
+    func begin(reason: String) { events.append("begin " + (FileManager.default.fileExists(atPath: marker) ? "after" : "before") + " the tool ran") }
+    func end() { events.append("end " + (FileManager.default.fileExists(atPath: marker) ? "after" : "before") + " the tool ran") }
+}
+
 final class ScriptedStepFun: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var replies: [String] = []
     nonisolated(unsafe) private static var recordedSystemMessages: [String] = []
+    nonisolated(unsafe) private static var recordedUserMessages: [String] = []
 
     static func queue(_ contents: [String]) {
         lock.withLock {
             replies = contents
             recordedSystemMessages = []
+            recordedUserMessages = []
         }
     }
     static var remaining: Int { lock.withLock { replies.count } }
     static var systemMessages: [String] { lock.withLock { recordedSystemMessages } }
+    /// Per request, every user-role message it carried, joined by newlines.
+    static var userMessages: [String] { lock.withLock { recordedUserMessages } }
 
     override class func canInit(with request: URLRequest) -> Bool {
         request.url == DelegationModelClient.endpoint
@@ -918,6 +1621,8 @@ final class ScriptedStepFun: URLProtocol, @unchecked Sendable {
            let messages = object["messages"] as? [[String: String]],
            let systemMessage = messages.first(where: { $0["role"] == "system" })?["content"] {
             Self.lock.withLock { Self.recordedSystemMessages.append(systemMessage) }
+            let users = messages.filter { $0["role"] == "user" }.compactMap { $0["content"] }.joined(separator: "\n")
+            Self.lock.withLock { Self.recordedUserMessages.append(users) }
         }
         let content: String? = Self.lock.withLock { Self.replies.isEmpty ? nil : Self.replies.removeFirst() }
         let status = content == nil ? 500 : 200

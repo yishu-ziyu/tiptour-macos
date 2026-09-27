@@ -101,7 +101,7 @@ struct CodingAgentDelegationTests {
         let receipt = await delegation.run(prompt: "change the greeting", in: workspace) { _ in }
         #expect(receipt.outcome == .changed)
 
-        _ = try await delegation.merge(workspace, commitMessage: "Change greeting")
+        _ = try await delegation.merge(receipt, commitMessage: "Change greeting")
         let merged = try String(contentsOfFile: project.repositoryPath + "/greeting.txt", encoding: .utf8)
         #expect(merged == "world\n")
         #expect(try String(contentsOfFile: project.repositoryPath + "/notes.txt", encoding: .utf8) == "draft, still editing\n")
@@ -159,10 +159,10 @@ struct CodingAgentDelegationTests {
                                       events: [successEvent])
         let delegation = CodingAgentDelegation(claudeCommand: stub, worktreesRootPath: try makeTemporaryDirectory())
         let workspace = try await delegation.prepareWorkspace(for: project, taskSlug: "notes")
-        _ = await delegation.run(prompt: "rewrite notes", in: workspace) { _ in }
+        let receipt = await delegation.run(prompt: "rewrite notes", in: workspace) { _ in }
 
         await #expect(throws: DelegationError.self) {
-            _ = try await delegation.merge(workspace, commitMessage: "Rewrite notes")
+            _ = try await delegation.merge(receipt, commitMessage: "Rewrite notes")
         }
         #expect(try String(contentsOfFile: project.repositoryPath + "/notes.txt", encoding: .utf8) == "draft, still editing\n")
         #expect(FileManager.default.fileExists(atPath: workspace.worktreePath), "The work survives for another try")
@@ -197,7 +197,7 @@ struct CodingAgentDelegationTests {
         #expect(receipt.untrackedFiles == [".statamcp/debug.txt"])
         #expect(receipt.changedFiles == ["greeting.txt"])
 
-        _ = try await delegation.merge(workspace, commitMessage: "Change greeting")
+        _ = try await delegation.merge(receipt, commitMessage: "Change greeting")
         #expect(!FileManager.default.fileExists(atPath: project.repositoryPath + "/.statamcp/debug.txt"))
     }
 

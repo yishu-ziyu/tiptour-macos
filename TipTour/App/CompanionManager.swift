@@ -221,6 +221,12 @@ final class CompanionManager: ObservableObject {
     private var highlightTransitionCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     private lazy var textCommandPanelManager = TextCommandPanelManager(companionManager: self)
+    /// 「这类不再提醒」 rules, shared by hand-off notices and Settings.
+    let delegationNoticeRules = DelegationNoticeRules(fileURL: DelegationNoticeRules.defaultFileURL)
+    private lazy var delegationNoticeCenter = DelegationNoticeCenter(
+        onOpen: { [weak self] recordID in self?.openDelegationNotice(recordID) },
+        onSilence: { [weak self] category, recordID in self?.silenceDelegationNotices(category, from: recordID) })
+    private let delegationKeepAwake = SystemKeepAwake()
     private var detectionOverlayTask: Task<Void, Never>?
     private var nativeDetectionGeneration = 0
     private var postActionDetectionRefreshTask: Task<Void, Never>?
@@ -868,6 +874,11 @@ final class CompanionManager: ObservableObject {
         let systemWide = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(systemWide, 0.4)
 
+        hasStarted = true
+        if let recordID = noticeOpenedBeforeStart {
+            noticeOpenedBeforeStart = nil
+            openDelegationNotice(recordID)
+        }
         bindShortcutTransitions()
         bindTextCommandShortcut()
         bindRadialInputShortcut()
@@ -1596,11 +1607,61 @@ final class CompanionManager: ObservableObject {
                 await DelegationProjectLocator.mostRecentProject(
                     excludedPathPrefixes: DelegationProjectLocator.defaultExcludedPathPrefixes(worktreesRootPath: worktreesRootPath))
             },
-            onScreenGoal: { [weak self] goal in self?.submitTextCommand(goal) },
-            history: DelegationHistory(fileURL: DelegationHistory.defaultFileURL)
+            onScreenGoal: { [weak self] goal, finished in
+                guard let self else { return finished("Her 没能接下这件事。") }
+                self.submitTextCommand(goal, onFinish: finished)
+            },
+            history: DelegationHistory(fileURL: DelegationHistory.defaultFileURL),
+            noticePoster: delegationNoticeCenter,
+            noticeRules: delegationNoticeRules,
+            isUserLooking: { [weak self] in self?.userIsLookingAtConversation() == true },
+            keepAwake: delegationKeepAwake
         )
         delegationSession = session
         return session
+    }
+
+    private var hasStarted = false
+    /// A notice clicked before `start()` finished, opened once it has.
+    private var noticeOpenedBeforeStart: UUID??
+
+    /// Called from `applicationWillFinishLaunching`, before any await: a
+    /// click that launches Her reaches the delegate only if it is set this early.
+    func prepareDelegationNotices() {
+        _ = delegationNoticeCenter
+    }
+
+    private var noticeOpenedAt: Date?
+
+    /// A notice was clicked in the last two seconds.
+    var openedNoticeJustNow: Bool {
+        noticeOpenedAt.map { Date().timeIntervalSince($0) < 2 } ?? false
+    }
+
+    private func openDelegationNotice(_ recordID: UUID?) {
+        noticeOpenedAt = Date()
+        guard hasStarted else {
+            noticeOpenedBeforeStart = .some(recordID)
+            return
+        }
+        presentTextCommandPanel()
+        delegationSession?.openNotice(for: recordID)
+    }
+
+    /// The panel counts as watched only while it has the keyboard, the user
+    /// touched the Mac in the last minute and the screen is not locked.
+    private func userIsLookingAtConversation() -> Bool {
+        guard textCommandPanelManager.hasKeyboardFocus else { return false }
+        let anyInput = CGEventType(rawValue: ~0) ?? .null
+        let idleSeconds = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput)
+        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+        let screenLocked = session?["CGSSessionScreenIsLocked"] as? Bool ?? false
+        return idleSeconds < 60 && !screenLocked
+    }
+
+    private func silenceDelegationNotices(_ category: DelegationNoticeCategory, from recordID: UUID?) {
+        delegationNoticeRules.silence(category, from: recordID)
+        delegationNoticeCenter.confirmSilenced(category)
     }
 
     func resizeConversationPanel(height: CGFloat, hasEntries: Bool) {
@@ -2337,10 +2398,16 @@ final class CompanionManager: ObservableObject {
         return true
     }
 
-    func submitTextCommand(_ prompt: String) {
-        guard !isTextCommandRunning, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    /// `onFinish` hears once what happened, including a refusal to start.
+    func submitTextCommand(_ prompt: String, onFinish: (@MainActor (String) -> Void)? = nil) {
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !isTextCommandRunning else {
+            onFinish?("没有开始：上一件屏幕上的事还在做。")
+            return
+        }
         guard DesktopTaskAdmission.allowsCurrentTask else {
             textCommandActivityText = "当前任务仍保留桌面控制权，请先继续或取消该任务。"
+            onFinish?("没有开始：" + textCommandActivityText!)
             return
         }
         // JEV needs its own key to talk to TypeSafe. A key that is saved but
@@ -2349,10 +2416,12 @@ final class CompanionManager: ObservableObject {
         guard jevKey.state == .available, !(jevKey.value ?? "").isEmpty else {
             publishedTextKeyFailure = jevKey.state.userMessage(subject: "JEV 密钥")
             textCommandActivityText = publishedTextKeyFailure
+            onFinish?("没有开始：" + (publishedTextKeyFailure ?? "JEV 密钥读不到。"))
             return
         }
         let runID = UUID()
         textCommandRunID = runID
+        textCommandFinishHandler = onFinish
         isTextCommandRunning = true
         jevStep = nil
         textCommandPanelManager.setResultsHeight(0)
@@ -2373,13 +2442,23 @@ final class CompanionManager: ObservableObject {
 
     func cancelTextCommand() {
         guard isTextCommandRunning else { return }
+        reportTextCommandEnd("你停下了。")
         textCommandRunID = nil
         textCommandTask?.cancel()
         WorkflowRunner.shared.stop()
         finishTextCommand()
         jevStep = nil
         textCommandPanelManager.setResultsHeight(0)
-        textCommandActivityText = "Stopped"
+        textCommandActivityText = "停下了"
+    }
+
+    private var textCommandFinishHandler: (@MainActor (String) -> Void)?
+
+    /// Tells whoever asked for this run how it ended, once.
+    private func reportTextCommandEnd(_ result: String) {
+        let handler = textCommandFinishHandler
+        textCommandFinishHandler = nil
+        handler?(result)
     }
 
     private func finishTextCommand() {
@@ -2397,18 +2476,19 @@ final class CompanionManager: ObservableObject {
         PipelineLogStore.shared.record(category: "text_command", name: "submitted",
             status: "received", message: trimmedPrompt)
         voiceState = .processing
-        textCommandActivityText = "JEV is looking at the screen"
+        textCommandActivityText = "JEV 正在看屏幕"
         textCommandPanelManager.setTrackingFrozen(true)
         let loop = JevPointerLoop(engine: engineFacade) { [weak self] snapshot in
             guard let self, self.textCommandRunID == runID else { return }
             self.jevStep = snapshot
             self.textCommandPanelManager.setResultsHeight(JevStepPanelView.height(for: snapshot))
             self.textCommandActivityText = snapshot.note.isEmpty
-                ? "Step \(snapshot.step) — \(snapshot.detected) elements"
+                ? "第 \(snapshot.step) 步，看到 \(snapshot.detected) 个控件"
                 : snapshot.note
         }
         let outcome = await loop.run(task: trimmedPrompt, app: currentPointerTargetAppName())
         guard textCommandRunID == runID else { return }
+        reportTextCommandEnd(outcome.message)
         textCommandActivityText = outcome.message
         if !outcome.ok { lastTranscript = outcome.message }
         PipelineLogStore.shared.record(category: "jev_loop", name: "finished",

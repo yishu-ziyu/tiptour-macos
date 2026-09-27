@@ -13,6 +13,7 @@
 //  never by what the agent says about itself.
 //
 
+import CryptoKit
 import Foundation
 
 /// A git repository the user works in.
@@ -28,6 +29,9 @@ struct DelegationWorkspace: Equatable, Sendable {
     let branchName: String
     let worktreePath: String
     let baseCommit: String
+    /// The project's branch when the workspace was made; the change is merged
+    /// only into this branch. Nil for a detached HEAD or an older record.
+    var projectBranch: String? = nil
 }
 
 enum DelegationOutcome: Equatable, Sendable {
@@ -70,6 +74,9 @@ struct DelegationReceipt: Equatable, Sendable {
     /// Identifies the selected CLI's conversation for later reference.
     let agentSessionID: String?
     var agentTool: DelegationAgentTool = .claudeCode
+    /// Fingerprint of the tracked changes the user was shown; a merge goes
+    /// ahead only while the workspace still matches it. Empty when unknown.
+    var diffDigest: String = ""
 }
 
 enum DelegationProgress: Equatable, Sendable {
@@ -80,6 +87,11 @@ enum DelegationProgress: Equatable, Sendable {
 enum DelegationError: Error, Equatable, LocalizedError {
     case gitFailed(command: String, message: String)
     case mergeRefused(message: String)
+    /// The workspace no longer holds what the user reviewed; nothing was merged.
+    /// Carries the receipt read back just now.
+    case changedSinceReview(DelegationReceipt)
+    /// The project is on another branch than when the task started; nothing was merged.
+    case branchMoved(expected: String, current: String)
 
     var errorDescription: String? {
         switch self {
@@ -87,6 +99,10 @@ enum DelegationError: Error, Equatable, LocalizedError {
             return "git \(command) 失败：\(message)"
         case .mergeRefused(let message):
             return "没能合并：\(message)"
+        case .changedSinceReview:
+            return "你看过之后工作区又变了，没有合进去"
+        case .branchMoved(let expected, let current):
+            return "任务开始时项目在 \(expected) 分支，现在在 \(current.isEmpty ? "没有分支的提交" : current)，没有合进去"
         }
     }
 }
@@ -306,7 +322,10 @@ final class CodingAgentDelegation: @unchecked Sendable {
         guard add.exitStatus == 0 else {
             throw DelegationError.gitFailed(command: "worktree add", message: add.standardError)
         }
-        return DelegationWorkspace(project: project, branchName: branchName, worktreePath: worktreePath, baseCommit: baseCommit)
+        let branch = await DelegationCommand.git(["branch", "--show-current"], inDirectory: project.repositoryPath)
+        let projectBranch = branch.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        return DelegationWorkspace(project: project, branchName: branchName, worktreePath: worktreePath, baseCommit: baseCommit,
+                                   projectBranch: projectBranch.isEmpty ? nil : projectBranch)
     }
 
     private static func branchSafe(_ slug: String) -> String {
@@ -463,13 +482,8 @@ final class CodingAgentDelegation: @unchecked Sendable {
         failure: String?,
         cancelled: Bool
     ) async -> DelegationReceipt {
-        let worktree = workspace.worktreePath
-        // Compares the worktree (committed and uncommitted tracked edits) with
-        // the base, so work Claude Code forgot to commit still counts.
-        let changedNames = await DelegationCommand.git(["diff", "--name-only", workspace.baseCommit], inDirectory: worktree)
-        let stat = await DelegationCommand.git(["diff", "--stat", workspace.baseCommit], inDirectory: worktree)
-        let untracked = await DelegationCommand.git(["ls-files", "--others", "--exclude-standard"], inDirectory: worktree)
-        let changedFiles = Self.lines(changedNames.standardOutput)
+        let contents = await Self.contents(of: workspace)
+        let changedFiles = contents.changedFiles
         let outcome: DelegationOutcome
         if cancelled {
             outcome = .cancelled
@@ -483,13 +497,34 @@ final class CodingAgentDelegation: @unchecked Sendable {
             outcome: outcome,
             agentSummary: agentResult.summary.trimmingCharacters(in: .whitespacesAndNewlines),
             changedFiles: changedFiles,
-            untrackedFiles: Self.lines(untracked.standardOutput),
-            diffStat: stat.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines),
+            untrackedFiles: contents.untrackedFiles,
+            diffStat: contents.diffStat,
             costInUSD: agentResult.costInUSD,
             durationMilliseconds: agentResult.durationMilliseconds,
             agentSessionID: agentResult.sessionID,
-            agentTool: tool
+            agentTool: tool,
+            diffDigest: contents.diffDigest
         )
+    }
+
+    private struct WorkspaceContents: Equatable {
+        let changedFiles: [String]
+        let untrackedFiles: [String]
+        let diffStat: String
+        let diffDigest: String
+    }
+
+    /// Compares the worktree (committed and uncommitted tracked edits) with
+    /// the base, so work the tool forgot to commit still counts.
+    private static func contents(of workspace: DelegationWorkspace) async -> WorkspaceContents {
+        let worktree = workspace.worktreePath
+        let changedNames = await DelegationCommand.git(["diff", "--name-only", workspace.baseCommit], inDirectory: worktree)
+        let stat = await DelegationCommand.git(["diff", "--stat", workspace.baseCommit], inDirectory: worktree)
+        let patch = await DelegationCommand.git(["diff", workspace.baseCommit], inDirectory: worktree)
+        let untracked = await DelegationCommand.git(["ls-files", "--others", "--exclude-standard"], inDirectory: worktree)
+        let digest = SHA256.hash(data: Data(patch.standardOutput.utf8)).map { String(format: "%02x", $0) }.joined()
+        return WorkspaceContents(changedFiles: lines(changedNames.standardOutput), untrackedFiles: lines(untracked.standardOutput),
+                                 diffStat: stat.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines), diffDigest: digest)
     }
 
     private static func lines(_ text: String) -> [String] {
@@ -498,13 +533,29 @@ final class CodingAgentDelegation: @unchecked Sendable {
 
     // MARK: - After the user decides
 
-    /// Merges the workspace branch into the project's current branch, then
-    /// removes the workspace. Tracked edits Claude Code left uncommitted are
-    /// committed first; untracked files are left out on purpose.
+    /// Merges what the user reviewed into the branch the task started from,
+    /// then removes the workspace. Tracked edits the tool left uncommitted are
+    /// committed first; untracked files are left out on purpose. Nothing is
+    /// merged when the workspace changed since `reviewed` was read back, or
+    /// when the project has moved to another branch.
     ///
     /// Returns the project's new HEAD.
-    func merge(_ workspace: DelegationWorkspace, commitMessage: String) async throws -> String {
+    func merge(_ reviewed: DelegationReceipt, commitMessage: String) async throws -> String {
+        let workspace = reviewed.workspace
         let worktree = workspace.worktreePath
+        let now = await Self.contents(of: workspace)
+        guard !reviewed.diffDigest.isEmpty, now.diffDigest == reviewed.diffDigest else {
+            throw DelegationError.changedSinceReview(DelegationReceipt(
+                workspace: workspace, outcome: now.changedFiles.isEmpty ? .noChange : .changed,
+                agentSummary: reviewed.agentSummary, changedFiles: now.changedFiles, untrackedFiles: now.untrackedFiles,
+                diffStat: now.diffStat, costInUSD: reviewed.costInUSD, durationMilliseconds: reviewed.durationMilliseconds,
+                agentSessionID: reviewed.agentSessionID, agentTool: reviewed.agentTool, diffDigest: now.diffDigest))
+        }
+        if let expected = workspace.projectBranch {
+            let branch = await DelegationCommand.git(["branch", "--show-current"], inDirectory: workspace.project.repositoryPath)
+            let current = branch.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard current == expected else { throw DelegationError.branchMoved(expected: expected, current: current) }
+        }
         let pending = await DelegationCommand.git(["diff", "--name-only", "HEAD"], inDirectory: worktree)
         if !Self.lines(pending.standardOutput).isEmpty {
             _ = await DelegationCommand.git(["add", "-u"], inDirectory: worktree)

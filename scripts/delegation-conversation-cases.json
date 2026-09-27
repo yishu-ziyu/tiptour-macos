@@ -1,0 +1,42 @@
+[
+  {
+    "id": "fix-receipt-original",
+    "words": "上次 Codex 那个失败提示我看不懂，改一下",
+    "expect": "action=draft。草稿在 os（Her 自己的代码）里改 Her 显示委派失败的回执写法：大白话、说清下一步、原始报错保留供排查；点明是那次 Codex 502 失败并原样附上当时的原话；不自行换执行工具。say 用一句大白话解释那句报错，且不把本机 127.0.0.1 的错误说成对方服务器。草稿必须绑定 Her 自己的代码 /Users/mahaoxuan/Desktop/AI 产品/os，而不是最近用过的项目"
+  },
+  {
+    "id": "fix-receipt-casual",
+    "words": "刚才那个报错我看不懂，你给改改",
+    "expect": "同 fix-receipt-original：改 Her 的失败回执写法并附原话；不理解成重交任务。草稿必须绑定 Her 自己的代码 /Users/mahaoxuan/Desktop/AI 产品/os，而不是最近用过的项目"
+  },
+  {
+    "id": "fix-receipt-plain-words",
+    "words": "Codex 那次失败给我看的那句话太技术了，能不能改成人话",
+    "expect": "同 fix-receipt-original：草稿改 Her 显示失败的写法，附原话。草稿必须绑定 Her 自己的代码 /Users/mahaoxuan/Desktop/AI 产品/os，而不是最近用过的项目"
+  },
+  {
+    "id": "fix-receipt-502",
+    "words": "那个 502 的提示改一下吧，我看不明白",
+    "expect": "同 fix-receipt-original：草稿改 Her 显示失败的写法，附原话。草稿必须绑定 Her 自己的代码 /Users/mahaoxuan/Desktop/AI 产品/os，而不是最近用过的项目"
+  },
+  {
+    "id": "explain-only",
+    "words": "上次 Codex 为什么失败了？",
+    "expect": "action=none。用大白话解释：执行工具连本机 127.0.0.1:10101 的转发服务时收到 502，所以没做成；不说是 Codex 服务器或用户项目的问题；不写草稿"
+  },
+  {
+    "id": "retry-task",
+    "words": "上次 Codex 那个任务再交一次",
+    "expect": "action=draft。草稿是原来那件事（把日志窗口改成中文），写明是重做那次失败的任务；不去改失败回执；不自行换执行工具，可提醒用户在草稿里选 Codex。草稿必须绑定那次任务的项目 /Users/mahaoxuan/Desktop/AI 产品/os"
+  },
+  {
+    "id": "retry-with-kimi",
+    "words": "上次那个日志窗口改中文的活，换 Kimi 再做一次",
+    "expect": "action=draft。草稿是日志窗口中文化那件事；提醒用户在草稿的「执行工具」里选 Kimi Code，不声称已经切换。草稿必须绑定那次任务的项目 /Users/mahaoxuan/Desktop/AI 产品/os"
+  },
+  {
+    "id": "too-vague",
+    "words": "上次那个改一下",
+    "expect": "action=none。一句话问清要改什么（是那次任务本身，还是失败时的提示），不编造；也可接受：先说出记录里是哪次任务再问"
+  }
+]

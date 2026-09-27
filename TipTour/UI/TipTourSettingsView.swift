@@ -204,6 +204,8 @@ struct TipTourSettingsView: View {
             )
 
             note("「发送截图」只决定画面会不会发出去；本机看屏幕、定位目标和安全检查不受影响。")
+
+            SilencedNoticesList(rules: companionManager.delegationNoticeRules)
         }
     }
 
@@ -522,5 +524,38 @@ private struct SettingsPointerMark: Shape {
         )
         path.closeSubpath()
         return path
+    }
+}
+
+/// 「这类不再提醒」 rules the user set from a notice, each with a way back.
+private struct SilencedNoticesList: View {
+    @ObservedObject var rules: DelegationNoticeRules
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("已关掉的提醒")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(DS.Colors.textSecondary)
+            if rules.rules.isEmpty {
+                Text("交出去的任务结束时，你不在看面板，她就发一条通知。还没有关掉任何一类。")
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(rules.rules, id: \.category) { rule in
+                HStack {
+                    Text("「\(rule.category.displayName)」不再通知")
+                        .font(.system(size: 12))
+                        .foregroundColor(DS.Colors.textSecondary)
+                    Spacer(minLength: 12)
+                    Button("恢复") { rules.restore(rule.category) }
+                        .buttonStyle(.plain)
+                        .foregroundColor(DS.Colors.accent)
+                        .pointerCursor()
+                }
+            }
+        }
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

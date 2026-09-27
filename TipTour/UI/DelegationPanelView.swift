@@ -379,6 +379,12 @@ private struct ReportCard: View {
     let onMerge: () -> Void
     let onDiscard: () -> Void
 
+    /// Coding tools answer in Markdown; bold and code spans are shown, not their asterisks.
+    static func inlineMarkdown(_ text: String) -> AttributedString {
+        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            ?? AttributedString(text)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(report.headline)
@@ -420,7 +426,7 @@ private struct ReportCard: View {
                 .foregroundStyle(.secondary)
             }
             if !report.receipt.agentSummary.isEmpty {
-                Text("\(report.receipt.agentTool.displayName) 说：\(report.receipt.agentSummary)")
+                Text(Self.inlineMarkdown("\(report.receipt.agentTool.displayName) 说：\(report.receipt.agentSummary)"))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .lineSpacing(4)

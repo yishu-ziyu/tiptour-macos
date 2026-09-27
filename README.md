@@ -20,7 +20,7 @@ Open settings from **Her → 设置…** or **⌘,**; both open Her's existing s
 - Voice modes send microphone audio to the provider. The StepFun realtime model never receives images directly; when screenshots are enabled, a screen question sends one captured image of the target window to StepFun's vision model.
 - JEV receives your typed task, locally detected labels and locations, and recent action history; screenshots stay local.
 - Accessibility is needed to inspect and control apps. Screen Recording enables screenshots and local screen detection; nothing records video.
-- Confirmed coding tasks use the selected CLI's existing authentication and headless execution policy. Step Code's per-task automatic approval was explicitly authorized; a Git worktree is not a system sandbox. Her does not copy CLI credentials or automatically merge changes.
+- Confirmed coding tasks use the selected CLI's existing authentication and headless execution policy. Step Code's per-task automatic approval was explicitly authorized; a Git worktree is not a system sandbox. Her does not copy CLI credentials or automatically merge changes. When a task ends while you are away she sends one local macOS notification (permission is asked at the first hand-off) and keeps the Mac from idle sleep only while the tool runs; you can turn off a kind of notice from the notification itself and turn it back on under Settings → 隐私.
 
 ## Build
 

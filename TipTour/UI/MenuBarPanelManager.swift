@@ -124,8 +124,10 @@ final class MenuBarPanelManager: NSObject {
 
     /// Opens the panel automatically on app launch so the user sees
     /// permissions and the start button right away.
-    func showPanelOnLaunch() {
+    /// `skip` is asked when the panel is about to appear.
+    func showPanelOnLaunch(unless skip: @escaping @MainActor () -> Bool = { false }) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            guard !skip() else { return }
             self.showPanel()
         }
     }

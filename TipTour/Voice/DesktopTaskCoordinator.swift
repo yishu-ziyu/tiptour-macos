@@ -432,7 +432,7 @@ final class DesktopTaskCoordinator {
                 // ask the model for the next-best candidate — that is how one
                 // uncertain click turned into a click on something else.
                 guard let resolution = uncertainResolution else {
-                    return finish("uncertain_effect", "上一轮操作的结果仍未确认，已停在这里，不会改试其他目标。请确认实际结果，或用 uncertain_resolution 明确指示：confirmed_succeeded / confirmed_failed / retry_same / replace_target。")
+                    return finish("uncertain_effect", "上一步的结果还未确认，已停下，不会换别的目标去试。你看一眼它生效了没有，告诉我成了还是没成；要重试或者换目标，也直接说。")
                 }
                 switch resolution {
                 case .confirmedSucceeded:
@@ -470,7 +470,7 @@ final class DesktopTaskCoordinator {
                                  "promoted_to_verified": "false"])
                 case .retrySame:
                     guard resumesSameTask else {
-                        return finish("uncertain_effect", "retry_same 只能用于同一目标的续接；更换目标请用 correct 加 replace_target。")
+                        return finish("uncertain_effect", "上一步的结果还未确认，已停下。重试只能针对同一个目标；要换目标，请直接说换成哪个。")
                     }
                     // Pin the recorded target so the retry cannot let the
                     // decision layer quietly pick the runner-up candidate.
@@ -487,14 +487,14 @@ final class DesktopTaskCoordinator {
                                  "pinned_target": String(pinnedRetryTarget != nil)])
                 case .replaceTarget:
                     guard isCorrection else {
-                        return finish("uncertain_effect", "replace_target 需要 corrective 指令（intent=correct）和明确的新目标。")
+                        return finish("uncertain_effect", "上一步的结果还未确认，已停下。要换目标，请说清换成哪一个。")
                     }
                     let explicitlyTargeted = requestedPlan.allSatisfy { step in
                         !step.action.needsTarget || step.targetLabel != nil || step.region != nil
                             || (step.anchorLabel != nil && step.relation != nil)
                     }
                     guard explicitlyTargeted else {
-                        return finish("needs_clarification", "replace_target 需要明确的新目标名称或位置，不能交给模型重新挑选。")
+                        return finish("needs_clarification", "要换成哪个目标？请说出它的名字或位置，我不会自己挑。")
                     }
                     uncertainEffects = []
                     DesktopVoiceTrace.event("uncertain_resolved", turnID: turnID,

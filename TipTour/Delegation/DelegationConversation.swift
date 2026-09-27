@@ -27,21 +27,45 @@ enum DelegationTurnAction: Equatable, Sendable {
     case screen(goal: String)
 }
 
+/// Which repository a draft should change, as the model sees it; the session
+/// resolves it to a path and never lets it override the user's own choice.
+enum DelegationProjectChoice: String, Sendable {
+    /// The project in the prompt's 「当前项目」.
+    case current
+    /// The project of the earlier hand-off named by `refersTo`.
+    case record
+    /// Her's own source repository.
+    case her
+}
+
 struct DelegationTurn: Equatable, Sendable {
     let say: String
     let action: DelegationTurnAction
     /// True when the say-do guard had to ask the model a second time.
     let neededCorrection: Bool
+    /// The earlier hand-off this turn is about: its number in the list the
+    /// model was shown (1 = newest), or nil.
+    let refersTo: Int?
+    let project: DelegationProjectChoice
 }
 
 enum DelegationConversationError: Error, LocalizedError, Equatable {
     case http(status: Int, body: String)
     case unreadableAnswer(String)
+    /// The model returned no text at all; the detail says why it stopped.
+    case emptyAnswer(detail: String)
+
+    /// The model did answer, but the answer could not be used.
+    var isUnusableAnswer: Bool {
+        if case .http = self { return false }
+        return true
+    }
 
     var errorDescription: String? {
         switch self {
         case .http(let status, let body): return "阶跃接口返回 \(status)：\(body.prefix(200))"
         case .unreadableAnswer(let detail): return "没读懂模型的回答：\(detail.prefix(200))"
+        case .emptyAnswer(let detail): return "模型没给出回答（停止原因：\(detail)）"
         }
     }
 }
@@ -57,11 +81,14 @@ final class DelegationModelClient: @unchecked Sendable {
 
     private let apiKey: String
     private let model: String
+    private let reasoningEffort: String
     private let session: URLSession
 
-    init(apiKey: String, model: String = DelegationModelClient.defaultModel, session: URLSession? = nil) {
+    init(apiKey: String, model: String = DelegationModelClient.defaultModel, reasoningEffort: String = "low",
+         session: URLSession? = nil) {
         self.apiKey = apiKey
         self.model = model
+        self.reasoningEffort = reasoningEffort
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 60
         self.session = session ?? URLSession(configuration: configuration)
@@ -71,9 +98,9 @@ final class DelegationModelClient: @unchecked Sendable {
         let body: [String: Any] = [
             "model": model,
             "messages": messages.map { ["role": $0.role.rawValue, "content": $0.content] },
-            "max_tokens": 2000,
+            "max_tokens": 4000,
             "temperature": 0.3,
-            "reasoning_effort": "low",
+            "reasoning_effort": reasoningEffort,
             "response_format": ["type": "json_object"],
         ]
         var request = URLRequest(url: Self.endpoint)
@@ -87,10 +114,14 @@ final class DelegationModelClient: @unchecked Sendable {
             throw DelegationConversationError.http(status: status, body: String(decoding: data, as: UTF8.self))
         }
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = object["choices"] as? [[String: Any]],
-              let message = choices.first?["message"] as? [String: Any],
+              let choice = (object["choices"] as? [[String: Any]])?.first,
+              let message = choice["message"] as? [String: Any],
               let content = message["content"] as? String else {
             throw DelegationConversationError.unreadableAnswer(String(decoding: data, as: UTF8.self))
+        }
+        if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let usage = (object["usage"] as? [String: Any])?["completion_tokens"].map { "，输出 \($0) 个 token" } ?? ""
+            throw DelegationConversationError.emptyAnswer(detail: (choice["finish_reason"] as? String ?? "未知") + usage)
         }
         return content
     }
@@ -107,6 +138,12 @@ final class DelegationConversation: @unchecked Sendable {
 
     func reset() { transcript = [] }
 
+    /// Something that happened outside the conversation, recorded in the
+    /// model's view as data, never as the user's words.
+    func noteAppEvent(_ text: String) {
+        transcript.append(DelegationChatMessage(role: .user, content: "【应用记录，不是用户说的话】\(text)"))
+    }
+
     /// Adds the user's words and returns her turn.
     ///
     /// Say-do guard (from sambuild04/screen-voice-agent, adapted): if she says
@@ -114,10 +151,10 @@ final class DelegationConversation: @unchecked Sendable {
     /// once more to either produce the draft or say why she cannot. At most
     /// once per user message, so it cannot loop.
     func respond(to userText: String, projectContext: String, tool: DelegationAgentTool = .claudeCode,
-                 recentHandOffs: String = "（还没有记录）") async throws -> DelegationTurn {
+                 recentHandOffs: String = "（还没有记录）", herCode: String = "（不知道在哪）") async throws -> DelegationTurn {
         transcript.append(DelegationChatMessage(role: .user, content: userText))
         let systemMessage = DelegationChatMessage(role: .system, content: Self.instructions(
-            projectContext: projectContext, tool: tool, recentHandOffs: recentHandOffs))
+            projectContext: projectContext, tool: tool, recentHandOffs: recentHandOffs, herCode: herCode))
         var turn = try Self.parse(try await complete([systemMessage] + transcript))
         var neededCorrection = false
         if Self.promisesActionWithoutOne(turn) {
@@ -128,13 +165,14 @@ final class DelegationConversation: @unchecked Sendable {
             turn = retried
         }
         transcript.append(DelegationChatMessage(role: .assistant, content: Self.encode(turn)))
-        return DelegationTurn(say: turn.say, action: turn.action, neededCorrection: neededCorrection)
+        return DelegationTurn(say: turn.say, action: turn.action, neededCorrection: neededCorrection,
+                              refersTo: turn.refersTo, project: turn.project)
     }
 
     // MARK: - Prompt
 
     static func instructions(projectContext: String, tool: DelegationAgentTool = .claudeCode,
-                             recentHandOffs: String = "（还没有记录）") -> String {
+                             recentHandOffs: String = "（还没有记录）", herCode: String = "（不知道在哪）") -> String {
         """
         你是住在用户 Mac 上的中文伙伴。用户在 ⌃K 输入框里用文字跟你说话。
         你能做两件事：整理写代码、改项目的任务草稿；或者让 JEV 在屏幕上点一个控件。
@@ -145,19 +183,25 @@ final class DelegationConversation: @unchecked Sendable {
         - 默认先听。用户想要的效果、取舍或范围没说清时，用一句话问清楚，action 为 "none"。
         - 不要问文件名、路径或代码细节：执行工具会自己在项目里找。只问用户才知道的事，比如想要什么效果、有没有参考、哪些不能动。
         - 当前项目只是从最近使用记录中找到的，不保证是用户这次的目标。用户点名的项目或路径与当前项目不符时，提醒用户在草稿里点「更换项目」核对实际绑定；仅在正文写路径不会切换项目，不能声称已经切换。
-        - 要求清楚了，就写 draft：给执行工具的完整要求，写明目标、范围和约束（只改需要改的；先读项目说明；不要运行 xcodebuild；改完自检；提交一次，不要推送；最后用两三句话说明改了什么）。草稿只描述任务，不写死执行工具或模型名。action 为 "draft"，say 用一句话请用户看一眼草稿，确认后点「发出去」。
-        - 用户点名另一执行工具时，草稿仍按要求写，并提醒他在草稿的「执行工具」里选择；不要声称已切换。Codex 当前用用户选定的 GPT-6 Luna、High 推理档位，仅对本次执行生效；其他执行工具沿用各自本机配置。你不能通过对话修改模型，不要声称已换模型或自动升级。
-        - 用户说「上次」「刚才」「那个任务」「那次失败」等指以前的事时，先对照下面「以前交出去的任务」。能确定是哪一条，就直接用它的项目、执行工具、结果和原始报错理解用户的意思，不要让用户重述；写 draft 时写明指的是哪次任务，并原样附上相关的原始报错或结果，供执行工具定位。几条都像或都对不上时，用一句话问是哪一次。记录里没有的事不要编。
+        - 要求清楚了，就写 draft：给执行工具的完整要求，写明目标、范围和约束（只改需要改的；先读项目说明；不要运行 xcodebuild；改完自检；提交一次，不要推送；最后用两三句话说明改了什么）。草稿只描述任务，不写「请用某某执行」，也不替执行工具写示例文案。action 为 "draft"，say 用一句话请用户看一眼草稿，确认后点「发出去」。
+        - 执行工具由用户在草稿的「执行工具」里选，应用会自己提醒；say 里不要提这次用哪个执行工具。Codex 当前用用户选定的 GPT-6 Luna、High 推理档位，仅对本次执行生效；其他执行工具沿用各自本机配置。你不能通过对话修改模型，不要声称已换模型或自动升级。
+        - 用户提到以前的事（「上次」「刚才」「那次失败」）时，对照下面「以前交出去的任务」：能确定是哪次就直接用，不要让用户重述；不确定是哪次，或听不出他要改的是那件事本身还是 Her 当时的提示，用一句话问清。这次和以前某次任务有关时，refers_to 填下面列表里那次的序号（无关填 0）：应用会把那次的背景和 Her 当时给用户看的原话原样放在草稿最前面，draft 里不用再写；重做时在 draft 里写明是重做。记录里没有的事不要编。
+        - 用户嫌 Her 自己说过或显示过的话看不懂、不好时，要改的是 Her 产生这类话的方式，不是重做那次任务：say 先用一句大白话讲清那句话的意思；知道 Her 自己的代码在哪就写 draft（project 填 "her"），要求 Her 以后先说发生了什么和下一步、原始报错放在后面；不知道就问一句要不要改 Her。
+        - draft 要改哪个项目由 project 说：默认 "current"（下面的当前项目）；重做以前某次任务填 "record"（refers_to 那次的项目）；改 Her 自己的话或做法填 "her"。应用按它绑定项目，用户还能在草稿里「更换项目」。
+        - 解释报错只说原文能证明的。地址是 127.0.0.1 或 localhost，说明错误是这台 Mac 上的本机服务返回的；502 表示中间的转发服务收到了请求，但没从后面的服务拿到有效回应，具体原因报错里看不出来。
         - 用户对草稿提意见时，按意见改好整份 draft 再给出来。
-        - 你自己不会发出任何东西。不要说「已经交出去了」「我这就去改」之类的话：只有用户点了「发出去」才会交出去，那句话由应用来说。
+        - 你自己不会发出或修改任何东西。say 里不要用「我」做修改或发送的主语（如「我来改」「我准备改」「已经交出去了」）：改东西的是执行工具，要等用户点「发出去」，那句话由应用来说。
         - 用户要在屏幕上点某个东西时，action 为 "screen"，screen_goal 写清要点哪个控件。
         - 闲聊或问问题时 action 为 "none"，简短自然地回一两句。
         - say 不超过两句，不空夸，不用「好问题」这类客套。
 
-        只输出一个 JSON 对象：{"say": "...", "action": "none" | "draft" | "screen", "draft": "...", "screen_goal": "..."}。不用的字段留空字符串。
+        只输出一个 JSON 对象：{"say": "...", "action": "none" | "draft" | "screen", "draft": "...", "screen_goal": "...", "refers_to": 0, "project": "current" | "record" | "her"}。不用的文字字段留空字符串。
 
         当前项目：
         \(projectContext)
+
+        Her 自己的代码（你说的话、回执和这些规则都在这里）：
+        \(herCode)
 
         以前交出去的任务（Her 本机记录，新的在前，重启后仍在）：
         \(recentHandOffs)
@@ -173,6 +217,8 @@ final class DelegationConversation: @unchecked Sendable {
     private struct RawTurn {
         let say: String
         let action: DelegationTurnAction
+        let refersTo: Int?
+        let project: DelegationProjectChoice
     }
 
     private static func parse(_ answer: String) throws -> RawTurn {
@@ -185,15 +231,20 @@ final class DelegationConversation: @unchecked Sendable {
         let say = (object["say"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let draft = (object["draft"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let screenGoal = (object["screen_goal"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let reference = object["refers_to"] as? Int ?? Int(object["refers_to"] as? String ?? "") ?? 0
+        let action: DelegationTurnAction
         switch object["action"] as? String {
-        case "draft" where !draft.isEmpty: return RawTurn(say: say, action: .draft(draft))
-        case "screen" where !screenGoal.isEmpty: return RawTurn(say: say, action: .screen(goal: screenGoal))
-        default: return RawTurn(say: say, action: .reply)
+        case "draft" where !draft.isEmpty: action = .draft(draft)
+        case "screen" where !screenGoal.isEmpty: action = .screen(goal: screenGoal)
+        default: action = .reply
         }
+        let project = DelegationProjectChoice(rawValue: (object["project"] as? String ?? "").lowercased()) ?? .current
+        return RawTurn(say: say, action: action, refersTo: reference > 0 ? reference : nil, project: project)
     }
 
     private static func encode(_ turn: RawTurn) -> String {
-        var object: [String: String] = ["say": turn.say, "action": "none", "draft": "", "screen_goal": ""]
+        var object: [String: Any] = ["say": turn.say, "action": "none", "draft": "", "screen_goal": "", "refers_to": turn.refersTo ?? 0,
+                                     "project": turn.project.rawValue]
         switch turn.action {
         case .reply: break
         case .draft(let draft): object["action"] = "draft"; object["draft"] = draft
@@ -210,10 +261,20 @@ final class DelegationConversation: @unchecked Sendable {
         let say = turn.say
         let waitsForUser = ["请你", "等你", "你确认", "确认吗", "你先", "你看", "？", "?"].contains { say.contains($0) }
         if waitsForUser { return false }
-        let namesTool = DelegationAgentTool.allCases.contains {
-            say.contains("交给 \($0.displayName)") || say.contains("交给\($0.displayName)")
-        }
+        let handOffs = DelegationAgentTool.allCases.flatMap { ["交给 \($0.displayName)", "交给\($0.displayName)"] }
         let commitments = ["我这就", "马上", "这就去", "我来写", "我去改", "我来改", "写好草稿", "发给"]
-        return namesTool || commitments.contains { say.contains($0) }
+        // "交给 Codex 的任务" names a task rather than promising a hand-off.
+        return clausesAboutNow(say).contains { clause in
+            handOffs.contains { phrase in clause.ranges(of: phrase).contains { !clause[$0.upperBound...].hasPrefix("的") } }
+                || commitments.contains { clause.contains($0) }
+        }
+    }
+
+    /// The clauses of `text` about now: clauses recalling an earlier hand-off
+    /// ("上次交给 Codex 的任务没做成") are left out.
+    static func clausesAboutNow(_ text: String) -> [Substring] {
+        let pastMarkers = ["上次", "之前", "以前", "当时", "那次", "刚才", "昨天", "前天"]
+        return text.split(whereSeparator: { "，。！？；,.!?;\n".contains($0) })
+            .filter { clause in !pastMarkers.contains { clause.contains($0) } }
     }
 }

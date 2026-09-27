@@ -78,8 +78,44 @@ final class TextCommandPanelManager {
         }
         panel?.makeKeyAndOrderFront(nil)
         panel?.orderFrontRegardless()
+        attentionMovedElsewhere = false
+        startWatchingForAttentionElsewhere()
         fadePanel(to: 1)
         if !isConversationLayout { startMouseTracking() }
+    }
+
+    /// The conversation is on screen, has the keyboard, and the user has not
+    /// clicked anywhere else or switched apps since last using it. The panel
+    /// does not activate Her, so it stays key after the user clicks into
+    /// another app; the outside click is what tells them apart.
+    var hasKeyboardFocus: Bool {
+        guard panel?.isVisible == true, panel?.isKeyWindow == true else { return false }
+        startWatchingForAttentionElsewhere()
+        return !attentionMovedElsewhere
+    }
+
+    private var attentionMovedElsewhere = false
+    private var outsideClickMonitor: Any?
+    private var insideEventMonitor: Any?
+    private var appActivationObserver: NSObjectProtocol?
+
+    private func startWatchingForAttentionElsewhere() {
+        guard outsideClickMonitor == nil else { return }
+        // Global monitors only see events sent to other apps.
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            Task { @MainActor in self?.attentionMovedElsewhere = true }
+        }
+        insideEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] event in
+            if let self, event.window === self.panel { self.attentionMovedElsewhere = false }
+            return event
+        }
+        appActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            guard app?.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+            Task { @MainActor in self?.attentionMovedElsewhere = true }
+        }
     }
 
     func hide() {

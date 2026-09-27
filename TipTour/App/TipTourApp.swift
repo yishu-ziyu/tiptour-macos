@@ -44,6 +44,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var harnessServer: TipTourHarnessServer?
     private var sparkleUpdaterController: SPUStandardUpdaterController?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        companionManager.prepareDelegationNotices()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
         if VoiceRouteProbe.handleLaunch(companionManager: companionManager) { return }
@@ -90,7 +94,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        menuBarPanelManager?.showPanelOnLaunch()
+        // Clicking a hand-off notice also reopens Her; that click already
+        // opened the conversation, which the menu bar panel would cover.
+        menuBarPanelManager?.showPanelOnLaunch(unless: { [companionManager] in companionManager.openedNoticeJustNow })
         return true
     }
 
