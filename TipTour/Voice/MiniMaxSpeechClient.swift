@@ -46,7 +46,7 @@ nonisolated final class MiniMaxSpeechClient: @unchecked Sendable {
 
     /// Streams `text` as PCM16 chunks to `onAudio`, in order, and returns once
     /// MiniMax has sent everything. Cancelling the task stops the stream.
-    func speak(_ text: String, onAudio: @escaping @Sendable (Data) async -> Void) async throws {
+    func speak(_ text: String, speed: Double = 1, onAudio: @escaping @Sendable (Data) async -> Void) async throws {
         let body: [String: Any] = [
             "model": model,
             "text": text,
@@ -54,7 +54,7 @@ nonisolated final class MiniMaxSpeechClient: @unchecked Sendable {
             "stream_options": ["exclude_aggregated_audio": true],
             "language_boost": "Chinese",
             "output_format": "hex",
-            "voice_setting": ["voice_id": voiceID, "speed": 1, "vol": 1, "pitch": 0],
+            "voice_setting": ["voice_id": voiceID, "speed": min(max(speed, 0.5), 2), "vol": 1, "pitch": 0],
             "audio_setting": ["sample_rate": Self.sampleRate, "format": "pcm", "channel": 1],
         ]
         var request = URLRequest(url: Self.endpoint)

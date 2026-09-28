@@ -119,6 +119,16 @@ struct StableVoiceTests {
         #expect(audio["sample_rate"] as? Int == 24_000)
     }
 
+    @Test func theChosenSpeedIsTheSpeedSheSpeaksAt() async throws {
+        let body = #"data: {"data":{"audio":"0102","status":1},"base_resp":{"status_code":0,"status_msg":""}}"#
+        let client = MiniMaxSpeechClient(apiKey: "k", voiceID: "v", session: StubHTTP.session(status: 200, body: body))
+        try await client.speak("你好", speed: 1.3) { _ in }
+        #expect((StubHTTP.lastRequestBody?["voice_setting"] as? [String: Any])?["speed"] as? Double == 1.3)
+        let tooFast = MiniMaxSpeechClient(apiKey: "k", voiceID: "v", session: StubHTTP.session(status: 200, body: body))
+        try await tooFast.speak("你好", speed: 5) { _ in }
+        #expect((StubHTTP.lastRequestBody?["voice_setting"] as? [String: Any])?["speed"] as? Double == 2)
+    }
+
     @Test func aMiniMaxRefusalIsReportedWithItsMessage() async {
         let client = MiniMaxSpeechClient(apiKey: "k", voiceID: "v", session: StubHTTP.session(
             status: 200, body: #"{"base_resp":{"status_code":2054,"status_msg":"voice id not exist"}}"#))
@@ -235,6 +245,29 @@ struct StableVoiceTests {
         try await Task.sleep(nanoseconds: 100_000_000)
         #expect(world.queued.isEmpty, "audio that arrives after the interruption is not played")
         #expect(world.timings.last?.outcome == "interrupted")
+    }
+
+    @MainActor @Test func thePreviewSpeaksWithoutListening() async {
+        let world = FakeWorld(transcript: "不该用到", reply: StableVoiceReply(say: "不该说"))
+        let runner = world.runner()
+        runner.say("这是现在的语速")
+        #expect(runner.phase == .speaking)
+        await world.waitUntilIdle(runner)
+        #expect(world.events == ["audio 4"])
+        #expect(runner.heard == nil)
+        #expect(world.timings.last?.outcome == "previewed")
+    }
+
+    @MainActor @Test func pressingTheShortcutStopsThePreview() async throws {
+        let world = FakeWorld(transcript: "", reply: StableVoiceReply(say: ""), holdSpeech: true)
+        let runner = world.runner()
+        runner.say("这是现在的语速")
+        while world.events.isEmpty { await Task.yield() }
+        runner.beginListening()
+        world.releaseSpeech()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(runner.phase == .listening)
+        #expect(world.queued.isEmpty)
     }
 
     @MainActor @Test func nothingHeardIsSaidPlainly() async {

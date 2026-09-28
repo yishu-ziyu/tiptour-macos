@@ -113,13 +113,23 @@ enum TipTourDefaults {
 
     /// MiniMax speech for the 「声音稳定」 style. The key is in the Keychain
     /// under `keyName`; the voice is one the user defined in MiniMax.
-    enum MiniMaxConfiguration {
+    nonisolated enum MiniMaxConfiguration {
         static let keyName = "minimaxAPIKey"
         static let keyPortalURL = URL(string: "https://platform.minimaxi.com/")!
 
         static var voiceID: String {
             get { UserDefaults.standard.string(forKey: "minimaxVoiceID")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
             set { UserDefaults.standard.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "minimaxVoiceID") }
+        }
+
+        /// How fast she speaks: MiniMax accepts 0.5–2; Settings offers `speechSpeedRange`.
+        static let speechSpeedRange: ClosedRange<Double> = 0.6...1.6
+        static var speechSpeed: Double {
+            get {
+                let stored = UserDefaults.standard.double(forKey: "minimaxSpeechSpeed")
+                return stored == 0 ? 1 : min(max(stored, speechSpeedRange.lowerBound), speechSpeedRange.upperBound)
+            }
+            set { UserDefaults.standard.set(min(max(newValue, speechSpeedRange.lowerBound), speechSpeedRange.upperBound), forKey: "minimaxSpeechSpeed") }
         }
 
         /// `defaults write com.yishuziyu.her minimaxSpeechModel speech-2.8-turbo` tries another model.

@@ -304,6 +304,7 @@ struct MiniMaxVoiceSettings: View {
                 .font(.system(size: 11))
                 .foregroundColor(DS.Colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+            SpeechSpeedControl(companionManager: companionManager)
             ProviderKeyCard(
                 title: "MiniMax 密钥",
                 detail: "她的回答会发给 MiniMax 念出来。用 Token Plan 的密钥。",
@@ -312,6 +313,56 @@ struct MiniMaxVoiceSettings: View {
                 onKeyChanged: companionManager.resetStableVoiceSession)
         }
         .onAppear { voiceDraft = companionManager.miniMaxVoiceID }
+    }
+}
+
+/// How fast she speaks in the 「声音稳定」 style, with a one-sentence preview.
+struct SpeechSpeedControl: View {
+    @ObservedObject var companionManager: CompanionManager
+
+    private var speed: Binding<Double> {
+        Binding(get: { companionManager.miniMaxSpeechSpeed },
+                set: { companionManager.setMiniMaxSpeechSpeed(($0 * 20).rounded() / 20) })
+    }
+
+    private var isPreviewing: Bool { companionManager.voiceState == .responding }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Text("语速")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(DS.Colors.textPrimary)
+                Text("慢").font(.system(size: 11)).foregroundColor(DS.Colors.textSecondary)
+                Slider(value: speed, in: TipTourDefaults.MiniMaxConfiguration.speechSpeedRange, step: 0.05)
+                    .tint(DS.Colors.accentText)
+                    .accessibilityLabel("语速")
+                    .accessibilityValue(String(format: "%.2f 倍", companionManager.miniMaxSpeechSpeed))
+                Text("快").font(.system(size: 11)).foregroundColor(DS.Colors.textSecondary)
+                Text(String(format: "%.2f×", companionManager.miniMaxSpeechSpeed))
+                    .font(.system(size: 12, weight: .medium).monospacedDigit())
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .frame(width: 44, alignment: .trailing)
+            }
+            HStack(spacing: 10) {
+                Button(isPreviewing ? "在说…" : "试听", action: companionManager.previewStableVoice)
+                    .disabled(isPreviewing)
+                    .pointerCursor()
+                if companionManager.miniMaxSpeechSpeed != 1 {
+                    Button("恢复正常") { companionManager.setMiniMaxSpeechSpeed(1) }
+                        .pointerCursor()
+                }
+                Text("下一句开始生效。")
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textSecondary)
+            }
+            if let error = companionManager.voiceSessionErrorMessage, !error.isEmpty, companionManager.voiceStyle == .stable {
+                Text(error)
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }
 

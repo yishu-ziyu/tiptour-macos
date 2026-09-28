@@ -101,6 +101,35 @@ final class StableVoiceTurnRunner: ObservableObject {
         turnTask = Task { [weak self] in await self?.run(audio: audio, id: id, released: released) }
     }
 
+    /// Speaks `text` without listening first (the speed preview in Settings).
+    /// Pressing the shortcut stops it like any reply.
+    func say(_ text: String) {
+        stopTurn(outcome: "interrupted")
+        failure = nil
+        let id = UUID()
+        turnID = id
+        let released = clock()
+        phase = .speaking
+        turnTask = Task { [weak self] in await self?.speakOnly(text, id: id, released: released) }
+    }
+
+    private func speakOnly(_ text: String, id: UUID, released: Date) async {
+        timing = StableVoiceTiming()
+        turnStarted = released
+        do {
+            try await services.speak(text) { [weak self] chunk in
+                await self?.play(chunk, turn: id, released: released)
+            }
+            while turnID == id, playback.isPlaying() {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            end(id: id, outcome: "previewed", failure: nil)
+        } catch {
+            guard turnID == id, !(error is CancellationError) else { return }
+            end(id: id, outcome: "failed", failure: Self.message(for: error))
+        }
+    }
+
     /// Stop without starting to listen (the session or the voice style ended).
     func interrupt() {
         stopTurn(outcome: "stopped")

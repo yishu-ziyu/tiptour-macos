@@ -65,6 +65,13 @@ final class StableVoiceSession {
 
     var isRecording: Bool { captureEngine != nil }
 
+    /// Plays `text` in her voice at the current settings, without listening.
+    func preview(_ text: String) {
+        stopCapture()
+        startPlaybackEngineIfNeeded()
+        runner.say(text)
+    }
+
     func stop() {
         stopCapture()
         captured.reset()

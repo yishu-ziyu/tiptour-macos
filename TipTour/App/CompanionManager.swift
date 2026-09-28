@@ -86,6 +86,22 @@ final class CompanionManager: ObservableObject {
         resetStableVoiceSession()
     }
 
+    @Published private(set) var miniMaxSpeechSpeed = TipTourDefaults.MiniMaxConfiguration.speechSpeed
+
+    func setMiniMaxSpeechSpeed(_ speed: Double) {
+        TipTourDefaults.MiniMaxConfiguration.speechSpeed = speed
+        miniMaxSpeechSpeed = TipTourDefaults.MiniMaxConfiguration.speechSpeed
+    }
+
+    /// Settings' 「试听」: one sentence in her voice at the chosen speed.
+    func previewStableVoice() {
+        if stepfunSession != nil { stopVoiceSession() }
+        guard let session = stableVoiceSession ?? makeStableVoiceSession() else { return }
+        stableVoiceSession = session
+        voiceSessionErrorMessage = nil
+        session.preview("这是现在的语速，你听听快慢合不合适。")
+    }
+
     /// A changed key or voice takes effect from the next press. What she
     /// remembers of this voice conversation goes with the old session.
     func resetStableVoiceSession() {
@@ -731,7 +747,8 @@ final class CompanionManager: ObservableObject {
         return .init(
             transcribe: { try await transcriber.transcribe(pcm16: $0) },
             reply: { try await conversation.reply(to: $0, companionContext: $1) },
-            speak: { try await speech.speak($0, onAudio: $1) },
+            // Read at every sentence, so a new speed counts from the next one.
+            speak: { try await speech.speak($0, speed: TipTourDefaults.MiniMaxConfiguration.speechSpeed, onAudio: $1) },
             warmUp: {
                 // Any answer, even a refusal, leaves the connection open for reuse.
                 async let stepfun: Void = { _ = try? await stepfunSession.data(from: URL(string: "https://api.stepfun.com/step_plan/v1/models")!) }()
