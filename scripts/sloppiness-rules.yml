@@ -1,0 +1,35 @@
+# ast-grep rules for the verbosity metric in scripts/measure-sloppiness.py.
+# Each rule matches code that has a shorter equivalent with the same meaning.
+id: boolean-return-branches
+language: swift
+message: "if … { return true } else { return false } is `return condition`"
+rule:
+  any:
+    - pattern: "if $CONDITION { return true } else { return false }"
+    - pattern: "if $CONDITION { return false } else { return true }"
+---
+id: boolean-ternary
+language: swift
+message: "condition ? true : false is the condition itself"
+rule:
+  any:
+    - pattern: "$CONDITION ? true : false"
+    - pattern: "$CONDITION ? false : true"
+---
+id: count-compared-with-zero
+language: swift
+message: "use isEmpty"
+rule:
+  any:
+    - pattern: "$COLLECTION.count == 0"
+    - pattern: "$COLLECTION.count > 0"
+    - pattern: "$COLLECTION.count != 0"
+    - pattern: "$COLLECTION.count >= 1"
+---
+id: redundant-optional-binding-name
+language: swift
+message: "`if let value = value` is `if let value`"
+rule:
+  any:
+    - pattern: "if let $NAME = $NAME { $$$ }"
+    - pattern: "guard let $NAME = $NAME else { $$$ }"

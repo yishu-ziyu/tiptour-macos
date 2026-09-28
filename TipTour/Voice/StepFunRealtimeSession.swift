@@ -942,41 +942,7 @@ final class StepFunRealtimeSession {
                 ])
 
         case .audioChunk(let pcm16Data):
-            // Audio already in flight from a response the user interrupted must
-            // neither play nor restart that turn. Drop it until a new
-            // `response.created` retires the interrupted phase.
-            guard turnLifecycle.phase != .interrupted else { return }
-            turnLifecycle.recordAudioChunkArrived()
-            if suppressAudioForCurrentResponse, expectedSpokenReceipt == nil {
-                if !didTraceSuppressedAudioForCurrentResponse {
-                    didTraceSuppressedAudioForCurrentResponse = true
-                    DesktopVoiceTrace.event("tool_preamble_audio_suppressed", turnID: currentTurnID)
-                }
-                return
-            }
-            if expectedSpokenReceipt != nil {
-                pendingReceiptAudioChunks.append(pcm16Data)
-            } else {
-                enqueueRealtimeAudio(pcm16Data)
-                state.isModelSpeaking = true
-            }
-            if !didReceiveAudioForCurrentResponse {
-                didReceiveAudioForCurrentResponse = true
-                bargeInOnsetEstimator.arm()
-                var fields = ["buffered_receipt": String(expectedSpokenReceipt != nil)]
-                if let currentUserSpeechStoppedAt {
-                    fields["ms_since_speech_stopped"] = String(Int(Date().timeIntervalSince(currentUserSpeechStoppedAt) * 1000))
-                }
-                if let estimatedUserSpeechEndAt {
-                    fields["ms_since_estimated_user_speech_end"] =
-                        String(Int(Date().timeIntervalSince(estimatedUserSpeechEndAt) * 1000))
-                }
-                if let currentResponseCreatedAt {
-                    fields["ms_since_response_created"] = String(Int(Date().timeIntervalSince(currentResponseCreatedAt) * 1000))
-                }
-                DesktopVoiceTrace.event("realtime_audio_started", turnID: currentTurnID,
-                    fields: fields)
-            }
+            handleAudioChunk(pcm16Data)
 
         case .inputTranscript(let text):
             state.lastInputTranscript += text
@@ -986,55 +952,16 @@ final class StepFunRealtimeSession {
             inputTurnIDs[itemID] = currentTurnID
 
         case .inputTranscriptFinal(let itemID, let text):
-            let associatedTurn = inputTurnIDs[itemID]
-            DesktopVoiceTrace.event("input_transcript_final", turnID: associatedTurn ?? "unassociated",
-                fields: ["source": "provider_completed", "correlation": associatedTurn == nil ? "unavailable" : "item_id"],
-                privateFields: ["transcript": text])
-            guard associatedTurn == currentTurnID else { return }
-            if currentTurnStartedWithinOwnSpeech,
-               OwnSpeechEchoDetector.isEcho(transcript: text, ownSpeech: recentOwnSpeech) {
-                discardOwnEchoTurn()
-            } else {
-                state.lastInputTranscript = text
-            }
+            handleFinalInputTranscript(itemID: itemID, text: text)
 
         case .outputTranscript(let text):
-            guard turnLifecycle.phase != .interrupted else { return }
-            if suppressAudioForCurrentResponse, expectedSpokenReceipt == nil { return }
-            recentOwnSpeech = String((recentOwnSpeech + text).suffix(Self.recentOwnSpeechLimit))
-            if expectedSpokenReceipt != nil {
-                pendingReceiptTranscript += text
-            } else {
-                state.lastOutputTranscript += text
-            }
+            handleOutputTranscriptDelta(text)
 
         case .outputTranscriptFinal(let text):
-            guard turnLifecycle.phase != .interrupted else { return }
-            if suppressAudioForCurrentResponse, expectedSpokenReceipt == nil { return }
-            // Her words go only to the opt-in DEBUG diagnostics file, never the public log.
-            DesktopVoiceTrace.event("output_transcript_final", turnID: currentTurnID,
-                fields: ["receipt": String(expectedSpokenReceipt != nil)],
-                privateFields: ["transcript": text])
-            if expectedSpokenReceipt != nil {
-                pendingReceiptTranscript = text
-            } else {
-                state.lastOutputTranscript = text
-            }
+            handleFinalOutputTranscript(text)
 
         case .responseCreated(let responseID):
-            #if DEBUG
-            syntheticProbeResponseCount += 1
-            #endif
-            print("[StepFunRealtimeSession] response created, phase=\(turnLifecycle.phase)")
-            didReceiveAudioForCurrentResponse = false
-            suppressAudioForCurrentResponse = false
-            didTraceSuppressedAudioForCurrentResponse = false
-            currentResponseCreatedAt = Date()
-            audioPlayer.resetPlaybackStatistics()
-            turnLifecycle.recordResponseCreated()
-            DesktopVoiceTrace.event("response_created", turnID: currentTurnID,
-                fields: ["response_id": responseID ?? "none"])
-            if echoTurnIDToDiscard == currentTurnID { cancelReplyToOwnEcho() }
+            handleResponseCreated(responseID: responseID)
 
         case .toolCall(let callID, let name, let argumentsJSON):
             startToolWork(callID: callID, name: name, argumentsJSON: argumentsJSON)
@@ -1044,75 +971,13 @@ final class StepFunRealtimeSession {
             handleResponseDone()
 
         case .userStartedSpeaking:
-            #if DEBUG
-            playbackProbeSpeechStarts += 1
-            #endif
-            didRequestDesktopTaskThisUtterance = false
-            // Read before anything below clears playback: this is what makes the
-            // speech start a barge-in rather than an ordinary new turn.
-            let wasSpeakingWhenUserStarted = state.isModelSpeaking || audioPlayer.isPlaying
-            currentTurnStartedWithinOwnSpeech = microphoneGate.isWithinOwnSpeech()
-            let bargeInObservation = bargeInOnsetEstimator.takeBargeInObservationAndDisarm()
-            // Always pause the application task, including while the realtime
-            // response is idle after an asynchronous task admission.
-            if toolHandler.preservesTaskLifetime {
-                audioPlayer.clearQueuedAudio()
-                state.isModelSpeaking = false
-                toolHandler.prepareForUserSpeech()
-            }
-            print("[StepFunRealtimeSession] speech started, phase=\(turnLifecycle.phase), queued=\(audioPlayer.pendingBufferCount)")
-            handleUserStartedSpeaking()
-            microphoneGate.recordPlaybackCleared()
-            currentTurnID = UUID().uuidString
-            state.lastInputTranscript = ""
-            currentUserSpeechStoppedAt = nil
-            currentUserTurnStartedAt = Date()
-            estimatedUserSpeechEndAt = nil
-            currentResponseCreatedAt = nil
-            toolHandler.beginUserTurn(currentTurnID)
-            refreshTaskContext()
-            DesktopVoiceTrace.event("user_turn_started", turnID: currentTurnID)
-            if wasSpeakingWhenUserStarted {
-                var bargeInFields = ["local_onset_detected": String(bargeInObservation.onsetAt != nil)]
-                if let estimatedUserOnsetAt = bargeInObservation.onsetAt {
-                    bargeInFields["ms_since_estimated_user_onset"] =
-                        String(Int(Date().timeIntervalSince(estimatedUserOnsetAt) * 1000))
-                }
-                if let peakDecibels = bargeInObservation.peakDecibelsFullScaleWhileArmed {
-                    bargeInFields["mic_peak_dbfs_while_speaking"] = String(peakDecibels)
-                }
-                DesktopVoiceTrace.event("barge_in_detected", turnID: currentTurnID, fields: bargeInFields)
-            }
+            startUserTurn()
 
         case .userStoppedSpeaking:
-            currentUserSpeechStoppedAt = Date()
-            // Only a loud buffer inside this utterance counts; anything older
-            // than the utterance start is noise from before the user spoke.
-            estimatedUserSpeechEndAt = bargeInOnsetEstimator.mostRecentLoudBufferAt
-                .flatMap { lastLoudAt in lastLoudAt > currentUserTurnStartedAt ? lastLoudAt : nil }
-            var stoppedFields: [String: String] = [
-                "vad_energy_threshold": String(client.serverVADEnergyThreshold)
-            ]
-            if let micLevel = bargeInOnsetEstimator.smoothedDecibelsFullScale {
-                stoppedFields["mic_level_dbfs_at_speech_stopped"] = String(micLevel)
-            }
-            if let estimatedUserSpeechEndAt {
-                stoppedFields["ms_server_silence_window_estimate"] =
-                    String(Int(Date().timeIntervalSince(estimatedUserSpeechEndAt) * 1000))
-            }
-            DesktopVoiceTrace.event("user_speech_stopped", turnID: currentTurnID, fields: stoppedFields)
+            handleUserStoppedSpeaking()
 
         case .responseAborted(let responseID, let status):
-            clearExpectedReceiptSpeech()
-            audioPlayer.clearQueuedAudio()
-            microphoneGate.recordPlaybackCleared()
-            playbackDrainTask?.cancel()
-            playbackDrainTask = nil
-            cancelOutstandingToolWork()
-            turnLifecycle.reset()
-            state.isModelSpeaking = false
-            DesktopVoiceTrace.event("response_aborted", turnID: currentTurnID,
-                fields: ["response_id": responseID ?? "none", "status": status])
+            handleResponseAborted(responseID: responseID, status: status)
 
         case .unexpectedDisconnect(let error):
             state.errorMessage = "Voice connection dropped: \(error.localizedDescription)"
@@ -1121,6 +986,173 @@ final class StepFunRealtimeSession {
         case .error(let error):
             state.errorMessage = error.localizedDescription
         }
+    }
+
+    private func handleAudioChunk(_ pcm16Data: Data) {
+        // Audio already in flight from a response the user interrupted must
+        // neither play nor restart that turn. Drop it until a new
+        // `response.created` retires the interrupted phase.
+        guard turnLifecycle.phase != .interrupted else { return }
+        turnLifecycle.recordAudioChunkArrived()
+        if suppressAudioForCurrentResponse, expectedSpokenReceipt == nil {
+            if !didTraceSuppressedAudioForCurrentResponse {
+                didTraceSuppressedAudioForCurrentResponse = true
+                DesktopVoiceTrace.event("tool_preamble_audio_suppressed", turnID: currentTurnID)
+            }
+            return
+        }
+        if expectedSpokenReceipt != nil {
+            pendingReceiptAudioChunks.append(pcm16Data)
+        } else {
+            enqueueRealtimeAudio(pcm16Data)
+            state.isModelSpeaking = true
+        }
+        if !didReceiveAudioForCurrentResponse {
+            didReceiveAudioForCurrentResponse = true
+            bargeInOnsetEstimator.arm()
+            var fields = ["buffered_receipt": String(expectedSpokenReceipt != nil)]
+            if let currentUserSpeechStoppedAt {
+                fields["ms_since_speech_stopped"] = String(Int(Date().timeIntervalSince(currentUserSpeechStoppedAt) * 1000))
+            }
+            if let estimatedUserSpeechEndAt {
+                fields["ms_since_estimated_user_speech_end"] =
+                    String(Int(Date().timeIntervalSince(estimatedUserSpeechEndAt) * 1000))
+            }
+            if let currentResponseCreatedAt {
+                fields["ms_since_response_created"] = String(Int(Date().timeIntervalSince(currentResponseCreatedAt) * 1000))
+            }
+            DesktopVoiceTrace.event("realtime_audio_started", turnID: currentTurnID,
+                fields: fields)
+        }
+    }
+
+    private func handleFinalInputTranscript(itemID: String, text: String) {
+        let associatedTurn = inputTurnIDs[itemID]
+        DesktopVoiceTrace.event("input_transcript_final", turnID: associatedTurn ?? "unassociated",
+            fields: ["source": "provider_completed", "correlation": associatedTurn == nil ? "unavailable" : "item_id"],
+            privateFields: ["transcript": text])
+        guard associatedTurn == currentTurnID else { return }
+        if currentTurnStartedWithinOwnSpeech,
+           OwnSpeechEchoDetector.isEcho(transcript: text, ownSpeech: recentOwnSpeech) {
+            discardOwnEchoTurn()
+        } else {
+            state.lastInputTranscript = text
+        }
+    }
+
+    private func handleOutputTranscriptDelta(_ text: String) {
+        guard turnLifecycle.phase != .interrupted else { return }
+        if suppressAudioForCurrentResponse, expectedSpokenReceipt == nil { return }
+        recentOwnSpeech = String((recentOwnSpeech + text).suffix(Self.recentOwnSpeechLimit))
+        if expectedSpokenReceipt != nil {
+            pendingReceiptTranscript += text
+        } else {
+            state.lastOutputTranscript += text
+        }
+    }
+
+    private func handleFinalOutputTranscript(_ text: String) {
+        guard turnLifecycle.phase != .interrupted else { return }
+        if suppressAudioForCurrentResponse, expectedSpokenReceipt == nil { return }
+        // Her words go only to the opt-in DEBUG diagnostics file, never the public log.
+        DesktopVoiceTrace.event("output_transcript_final", turnID: currentTurnID,
+            fields: ["receipt": String(expectedSpokenReceipt != nil)],
+            privateFields: ["transcript": text])
+        if expectedSpokenReceipt != nil {
+            pendingReceiptTranscript = text
+        } else {
+            state.lastOutputTranscript = text
+        }
+    }
+
+    private func handleResponseCreated(responseID: String?) {
+        #if DEBUG
+        syntheticProbeResponseCount += 1
+        #endif
+        print("[StepFunRealtimeSession] response created, phase=\(turnLifecycle.phase)")
+        didReceiveAudioForCurrentResponse = false
+        suppressAudioForCurrentResponse = false
+        didTraceSuppressedAudioForCurrentResponse = false
+        currentResponseCreatedAt = Date()
+        audioPlayer.resetPlaybackStatistics()
+        turnLifecycle.recordResponseCreated()
+        DesktopVoiceTrace.event("response_created", turnID: currentTurnID,
+            fields: ["response_id": responseID ?? "none"])
+        if echoTurnIDToDiscard == currentTurnID { cancelReplyToOwnEcho() }
+    }
+
+    private func startUserTurn() {
+        #if DEBUG
+        playbackProbeSpeechStarts += 1
+        #endif
+        didRequestDesktopTaskThisUtterance = false
+        // Read before anything below clears playback: this is what makes the
+        // speech start a barge-in rather than an ordinary new turn.
+        let wasSpeakingWhenUserStarted = state.isModelSpeaking || audioPlayer.isPlaying
+        currentTurnStartedWithinOwnSpeech = microphoneGate.isWithinOwnSpeech()
+        let bargeInObservation = bargeInOnsetEstimator.takeBargeInObservationAndDisarm()
+        // Always pause the application task, including while the realtime
+        // response is idle after an asynchronous task admission.
+        if toolHandler.preservesTaskLifetime {
+            audioPlayer.clearQueuedAudio()
+            state.isModelSpeaking = false
+            toolHandler.prepareForUserSpeech()
+        }
+        print("[StepFunRealtimeSession] speech started, phase=\(turnLifecycle.phase), queued=\(audioPlayer.pendingBufferCount)")
+        handleUserStartedSpeaking()
+        microphoneGate.recordPlaybackCleared()
+        currentTurnID = UUID().uuidString
+        state.lastInputTranscript = ""
+        currentUserSpeechStoppedAt = nil
+        currentUserTurnStartedAt = Date()
+        estimatedUserSpeechEndAt = nil
+        currentResponseCreatedAt = nil
+        toolHandler.beginUserTurn(currentTurnID)
+        refreshTaskContext()
+        DesktopVoiceTrace.event("user_turn_started", turnID: currentTurnID)
+        if wasSpeakingWhenUserStarted {
+            var bargeInFields = ["local_onset_detected": String(bargeInObservation.onsetAt != nil)]
+            if let estimatedUserOnsetAt = bargeInObservation.onsetAt {
+                bargeInFields["ms_since_estimated_user_onset"] =
+                    String(Int(Date().timeIntervalSince(estimatedUserOnsetAt) * 1000))
+            }
+            if let peakDecibels = bargeInObservation.peakDecibelsFullScaleWhileArmed {
+                bargeInFields["mic_peak_dbfs_while_speaking"] = String(peakDecibels)
+            }
+            DesktopVoiceTrace.event("barge_in_detected", turnID: currentTurnID, fields: bargeInFields)
+        }
+    }
+
+    private func handleUserStoppedSpeaking() {
+        currentUserSpeechStoppedAt = Date()
+        // Only a loud buffer inside this utterance counts; anything older
+        // than the utterance start is noise from before the user spoke.
+        estimatedUserSpeechEndAt = bargeInOnsetEstimator.mostRecentLoudBufferAt
+            .flatMap { lastLoudAt in lastLoudAt > currentUserTurnStartedAt ? lastLoudAt : nil }
+        var stoppedFields: [String: String] = [
+            "vad_energy_threshold": String(client.serverVADEnergyThreshold)
+        ]
+        if let micLevel = bargeInOnsetEstimator.smoothedDecibelsFullScale {
+            stoppedFields["mic_level_dbfs_at_speech_stopped"] = String(micLevel)
+        }
+        if let estimatedUserSpeechEndAt {
+            stoppedFields["ms_server_silence_window_estimate"] =
+                String(Int(Date().timeIntervalSince(estimatedUserSpeechEndAt) * 1000))
+        }
+        DesktopVoiceTrace.event("user_speech_stopped", turnID: currentTurnID, fields: stoppedFields)
+    }
+
+    private func handleResponseAborted(responseID: String?, status: String) {
+        clearExpectedReceiptSpeech()
+        audioPlayer.clearQueuedAudio()
+        microphoneGate.recordPlaybackCleared()
+        playbackDrainTask?.cancel()
+        playbackDrainTask = nil
+        cancelOutstandingToolWork()
+        turnLifecycle.reset()
+        state.isModelSpeaking = false
+        DesktopVoiceTrace.event("response_aborted", turnID: currentTurnID,
+            fields: ["response_id": responseID ?? "none", "status": status])
     }
 
     // MARK: - Turn handling

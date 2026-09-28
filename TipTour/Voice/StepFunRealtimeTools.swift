@@ -214,6 +214,16 @@ struct StepFunActionArguments: Decodable {
     let amount: Int?
     let expectedLabel: String?
 
+    /// A resume that names nothing else continues the stored plan unchanged.
+    var isBareContinuation: Bool {
+        intent == .resume && steps == nil
+            && action == nil && targetLabel == nil && index == nil
+            && region == nil && anchorLabel == nil && relation == nil
+            && text == nil && key == nil && application == nil
+            && direction == nil && amount == nil && expectedLabel == nil
+            && observationID == nil
+    }
+
     /// Why these arguments had to be reshaped before they could describe a
     /// plan; empty whenever the model states the plan directly. Recorded so an
     /// auditor can tell a normalizing acceptance from a contract-clean one

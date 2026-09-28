@@ -20,8 +20,10 @@ final class GlobalHighlightShortcutMonitor: ObservableObject {
 
     let highlightTransitionPublisher = PassthroughSubject<HighlightTransition, Never>()
 
-    private var globalEventTap: CFMachPort?
-    private var globalEventTapRunLoopSource: CFRunLoopSource?
+    private let eventTap = ListenOnlyEventTap(
+        eventTypes: [.flagsChanged, .mouseMoved, .leftMouseDragged, .rightMouseDragged],
+        logName: "Global highlight"
+    )
 
     @Published private(set) var isHighlightShortcutCurrentlyPressed = false
 
@@ -30,57 +32,9 @@ final class GlobalHighlightShortcutMonitor: ObservableObject {
     }
 
     func start() {
-        guard globalEventTap == nil else { return }
-
-        let monitoredEventTypes: [CGEventType] = [
-            .flagsChanged,
-            .mouseMoved,
-            .leftMouseDragged,
-            .rightMouseDragged
-        ]
-        let eventMask = monitoredEventTypes.reduce(CGEventMask(0)) { currentMask, eventType in
-            currentMask | (CGEventMask(1) << eventType.rawValue)
+        eventTap.start { [weak self] eventType, event in
+            self?.handleGlobalEventTap(eventType: eventType, event: event)
         }
-
-        let eventTapCallback: CGEventTapCallBack = { _, eventType, event, userInfo in
-            guard let userInfo else {
-                return Unmanaged.passUnretained(event)
-            }
-
-            let monitor = Unmanaged<GlobalHighlightShortcutMonitor>
-                .fromOpaque(userInfo)
-                .takeUnretainedValue()
-
-            return monitor.handleGlobalEventTap(eventType: eventType, event: event)
-        }
-
-        guard let globalEventTap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .listenOnly,
-            eventsOfInterest: eventMask,
-            callback: eventTapCallback,
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else {
-            print("⚠️ Global highlight: couldn't create CGEvent tap")
-            return
-        }
-
-        guard let globalEventTapRunLoopSource = CFMachPortCreateRunLoopSource(
-            kCFAllocatorDefault,
-            globalEventTap,
-            0
-        ) else {
-            CFMachPortInvalidate(globalEventTap)
-            print("⚠️ Global highlight: couldn't create event tap run loop source")
-            return
-        }
-
-        self.globalEventTap = globalEventTap
-        self.globalEventTapRunLoopSource = globalEventTapRunLoopSource
-
-        CFRunLoopAddSource(CFRunLoopGetMain(), globalEventTapRunLoopSource, .commonModes)
-        CGEvent.tapEnable(tap: globalEventTap, enable: true)
     }
 
     func stop() {
@@ -89,28 +43,13 @@ final class GlobalHighlightShortcutMonitor: ObservableObject {
         }
         isHighlightShortcutCurrentlyPressed = false
 
-        if let globalEventTapRunLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), globalEventTapRunLoopSource, .commonModes)
-            self.globalEventTapRunLoopSource = nil
-        }
-
-        if let globalEventTap {
-            CFMachPortInvalidate(globalEventTap)
-            self.globalEventTap = nil
-        }
+        eventTap.stop()
     }
 
     private func handleGlobalEventTap(
         eventType: CGEventType,
         event: CGEvent
-    ) -> Unmanaged<CGEvent>? {
-        if eventType == .tapDisabledByTimeout || eventType == .tapDisabledByUserInput {
-            if let globalEventTap {
-                CGEvent.tapEnable(tap: globalEventTap, enable: true)
-            }
-            return Unmanaged.passUnretained(event)
-        }
-
+    ) {
         let isHighlightHeld = Self.isHighlightShortcutHeld(event.flags)
         let currentMouseLocation = NSEvent.mouseLocation
         let isMouseMovementEvent = eventType == .mouseMoved
@@ -126,8 +65,6 @@ final class GlobalHighlightShortcutMonitor: ObservableObject {
         } else if isHighlightHeld && isMouseMovementEvent {
             highlightTransitionPublisher.send(.moved(currentMouseLocation))
         }
-
-        return Unmanaged.passUnretained(event)
     }
 
     private static func isHighlightShortcutHeld(_ flags: CGEventFlags) -> Bool {

@@ -161,36 +161,7 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
         switch name {
         case "task_control":
             guard preservesTaskLifetime else { return rejectedAction("任务控制入口尚未启用。") }
-            let control = try StepFunTaskControlArguments.decode(Data(argumentsJSON.utf8))
-            if control.action == .status {
-                return coordinator.lastReceipt?.toolOutput ?? rejectedAction("当前没有任务。")
-            }
-            guard let taskID = control.taskID, let version = control.targetVersion,
-                  let turnID = control.turnID, turnID == currentTurnID,
-                  let current = coordinator.lastReceipt,
-                  current.taskID == taskID, current.targetVersion == version else {
-                return rejectedAction("任务控制不属于当前发言，未执行。")
-            }
-            if control.action == .cancel {
-                guard let receipt = coordinator.cancelTask(taskID: taskID, targetVersion: version, turnID: turnID) else {
-                    return rejectedAction("任务身份或版本已变化，未取消其他任务。")
-                }
-                if let attempt = receipt.currentActions.last,
-                   WorkflowRunner.shared.activePlan?.traceID == attempt.id,
-                   let operationID = WorkflowRunner.shared.currentOperationID {
-                    WorkflowRunner.shared.stop(operationID: operationID)
-                }
-                return receipt.toolOutput
-            }
-            if let attempt = coordinator.lastReceipt?.currentActions.last,
-               WorkflowRunner.shared.activePlan?.traceID == attempt.id,
-               WorkflowRunner.shared.pausedReason == .userSpeaking,
-               let operationID = WorkflowRunner.shared.currentOperationID {
-                WorkflowRunner.shared.stop(operationID: operationID)
-            }
-            let receipt = await coordinator.continueTask(taskID: taskID, targetVersion: version,
-                turnID: turnID, onlyAfterUserInput: control.action == .statusAndContinue)
-            return receipt?.toolOutput ?? rejectedAction("当前任务不满足继续条件，保持暂停。")
+            return await handleTaskControl(try StepFunTaskControlArguments.decode(Data(argumentsJSON.utf8)))
         case "remember_names":
             guard let memory = StepFunNameMemory.decode(argumentsJSON), let onRememberNames else {
                 return StepFunNameMemory.nothingSaved
@@ -200,64 +171,109 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
         case "describe_screen":
             return await describeScreen(intent: arguments["intent"] as? String ?? "描述当前屏幕")
         case "act_on_screen":
-            let actionArguments: StepFunActionArguments
-            var requestedSteps: [DesktopActionStep]
-            let continuationOnly: Bool
-            do {
-                actionArguments = try StepFunActionArguments.decode(Data(argumentsJSON.utf8))
-                continuationOnly = actionArguments.intent == .resume && actionArguments.steps == nil
-                    && actionArguments.action == nil && actionArguments.targetLabel == nil && actionArguments.index == nil
-                    && actionArguments.region == nil && actionArguments.anchorLabel == nil && actionArguments.relation == nil
-                    && actionArguments.text == nil && actionArguments.key == nil && actionArguments.application == nil
-                    && actionArguments.direction == nil && actionArguments.amount == nil && actionArguments.expectedLabel == nil
-                    && actionArguments.observationID == nil
-                requestedSteps = continuationOnly ? [] : try actionArguments.validatedSteps()
-                // Evidence trail: the raw model arguments and the effective plan are
-                // already captured with the tool call; this line records only WHY the
-                // plan had to be reshaped. Voice probes/runners capture stdout.
-                if !actionArguments.normalizationNotes.isEmpty {
-                    print("[TaskRouter] steps normalization applied: \(actionArguments.normalizationNotes.joined(separator: "; "))")
-                }
-            } catch {
-                return rejectedAction("任务参数不完整或有冲突，没有执行。")
-            }
-            var exactTarget: DesktopTaskTarget?
-            if let index = actionArguments.index {
-                guard let description = currentDescription,
-                      description.entry(index: index, observationID: actionArguments.observationID) != nil,
-                      let target = describedTargets[index] else {
-                    return rejectedAction("此前的观察编号已失效，没有执行；请保留目标重新定位。")
-                }
-                if let name = requestedSteps[0].targetLabel,
-                   DesktopActionStep.normalized(name) != DesktopActionStep.normalized(target.label) {
-                    return rejectedAction("观察编号与目标名称不一致，没有执行。")
-                }
-                requestedSteps[0].targetLabel = target.label
-                exactTarget = target
-            }
-            let goal = actionArguments.goal?.trimmingCharacters(in: .whitespacesAndNewlines)
-                ?? exactTarget.map { "点击控件「\($0.label)」" } ?? ""
-            guard !goal.isEmpty else { return rejectedAction("缺少完整操作目标，没有执行。") }
-            currentDescription = nil
-            describedTargets = [:]
-            if preservesTaskLifetime {
-                return await coordinator.submit(DesktopTaskSubmission(goal: goal, exactTarget: exactTarget,
-                    steps: continuationOnly ? nil : requestedSteps,
-                    intent: actionArguments.intent ?? (actionArguments.resumePrevious == true ? .resume : .new),
-                    uncertainResolution: actionArguments.uncertainResolution, turnID: currentTurnID)).toolOutput
-            }
-            let receipt = await coordinator.run(goal: goal, exactTarget: exactTarget,
-                resumePrevious: actionArguments.resumePrevious ?? false, steps: continuationOnly ? nil : requestedSteps,
-                intent: actionArguments.intent, uncertainResolution: actionArguments.uncertainResolution,
-                turnID: currentTurnID)
-            DesktopVoiceTrace.event("task_result", turnID: receipt.turnID,
-                fields: ["task_id": receipt.taskID, "target_version": String(receipt.targetVersion), "status": receipt.status,
-                         "current_action_count": String(receipt.currentActions.count), "prior_action_count": String(receipt.priorActions.count)],
-                privateFields: ["receipt": receipt.toolOutput])
-            return receipt.toolOutput
+            return await handleActOnScreen(argumentsJSON: argumentsJSON)
         default:
             return "不支持工具 \(name)。"
         }
+    }
+
+    private func handleTaskControl(_ control: StepFunTaskControlArguments) async -> String {
+        if control.action == .status {
+            return coordinator.lastReceipt?.toolOutput ?? rejectedAction("当前没有任务。")
+        }
+        guard let taskID = control.taskID, let version = control.targetVersion,
+              let turnID = control.turnID, turnID == currentTurnID,
+              let current = coordinator.lastReceipt,
+              current.taskID == taskID, current.targetVersion == version else {
+            return rejectedAction("任务控制不属于当前发言，未执行。")
+        }
+        if control.action == .cancel {
+            guard let receipt = coordinator.cancelTask(taskID: taskID, targetVersion: version, turnID: turnID) else {
+                return rejectedAction("任务身份或版本已变化，未取消其他任务。")
+            }
+            stopActiveWorkflow(for: receipt, onlyIfPausedForSpeech: false)
+            return receipt.toolOutput
+        }
+        if let receipt = coordinator.lastReceipt {
+            stopActiveWorkflow(for: receipt, onlyIfPausedForSpeech: true)
+        }
+        let receipt = await coordinator.continueTask(taskID: taskID, targetVersion: version,
+            turnID: turnID, onlyAfterUserInput: control.action == .statusAndContinue)
+        return receipt?.toolOutput ?? rejectedAction("当前任务不满足继续条件，保持暂停。")
+    }
+
+    /// Stops the workflow still running this receipt's latest attempt.
+    private func stopActiveWorkflow(for receipt: DesktopTaskReceipt, onlyIfPausedForSpeech: Bool) {
+        guard let attempt = receipt.currentActions.last,
+              WorkflowRunner.shared.activePlan?.traceID == attempt.id,
+              !onlyIfPausedForSpeech || WorkflowRunner.shared.pausedReason == .userSpeaking,
+              let operationID = WorkflowRunner.shared.currentOperationID else { return }
+        WorkflowRunner.shared.stop(operationID: operationID)
+    }
+
+    private func handleActOnScreen(argumentsJSON: String) async -> String {
+        let actionArguments: StepFunActionArguments
+        var requestedSteps: [DesktopActionStep]
+        do {
+            actionArguments = try StepFunActionArguments.decode(Data(argumentsJSON.utf8))
+            requestedSteps = actionArguments.isBareContinuation ? [] : try actionArguments.validatedSteps()
+            // Evidence trail: the raw model arguments and the effective plan are
+            // already captured with the tool call; this line records only WHY the
+            // plan had to be reshaped. Voice probes/runners capture stdout.
+            if !actionArguments.normalizationNotes.isEmpty {
+                print("[TaskRouter] steps normalization applied: \(actionArguments.normalizationNotes.joined(separator: "; "))")
+            }
+        } catch {
+            return rejectedAction("任务参数不完整或有冲突，没有执行。")
+        }
+        let exactTarget: DesktopTaskTarget?
+        switch describedTarget(for: actionArguments, requestedSteps: &requestedSteps) {
+        case .success(let target): exactTarget = target
+        case .failure(let rejection): return rejectedAction(rejection.message)
+        }
+        let goal = actionArguments.goal?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? exactTarget.map { "点击控件「\($0.label)」" } ?? ""
+        guard !goal.isEmpty else { return rejectedAction("缺少完整操作目标，没有执行。") }
+        currentDescription = nil
+        describedTargets = [:]
+        let steps = actionArguments.isBareContinuation ? nil : requestedSteps
+        if preservesTaskLifetime {
+            return await coordinator.submit(DesktopTaskSubmission(goal: goal, exactTarget: exactTarget,
+                steps: steps,
+                intent: actionArguments.intent ?? (actionArguments.resumePrevious == true ? .resume : .new),
+                uncertainResolution: actionArguments.uncertainResolution, turnID: currentTurnID)).toolOutput
+        }
+        let receipt = await coordinator.run(goal: goal, exactTarget: exactTarget,
+            resumePrevious: actionArguments.resumePrevious ?? false, steps: steps,
+            intent: actionArguments.intent, uncertainResolution: actionArguments.uncertainResolution,
+            turnID: currentTurnID)
+        DesktopVoiceTrace.event("task_result", turnID: receipt.turnID,
+            fields: ["task_id": receipt.taskID, "target_version": String(receipt.targetVersion), "status": receipt.status,
+                     "current_action_count": String(receipt.currentActions.count), "prior_action_count": String(receipt.priorActions.count)],
+            privateFields: ["receipt": receipt.toolOutput])
+        return receipt.toolOutput
+    }
+
+    private struct ToolCallRejection: Error {
+        let message: String
+    }
+
+    /// Resolves an observation index from the last description into its target
+    /// and names the first step after it. No index means no exact target.
+    private func describedTarget(for actionArguments: StepFunActionArguments,
+                                 requestedSteps: inout [DesktopActionStep]) -> Result<DesktopTaskTarget?, ToolCallRejection> {
+        guard let index = actionArguments.index else { return .success(nil) }
+        guard let description = currentDescription,
+              description.entry(index: index, observationID: actionArguments.observationID) != nil,
+              let target = describedTargets[index] else {
+            return .failure(ToolCallRejection(message: "此前的观察编号已失效，没有执行；请保留目标重新定位。"))
+        }
+        if let name = requestedSteps[0].targetLabel,
+           DesktopActionStep.normalized(name) != DesktopActionStep.normalized(target.label) {
+            return .failure(ToolCallRejection(message: "观察编号与目标名称不一致，没有执行。"))
+        }
+        requestedSteps[0].targetLabel = target.label
+        return .success(target)
     }
 
     private func observeForAction(requireActionPermissions: Bool = true) async throws -> DesktopTaskObservation {
@@ -354,63 +370,73 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
               let frontmostBundleURL = frontmostApplication.bundleURL else {
             return "当前没有可确认的前台应用窗口。"
         }
+        let applicationName = frontmostApplication.localizedName ?? frontmostBundleIdentifier
 
         let visibleApplication = DesktopApplicationCandidate(
             bundleIdentifier: frontmostBundleIdentifier,
             url: frontmostBundleURL,
-            names: [frontmostApplication.localizedName ?? frontmostBundleIdentifier]
+            names: [applicationName]
         )
         let presence = DesktopApplicationResolver.presence(of: visibleApplication)
         guard presence.hasVisibleWindow else {
-            return "「\(frontmostApplication.localizedName ?? frontmostBundleIdentifier)」进程正在运行，但当前没有可见窗口，所以我不能说我看到了它。"
+            return "「\(applicationName)」进程正在运行，但当前没有可见窗口，所以我不能说我看到了它。"
         }
 
         if Self.isWindowVisibilityConfirmation(intent) {
             return presence.isForeground
-                ? "能确认当前前台是「\(frontmostApplication.localizedName ?? frontmostBundleIdentifier)」，而且它有可见窗口。"
+                ? "能确认当前前台是「\(applicationName)」，而且它有可见窗口。"
                 : "应用有可见窗口，但当前没有位于前台，所以我不能说正在看它。"
         }
 
         let observation: DesktopTaskObservation
         do { observation = try await observeForAction(requireActionPermissions: false) }
         catch { return "当前画面尚未稳定，未取得有效观察。" }
-        let observedContentVersion = observation.contentVersion
         guard !Task.isCancelled else { return "屏幕读取已取消。" }
-        let presented = observation.targets
-        let entries = presented.enumerated().map { index, target in
+        let entries = observation.targets.enumerated().map { index, target in
             StepFunScreenControlEntry(index: index + 1, label: target.label, kind: target.source)
         }
         let description = StepFunScreenDescription(entries: entries, activeAppName: observation.app,
             capturedAt: observation.capturedAt, observationID: observation.id)
-        let rendered = description.renderedForVoiceModel()
 
         // Most conversational screen questions only need reliable app/window
         // identity plus visible labels. Keep that path local and sub-second;
         // reserve the remote vision model for genuinely visual semantics.
-        if !Self.requiresRemoteVisualSemantics(intent), !presented.isEmpty {
-            currentDescription = description
-            describedTargets = Dictionary(uniqueKeysWithValues: presented.enumerated().map { ($0.offset + 1, $0.element) })
-            let labels = presented.prefix(18).map(\.label).filter { !$0.isEmpty }
+        if !Self.requiresRemoteVisualSemantics(intent), !observation.targets.isEmpty {
+            remember(description, targets: observation.targets)
+            let labels = observation.targets.prefix(18).map(\.label).filter { !$0.isEmpty }
             let summary = labels.isEmpty ? "没有读到可靠的界面文字。" : "本地能确认的界面文字或控件包括：\(labels.joined(separator: "、"))。"
             DesktopVoiceTrace.event("screen_answer_local", turnID: currentTurnID,
-                fields: ["target_count": String(presented.count), "remote_vision": "false"])
-            return "当前可见窗口属于「\(frontmostApplication.localizedName ?? frontmostBundleIdentifier)」。\(summary)"
+                fields: ["target_count": String(observation.targets.count), "remote_vision": "false"])
+            return "当前可见窗口属于「\(applicationName)」。\(summary)"
         }
 
         guard engine.observe().isScreenshotStreamingEnabled else {
-            return "当前截图发送已关闭。我能确认「\(frontmostApplication.localizedName ?? frontmostBundleIdentifier)」有可见窗口，但不能解释窗口里的视觉内容。\n\(rendered)"
+            return "当前截图发送已关闭。我能确认「\(applicationName)」有可见窗口，但不能解释窗口里的视觉内容。\n\(description.renderedForVoiceModel())"
         }
+        return await describeWindowWithVision(intent: intent, application: frontmostApplication,
+            bundleIdentifier: frontmostBundleIdentifier, bundleURL: frontmostBundleURL,
+            observation: observation, description: description, retriesRemaining: retriesRemaining)
+    }
 
-        let relatedProcessIdentifiers = DesktopApplicationResolver.processIdentifiers(
-            belongingTo: frontmostBundleURL
-        )
+    /// Numbers the described targets so a later action can name one by index.
+    private func remember(_ description: StepFunScreenDescription, targets: [DesktopTaskTarget]) {
+        currentDescription = description
+        describedTargets = Dictionary(uniqueKeysWithValues: targets.enumerated().map { ($0.offset + 1, $0.element) })
+    }
+
+    private func describeWindowWithVision(intent: String, application: NSRunningApplication,
+                                          bundleIdentifier: String, bundleURL: URL,
+                                          observation: DesktopTaskObservation, description: StepFunScreenDescription,
+                                          retriesRemaining: Int) async -> String {
+        let applicationName = application.localizedName ?? bundleIdentifier
+        let rendered = description.renderedForVoiceModel()
         let windowCapture: CompanionWindowCGImageCapture
         do {
             guard let capturedWindow = try await CompanionScreenCaptureUtility.captureVisibleApplicationWindow(
-                processIdentifiers: relatedProcessIdentifiers,
-                preferredFrontmostProcessIdentifier: frontmostApplication.processIdentifier
+                processIdentifiers: DesktopApplicationResolver.processIdentifiers(belongingTo: bundleURL),
+                preferredFrontmostProcessIdentifier: application.processIdentifier
             ) else {
-                return "读取时没有找到「\(frontmostApplication.localizedName ?? frontmostBundleIdentifier)」的可见窗口，所以我不能声称看到了内容。"
+                return "读取时没有找到「\(applicationName)」的可见窗口，所以我不能声称看到了内容。"
             }
             windowCapture = capturedWindow
         } catch {
@@ -420,12 +446,12 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
         // general: while the slow vision call runs, the app can switch windows
         // without changing its bundle ID or process.
         let observedWindow = DesktopObservedWindowIdentity(
-            bundleIdentifier: frontmostBundleIdentifier,
+            bundleIdentifier: bundleIdentifier,
             processIdentifier: windowCapture.processIdentifier,
             windowID: Int(windowCapture.windowID),
             frame: windowCapture.frame,
             capturedAt: windowCapture.capturedAt,
-            contentVersion: observedContentVersion,
+            contentVersion: observation.contentVersion,
             contentFingerprint: DesktopWindowContentFingerprint.hash(of: windowCapture.image)
         )
         guard let jpegData = NSBitmapImageRep(cgImage: windowCapture.image)
@@ -438,44 +464,13 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
             let result = try await visionClient.describeScreen(imageDataURL: imageDataURL, intent: intent,
                                                                previousObservations: previous, controlsContext: rendered)
             try Task.checkCancellation()
-            let currentFrontmostApplication = NSWorkspace.shared.frontmostApplication
-            let relatedProcessesStillCurrent = DesktopApplicationResolver.processIdentifiers(
-                belongingTo: frontmostBundleURL
-            ).contains(windowCapture.processIdentifier)
-            guard observedWindow.isStillCurrent(
-                frontmostBundleIdentifier: currentFrontmostApplication?.bundleIdentifier,
-                frontmostWindowID: currentWindowID(),
-                currentWindowFrame: Self.currentFrameOfWindow(windowCapture.windowID),
-                observedProcessStillExists: relatedProcessesStillCurrent,
-                currentContentVersion: contentVersion,
-                maximumAge: StepFunScreenDescription.validitySeconds
-            ) else {
+            if let windowChange = await windowChangeSinceCapture(observedWindow, windowCapture: windowCapture, bundleURL: bundleURL) {
                 if retriesRemaining > 0 { return await describeScreen(intent: intent, retriesRemaining: retriesRemaining - 1) }
-                return "读取期间页面仍在变化，这份旧观察不能回答当前画面。请待页面稳定再读。"
-            }
-            // The same window can change content without any window event — a
-            // page navigation, a dialog, an auto-refresh. Re-capture the SAME
-            // window and compare a content fingerprint, and re-verify that the
-            // same process still owns the window.
-            let recapture: CompanionWindowCGImageCapture?
-            do {
-                recapture = try await CompanionScreenCaptureUtility.recaptureWindow(
-                    matchingWindowID: windowCapture.windowID,
-                    processIdentifiers: DesktopApplicationResolver.processIdentifiers(belongingTo: frontmostBundleURL)
-                )
-            } catch {
-                recapture = nil
-            }
-            guard let recapture,
-                  recapture.processIdentifier == windowCapture.processIdentifier,
-                  observedWindow.contentStillMatches(DesktopWindowContentFingerprint.hash(of: recapture.image)) else {
-                if retriesRemaining > 0 { return await describeScreen(intent: intent, retriesRemaining: retriesRemaining - 1) }
-                return "读取期间页面内容已变化，这份旧观察不能回答当前画面。请待页面稳定再读。"
+                return windowChange
             }
             // Create numbering only after the slow vision call and reject changed
             // windows; final actions still revalidate the stored exact target.
-            currentDescription = description
-            describedTargets = Dictionary(uniqueKeysWithValues: presented.enumerated().map { ($0.offset + 1, $0.element) })
+            remember(description, targets: observation.targets)
             screenHistory.append("\(Date().formatted())，\(observation.app)，问题：\(intent)，观察：\(result.description)")
             screenHistory = Array(screenHistory.suffix(4))
             print("[StepFunRealtimeTools] screen vision completed in \(result.elapsedMilliseconds) ms")
@@ -486,6 +481,45 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
         } catch {
             return "屏幕读取失败：\(error.localizedDescription)。本地控件：\n\(rendered)"
         }
+    }
+
+    /// Nil while the captured window is still in front, unchanged and owned by
+    /// the same process; otherwise why the old observation cannot answer.
+    private func windowChangeSinceCapture(_ observedWindow: DesktopObservedWindowIdentity,
+                                          windowCapture: CompanionWindowCGImageCapture, bundleURL: URL) async -> String? {
+        let currentFrontmostApplication = NSWorkspace.shared.frontmostApplication
+        let relatedProcessesStillCurrent = DesktopApplicationResolver.processIdentifiers(
+            belongingTo: bundleURL
+        ).contains(windowCapture.processIdentifier)
+        guard observedWindow.isStillCurrent(
+            frontmostBundleIdentifier: currentFrontmostApplication?.bundleIdentifier,
+            frontmostWindowID: currentWindowID(),
+            currentWindowFrame: Self.currentFrameOfWindow(windowCapture.windowID),
+            observedProcessStillExists: relatedProcessesStillCurrent,
+            currentContentVersion: contentVersion,
+            maximumAge: StepFunScreenDescription.validitySeconds
+        ) else {
+            return "读取期间页面仍在变化，这份旧观察不能回答当前画面。请待页面稳定再读。"
+        }
+        // The same window can change content without any window event — a
+        // page navigation, a dialog, an auto-refresh. Re-capture the SAME
+        // window and compare a content fingerprint, and re-verify that the
+        // same process still owns the window.
+        let recapture: CompanionWindowCGImageCapture?
+        do {
+            recapture = try await CompanionScreenCaptureUtility.recaptureWindow(
+                matchingWindowID: windowCapture.windowID,
+                processIdentifiers: DesktopApplicationResolver.processIdentifiers(belongingTo: bundleURL)
+            )
+        } catch {
+            recapture = nil
+        }
+        guard let recapture,
+              recapture.processIdentifier == windowCapture.processIdentifier,
+              observedWindow.contentStillMatches(DesktopWindowContentFingerprint.hash(of: recapture.image)) else {
+            return "读取期间页面内容已变化，这份旧观察不能回答当前画面。请待页面稳定再读。"
+        }
+        return nil
     }
 
     private static func taskTarget(_ target: LocalPerceptionTargetCache.SnapshotTarget) -> DesktopTaskTarget {

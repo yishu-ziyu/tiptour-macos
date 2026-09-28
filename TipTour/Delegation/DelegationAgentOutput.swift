@@ -13,74 +13,86 @@ struct DelegationAgentOutput {
     mutating func consume(_ event: [String: Any], tool: DelegationAgentTool) {
         let type = event["type"] as? String
         switch tool {
-        case .claudeCode:
-            guard type == "result" else { return }
+        case .claudeCode: consumeClaudeCodeEvent(event, type: type)
+        case .codex: consumeCodexEvent(event, type: type)
+        case .kimiCode: consumeKimiCodeEvent(event, type: type)
+        case .stepCode: consumeStepCodeEvent(event, type: type)
+        }
+    }
+
+    private mutating func consumeClaudeCodeEvent(_ event: [String: Any], type: String?) {
+        guard type == "result" else { return }
+        receivedTerminal = true
+        summary = event["result"] as? String ?? ""
+        sessionID = event["session_id"] as? String
+        costInUSD = event["total_cost_usd"] as? Double
+        durationMilliseconds = event["duration_ms"] as? Int
+        terminalFailure = event["is_error"] as? Bool == true
+            ? (summary.isEmpty ? "Claude Code 报告出错" : summary) : nil
+    }
+
+    private mutating func consumeCodexEvent(_ event: [String: Any], type: String?) {
+        switch type {
+        case "thread.started":
+            sessionID = event["thread_id"] as? String
+        case "item.completed":
+            guard let item = event["item"] as? [String: Any],
+                  item["type"] as? String == "agent_message" else { return }
+            summary = item["text"] as? String ?? ""
+        case "turn.completed":
             receivedTerminal = true
-            summary = event["result"] as? String ?? ""
+            terminalFailure = nil
+        case "turn.failed":
+            receivedTerminal = true
+            terminalFailure = Self.errorMessage(in: event) ?? "Codex 报告出错"
+        case "error":
+            streamError = Self.errorMessage(in: event)
+        default:
+            break
+        }
+    }
+
+    private mutating func consumeKimiCodeEvent(_ event: [String: Any], type: String?) {
+        switch event["role"] as? String {
+        case "assistant":
+            let text = Self.text(in: event["content"])
+            let hasToolCalls = !(event["tool_calls"] as? [[String: Any]] ?? []).isEmpty
+            receivedTerminal = !hasToolCalls && !text.isEmpty
+            if !text.isEmpty { summary = text }
+        case "tool":
+            receivedTerminal = false
+        case "meta" where type == "session.resume_hint":
             sessionID = event["session_id"] as? String
-            costInUSD = event["total_cost_usd"] as? Double
-            durationMilliseconds = event["duration_ms"] as? Int
-            terminalFailure = event["is_error"] as? Bool == true
-                ? (summary.isEmpty ? "Claude Code 报告出错" : summary) : nil
-        case .codex:
-            switch type {
-            case "thread.started":
-                sessionID = event["thread_id"] as? String
-            case "item.completed":
-                guard let item = event["item"] as? [String: Any],
-                      item["type"] as? String == "agent_message" else { return }
-                summary = item["text"] as? String ?? ""
-            case "turn.completed":
-                receivedTerminal = true
-                terminalFailure = nil
-            case "turn.failed":
-                receivedTerminal = true
-                terminalFailure = Self.errorMessage(in: event) ?? "Codex 报告出错"
-            case "error":
-                streamError = Self.errorMessage(in: event)
-            default:
-                break
+        default:
+            break
+        }
+    }
+
+    private mutating func consumeStepCodeEvent(_ event: [String: Any], type: String?) {
+        switch type {
+        case "session":
+            sessionID = event["id"] as? String
+        case "agent_start":
+            receivedTerminal = false
+            terminalFailure = nil
+        case "message_start", "tool_execution_start":
+            receivedTerminal = false
+        case "message_end":
+            guard let message = event["message"] as? [String: Any] else { return }
+            consumeStepMessage(message)
+        case "tool_execution_end" where event["isError"] as? Bool == true:
+            if let result = event["result"] as? [String: Any] {
+                let detail = Self.text(in: result["content"])
+                if !detail.isEmpty { streamError = String(detail.suffix(400)) }
             }
-        case .kimiCode:
-            switch event["role"] as? String {
-            case "assistant":
-                let text = Self.text(in: event["content"])
-                let hasToolCalls = !(event["tool_calls"] as? [[String: Any]] ?? []).isEmpty
-                receivedTerminal = !hasToolCalls && !text.isEmpty
-                if !text.isEmpty { summary = text }
-            case "tool":
-                receivedTerminal = false
-            case "meta" where type == "session.resume_hint":
-                sessionID = event["session_id"] as? String
-            default:
-                break
-            }
-        case .stepCode:
-            switch type {
-            case "session":
-                sessionID = event["id"] as? String
-            case "agent_start":
-                receivedTerminal = false
-                terminalFailure = nil
-            case "message_start", "tool_execution_start":
-                receivedTerminal = false
-            case "message_end":
-                guard let message = event["message"] as? [String: Any] else { return }
-                consumeStepMessage(message)
-            case "tool_execution_end" where event["isError"] as? Bool == true:
-                if let result = event["result"] as? [String: Any] {
-                    let detail = Self.text(in: result["content"])
-                    if !detail.isEmpty { streamError = String(detail.suffix(400)) }
-                }
-            case "agent_end":
-                receivedTerminal = false
-                guard let messages = event["messages"] as? [[String: Any]],
-                      let message = messages.last(where: { $0["role"] as? String == "assistant" }) else { return }
-                consumeStepMessage(message)
-                receivedTerminal = message["stopReason"] as? String == "stop" && !Self.text(in: message["content"]).isEmpty
-            default:
-                break
-            }
+        case "agent_end":
+            receivedTerminal = false
+            guard let messages = event["messages"] as? [[String: Any]],
+                  let message = messages.last(where: { $0["role"] as? String == "assistant" }) else { return }
+            consumeStepMessage(message)
+            receivedTerminal = message["stopReason"] as? String == "stop" && !Self.text(in: message["content"]).isEmpty
+        default:
+            break
         }
     }
 

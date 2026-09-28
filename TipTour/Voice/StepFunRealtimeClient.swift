@@ -601,21 +601,7 @@ final class StepFunRealtimeClient {
             sendSessionUpdate()
 
         case "session.updated":
-            if let session = payload["session"] as? [String: Any] {
-                let effectiveVoice = session["voice"] as? String ?? "not returned"
-                let effectiveModel = session["model"] as? String ?? "not returned"
-                let effectiveTurnDetection = session["turn_detection"] ?? "not returned"
-                print("[StepFunRealtime] session configured: model=\(effectiveModel), requestedVoice=\(voice), effectiveVoice=\(effectiveVoice), turnDetection=\(effectiveTurnDetection)")
-                await emit(.sessionConfigured(
-                    voiceMatchesRequest: effectiveVoice == "not returned" || effectiveVoice == voice,
-                    effectiveVoice: effectiveVoice == "not returned" ? nil : effectiveVoice
-                ))
-            }
-            stateLock.withLock {
-                isSessionConfigured = true
-                isReadyForInput = true
-            }
-            await emit(.sessionReady)
+            await handleSessionUpdated(payload: payload)
 
         case "response.audio.delta":
             guard let delta = payload["delta"] as? String,
@@ -661,44 +647,70 @@ final class StepFunRealtimeClient {
             await emit(.userStoppedSpeaking)
 
         case "response.done":
-            if let response = payload["response"] as? [String: Any],
-               let status = response["status"] as? String,
-               ["cancelled", "canceled", "failed", "incomplete"].contains(status) {
-                stateLock.withLock { responseBoundary.cancel() }
-                await emit(.responseAborted(responseID: responseID, status: status))
-                return
-            }
-            // Recover a complete call from the response manifest when a delta
-            // event was missing, but never dispatch the same call twice.
-            if let response = payload["response"] as? [String: Any],
-               let output = response["output"] as? [[String: Any]] {
-                for item in output where item["type"] as? String == "function_call" {
-                    await emitToolCall(item, responseID: responseID)
-                }
-            }
-            stateLock.withLock { responseBoundary.complete() }
-            await emit(.turnComplete)
+            await handleResponseDone(payload: payload, responseID: responseID)
 
         case "error":
-            let error = payload["error"] as? [String: Any]
-            let message = (error?["message"] as? String) ?? "unknown realtime error"
-            let detailedMessage: String
-            if let code = error?["code"] {
-                detailedMessage = "[\(code)] \(message)"
-            } else {
-                detailedMessage = message
-            }
-            // Only fatal while configuring. Once the session is up an error is
-            // recoverable and the socket stays open — but it is always emitted,
-            // never swallowed.
-            stateLock.withLock {
-                if !isSessionConfigured { handshakeError = StepFunRealtimeError.serverReported(detailedMessage) }
-            }
-            await emit(.error(StepFunRealtimeError.serverReported(detailedMessage)))
+            await handleServerError(payload: payload)
 
         default:
             break
         }
+    }
+
+    private func handleSessionUpdated(payload: [String: Any]) async {
+        if let session = payload["session"] as? [String: Any] {
+            let effectiveVoice = session["voice"] as? String ?? "not returned"
+            let effectiveModel = session["model"] as? String ?? "not returned"
+            let effectiveTurnDetection = session["turn_detection"] ?? "not returned"
+            print("[StepFunRealtime] session configured: model=\(effectiveModel), requestedVoice=\(voice), effectiveVoice=\(effectiveVoice), turnDetection=\(effectiveTurnDetection)")
+            await emit(.sessionConfigured(
+                voiceMatchesRequest: effectiveVoice == "not returned" || effectiveVoice == voice,
+                effectiveVoice: effectiveVoice == "not returned" ? nil : effectiveVoice
+            ))
+        }
+        stateLock.withLock {
+            isSessionConfigured = true
+            isReadyForInput = true
+        }
+        await emit(.sessionReady)
+    }
+
+    private func handleResponseDone(payload: [String: Any], responseID: String?) async {
+        if let response = payload["response"] as? [String: Any],
+           let status = response["status"] as? String,
+           ["cancelled", "canceled", "failed", "incomplete"].contains(status) {
+            stateLock.withLock { responseBoundary.cancel() }
+            await emit(.responseAborted(responseID: responseID, status: status))
+            return
+        }
+        // Recover a complete call from the response manifest when a delta
+        // event was missing, but never dispatch the same call twice.
+        if let response = payload["response"] as? [String: Any],
+           let output = response["output"] as? [[String: Any]] {
+            for item in output where item["type"] as? String == "function_call" {
+                await emitToolCall(item, responseID: responseID)
+            }
+        }
+        stateLock.withLock { responseBoundary.complete() }
+        await emit(.turnComplete)
+    }
+
+    private func handleServerError(payload: [String: Any]) async {
+        let error = payload["error"] as? [String: Any]
+        let message = (error?["message"] as? String) ?? "unknown realtime error"
+        let detailedMessage: String
+        if let code = error?["code"] {
+            detailedMessage = "[\(code)] \(message)"
+        } else {
+            detailedMessage = message
+        }
+        // Only fatal while configuring. Once the session is up an error is
+        // recoverable and the socket stays open — but it is always emitted,
+        // never swallowed.
+        stateLock.withLock {
+            if !isSessionConfigured { handshakeError = StepFunRealtimeError.serverReported(detailedMessage) }
+        }
+        await emit(.error(StepFunRealtimeError.serverReported(detailedMessage)))
     }
 
     private func emit(_ event: StepFunRealtimeEvent) async {

@@ -1801,101 +1801,88 @@ final class TipTourEngine {
         targetDiagnosis: String?,
         hasFocusTarget: Bool
     ) -> TipTourEngineVisualContextDecision {
-        var reasons = [String]()
-        if let policyReason {
-            reasons.append(policyReason)
+        let policyReasons = policyReason.map { [$0] } ?? []
+        if let requestedDecision = requestedVisualContextDecision(
+            requestedMode: requestedMode,
+            reasons: policyReasons,
+            hasFocusTarget: hasFocusTarget
+        ) {
+            return requestedDecision
         }
+        return automaticVisualContextDecision(
+            requestedMode: requestedMode,
+            policyReason: policyReason,
+            activeApp: activeApp,
+            targetCount: targetCount,
+            targetDiagnosis: targetDiagnosis,
+            hasFocusTarget: hasFocusTarget
+        )
+    }
 
+    /// The agent's explicit mode, except that disabled screenshots always
+    /// fall back to compact state. Nil when the agent left the choice to us.
+    private func requestedVisualContextDecision(
+        requestedMode: String,
+        reasons: [String],
+        hasFocusTarget: Bool
+    ) -> TipTourEngineVisualContextDecision? {
         let screenshotsEnabled = isScreenshotStreamingEnabledProvider()
-        let requestedNone = requestedMode == "none"
-        if requestedNone {
-            reasons.append("agent_requested_no_screenshot")
-            return TipTourEngineVisualContextDecision(
-                mode: "none",
-                requestedMode: requestedMode,
-                reasons: reasons,
-                screenshotAllowed: screenshotsEnabled,
-                screenshotIncluded: false,
-                screenChangedSinceLastSnapshot: nil
-            )
+        let mode: String
+        let reason: String
+        if requestedMode == "none" {
+            (mode, reason) = ("none", "agent_requested_no_screenshot")
+        } else if !screenshotsEnabled {
+            (mode, reason) = ("compact_state", "screenshots_disabled")
+        } else {
+            switch requestedMode {
+            case "compact_state":
+                (mode, reason) = ("compact_state", "agent_requested_compact_state")
+            case "target_crop":
+                (mode, reason) = hasFocusTarget
+                    ? ("target_crop", "agent_requested_target_crop")
+                    : ("full_screenshot", "target_crop_requested_without_target")
+            case "full_screenshot":
+                (mode, reason) = ("full_screenshot", "agent_requested_screenshot")
+            default:
+                return nil
+            }
         }
+        return TipTourEngineVisualContextDecision(
+            mode: mode,
+            requestedMode: requestedMode,
+            reasons: reasons + [reason],
+            screenshotAllowed: screenshotsEnabled,
+            screenshotIncluded: false,
+            screenChangedSinceLastSnapshot: nil
+        )
+    }
 
-        guard screenshotsEnabled else {
-            reasons.append("screenshots_disabled")
-            return TipTourEngineVisualContextDecision(
-                mode: "compact_state",
-                requestedMode: requestedMode,
-                reasons: reasons,
-                screenshotAllowed: false,
-                screenshotIncluded: false,
-                screenChangedSinceLastSnapshot: nil
-            )
-        }
-
-        if requestedMode == "compact_state" {
-            reasons.append("agent_requested_compact_state")
-            return TipTourEngineVisualContextDecision(
-                mode: "compact_state",
-                requestedMode: requestedMode,
-                reasons: reasons,
-                screenshotAllowed: true,
-                screenshotIncluded: false,
-                screenChangedSinceLastSnapshot: nil
-            )
-        }
-
-        if requestedMode == "target_crop" {
-            reasons.append(hasFocusTarget ? "agent_requested_target_crop" : "target_crop_requested_without_target")
-            return TipTourEngineVisualContextDecision(
-                mode: hasFocusTarget ? "target_crop" : "full_screenshot",
-                requestedMode: requestedMode,
-                reasons: reasons,
-                screenshotAllowed: true,
-                screenshotIncluded: false,
-                screenChangedSinceLastSnapshot: nil
-            )
-        }
-
-        if requestedMode == "full_screenshot" {
-            reasons.append("agent_requested_screenshot")
-            return TipTourEngineVisualContextDecision(
-                mode: "full_screenshot",
-                requestedMode: requestedMode,
-                reasons: reasons,
-                screenshotAllowed: true,
-                screenshotIncluded: false,
-                screenChangedSinceLastSnapshot: nil
-            )
-        }
-
+    private func automaticVisualContextDecision(
+        requestedMode: String,
+        policyReason: String?,
+        activeApp: NSRunningApplication?,
+        targetCount: Int,
+        targetDiagnosis: String?,
+        hasFocusTarget: Bool
+    ) -> TipTourEngineVisualContextDecision {
         let canvasApp = isVisualCanvasApplication(activeApp)
-        if canvasApp {
-            reasons.append("canvas_app")
-        }
-        if targetCount == 0 {
-            reasons.append("no_local_targets")
-        }
-        if let targetDiagnosis {
-            reasons.append(targetDiagnosis)
-        }
-        if hasFocusTarget {
-            reasons.append("focus_target_available")
-        }
-        if recentActionNeedsVisualContext() {
-            reasons.append("recent_action_uncertain")
-        }
-        if policyReasonNeedsScreenshot(policyReason) {
-            reasons.append("reason_requests_visual_context")
-        }
+        let recentActionUncertain = recentActionNeedsVisualContext()
+        let reasonRequestsScreenshot = policyReasonNeedsScreenshot(policyReason)
+        let reasonsWithConditions: [(String?, Bool)] = [
+            (policyReason, policyReason != nil),
+            ("canvas_app", canvasApp),
+            ("no_local_targets", targetCount == 0),
+            (targetDiagnosis, targetDiagnosis != nil),
+            ("focus_target_available", hasFocusTarget),
+            ("recent_action_uncertain", recentActionUncertain),
+            ("reason_requests_visual_context", reasonRequestsScreenshot)
+        ]
+        let reasons = reasonsWithConditions.compactMap { reason, applies in applies ? reason : nil }
 
-        let shouldIncludeVisualContext = canvasApp
-            || targetCount == 0
-            || hasFocusTarget
-            || targetDiagnosis == "target_not_found"
-            || targetDiagnosis == "target_ambiguous"
-            || targetDiagnosis == "explicit_target_not_found"
-            || recentActionNeedsVisualContext()
-            || policyReasonNeedsScreenshot(policyReason)
+        let targetNeedsLook = ["target_not_found", "target_ambiguous", "explicit_target_not_found"]
+            .contains(targetDiagnosis ?? "")
+        let shouldIncludeVisualContext = canvasApp || targetCount == 0 || hasFocusTarget
+            || targetNeedsLook || recentActionUncertain || reasonRequestsScreenshot
         let shouldUseTargetCrop = hasFocusTarget && targetDiagnosis != "target_ambiguous"
 
         return TipTourEngineVisualContextDecision(

@@ -447,6 +447,26 @@ final class TipTourHarnessServer {
         })
     }
 
+    /// A request body that could not be decoded: logged, then answered with 400.
+    private func invalidRequestResponse(logName: String, error: Error, body: Data) -> HarnessHTTPResponse {
+        PipelineLogStore.shared.record(
+            category: "harness",
+            name: logName,
+            status: "failed",
+            message: error.localizedDescription,
+            metadata: ["body_bytes": String(body.count)]
+        )
+        return jsonResponse(
+            [
+                "ok": false,
+                "reason": "invalid_request",
+                "message": error.localizedDescription
+            ],
+            statusCode: 400,
+            statusText: "Bad Request"
+        )
+    }
+
     private func handleTargetsRequest() async -> HarnessHTTPResponse {
         let targets = await tipTourEngine.localPerceptionTargets(
             refresh: true,
@@ -473,22 +493,7 @@ final class TipTourHarnessServer {
             )
             return encodableResponse(result)
         } catch {
-            PipelineLogStore.shared.record(
-                category: "harness",
-                name: "visual_context_decode",
-                status: "failed",
-                message: error.localizedDescription,
-                metadata: ["body_bytes": String(body.count)]
-            )
-            return jsonResponse(
-                [
-                    "ok": false,
-                    "reason": "invalid_request",
-                    "message": error.localizedDescription
-                ],
-                statusCode: 400,
-                statusText: "Bad Request"
-            )
+            return invalidRequestResponse(logName: "visual_context_decode", error: error, body: body)
         }
     }
 
@@ -499,22 +504,7 @@ final class TipTourHarnessServer {
                 : try JSONDecoder().decode(TipTourHighlightSourceRequest.self, from: body)
             return encodableResponse(tipTourEngine.resolveHighlightSource(request))
         } catch {
-            PipelineLogStore.shared.record(
-                category: "harness",
-                name: "resolve_highlight_source_decode",
-                status: "failed",
-                message: error.localizedDescription,
-                metadata: ["body_bytes": String(body.count)]
-            )
-            return jsonResponse(
-                [
-                    "ok": false,
-                    "reason": "invalid_request",
-                    "message": error.localizedDescription
-                ],
-                statusCode: 400,
-                statusText: "Bad Request"
-            )
+            return invalidRequestResponse(logName: "resolve_highlight_source_decode", error: error, body: body)
         }
     }
 
@@ -552,22 +542,7 @@ final class TipTourHarnessServer {
             )
             return encodableResponse(result)
         } catch {
-            PipelineLogStore.shared.record(
-                category: "harness",
-                name: "ground_target_decode",
-                status: "failed",
-                message: error.localizedDescription,
-                metadata: ["body_bytes": String(body.count)]
-            )
-            return jsonResponse(
-                [
-                    "ok": false,
-                    "reason": "invalid_request",
-                    "message": error.localizedDescription
-                ],
-                statusCode: 400,
-                statusText: "Bad Request"
-            )
+            return invalidRequestResponse(logName: "ground_target_decode", error: error, body: body)
         }
     }
 
@@ -581,22 +556,7 @@ final class TipTourHarnessServer {
             }
             return encodableResponse(HarnessCompactPlanNextActionResponse(result))
         } catch {
-            PipelineLogStore.shared.record(
-                category: "harness",
-                name: "plan_next_action_decode",
-                status: "failed",
-                message: error.localizedDescription,
-                metadata: ["body_bytes": String(body.count)]
-            )
-            return jsonResponse(
-                [
-                    "ok": false,
-                    "reason": "invalid_request",
-                    "message": error.localizedDescription
-                ],
-                statusCode: 400,
-                statusText: "Bad Request"
-            )
+            return invalidRequestResponse(logName: "plan_next_action_decode", error: error, body: body)
         }
     }
 
@@ -607,22 +567,7 @@ final class TipTourHarnessServer {
             let result = await tipTourEngine.submitSingleActionWorkflowPlanAndWait(plan)
             return encodableResponse(result)
         } catch {
-            PipelineLogStore.shared.record(
-                category: "harness",
-                name: "workflow_plan_decode",
-                status: "failed",
-                message: error.localizedDescription,
-                metadata: ["body_bytes": String(body.count)]
-            )
-            return jsonResponse(
-                [
-                    "ok": false,
-                    "reason": "invalid_request",
-                    "message": error.localizedDescription
-                ],
-                statusCode: 400,
-                statusText: "Bad Request"
-            )
+            return invalidRequestResponse(logName: "workflow_plan_decode", error: error, body: body)
         }
     }
 
@@ -657,22 +602,7 @@ final class TipTourHarnessServer {
             )
             return encodableResponse(result)
         } catch {
-            PipelineLogStore.shared.record(
-                category: "harness",
-                name: "task_start_decode",
-                status: "failed",
-                message: error.localizedDescription,
-                metadata: ["body_bytes": String(body.count)]
-            )
-            return jsonResponse(
-                [
-                    "ok": false,
-                    "reason": "invalid_request",
-                    "message": error.localizedDescription
-                ],
-                statusCode: 400,
-                statusText: "Bad Request"
-            )
+            return invalidRequestResponse(logName: "task_start_decode", error: error, body: body)
         }
     }
 
