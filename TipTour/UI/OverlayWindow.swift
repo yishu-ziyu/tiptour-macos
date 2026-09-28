@@ -568,6 +568,7 @@ struct BlueCursorView: View {
                     return false
                 }
                 return companionManager.voiceState == .listening
+                    || companionManager.voiceState == .thinking
                     || companionManager.voiceState == .responding
             }()
 

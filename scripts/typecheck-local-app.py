@@ -39,6 +39,9 @@ def main() -> int:
     compiler_help = subprocess.check_output(["xcrun", "swiftc", "-help"], text=True)
     if "-default-isolation" in compiler_help:
         command += ["-default-isolation", "MainActor"]
+    # Xcode builds with SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY; without
+    # it here a missing `import Combine` passed this check and failed in Xcode.
+    command += ["-enable-upcoming-feature", "MemberImportVisibility"]
     command += [str(path) for path in sources]
     with tempfile.NamedTemporaryFile(prefix="tiptour-app-typecheck-", suffix=".log", delete=False) as log:
         print(f"Type-checking {len(sources)} source files. Log: {log.name}", flush=True)

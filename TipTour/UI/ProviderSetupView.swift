@@ -236,6 +236,85 @@ struct RealtimeVoicePicker: View {
     }
 }
 
+/// Chooses how a voice conversation takes turns.
+struct VoiceStylePicker: View {
+    @ObservedObject var companionManager: CompanionManager
+    @State private var hoveredStyle: TipTourDefaults.VoiceStyle?
+
+    var body: some View {
+        VStack(spacing: 6) {
+            ForEach(TipTourDefaults.VoiceStyle.allCases) { style in
+                let isSelected = companionManager.voiceStyle == style
+                Button { companionManager.setVoiceStyle(style) } label: {
+                    HStack(alignment: .center, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(style.title)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(isSelected ? DS.Colors.accentText : DS.Colors.textPrimary)
+                            Text(style.detail)
+                                .font(.system(size: 11))
+                                .foregroundColor(DS.Colors.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .foregroundColor(isSelected ? DS.Colors.accentText : DS.Colors.textSecondary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 8)
+                        .fill(isSelected
+                            ? DS.Colors.blue950.opacity(0.55)
+                            : (hoveredStyle == style ? DS.Colors.surface2 : DS.Colors.surface1)))
+                    .overlay(RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(isSelected ? DS.Colors.accentText.opacity(0.65) : DS.Colors.borderSubtle))
+                    .contentShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .onHover { hoveredStyle = $0 ? style : nil }
+                .pointerCursor()
+                .accessibilityLabel("说话方式：\(style.title)")
+                .accessibilityValue(isSelected ? "已选择" : "未选择")
+            }
+        }
+    }
+}
+
+/// The MiniMax voice and key the 「声音稳定」 style speaks with.
+struct MiniMaxVoiceSettings: View {
+    @ObservedObject var companionManager: CompanionManager
+    @State private var voiceDraft = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            TextField("MiniMax 音色编号（voice_id）", text: $voiceDraft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundColor(DS.Colors.textPrimary)
+                .tint(DS.Colors.accentText)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(DS.Colors.surface2))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(DS.Colors.borderStrong))
+                .accessibilityLabel("MiniMax 音色编号")
+                .onSubmit { companionManager.setMiniMaxVoiceID(voiceDraft) }
+                .onChange(of: voiceDraft) { _, draft in companionManager.setMiniMaxVoiceID(draft) }
+            Text("填你在 MiniMax 定义好的音色编号，在 MiniMax 开放平台的音色列表里能找到。下一句开始生效。")
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ProviderKeyCard(
+                title: "MiniMax 密钥",
+                detail: "她的回答会发给 MiniMax 念出来。用 Token Plan 的密钥。",
+                keyName: TipTourDefaults.MiniMaxConfiguration.keyName,
+                portal: ("MiniMax 开放平台", TipTourDefaults.MiniMaxConfiguration.keyPortalURL),
+                onKeyChanged: companionManager.resetStableVoiceSession)
+        }
+        .onAppear { voiceDraft = companionManager.miniMaxVoiceID }
+    }
+}
+
 struct ModeSelectionView: View {
     @ObservedObject var companionManager: CompanionManager
     var compact = false
@@ -319,11 +398,29 @@ struct ModeSelectionView: View {
 }
 
 struct ProviderKeyCard: View {
-    let mode: TipTourMode
+    let title: String
+    let detail: String
+    let keyName: String
+    /// Where to get a key, shown under the detail; nil shows no link.
+    var portal: (name: String, url: URL)? = nil
     var onKeyChanged: () -> Void = {}
-    private var title: String { mode == .jev ? "JEV / TypeSafe 密钥" : "\(mode.title) 密钥" }
-    private var detail: String { mode.privacySummary }
-    private var keyName: String { mode.keyName }
+
+    init(mode: TipTourMode, onKeyChanged: @escaping () -> Void = {}) {
+        title = mode == .jev ? "JEV / TypeSafe 密钥" : "\(mode.title) 密钥"
+        detail = mode.privacySummary
+        keyName = mode.keyName
+        if mode == .jev { portal = ("TypeSafe 控制台", URL(string: "https://console.typesafe.ai/settings/keys")!) }
+        self.onKeyChanged = onKeyChanged
+    }
+
+    init(title: String, detail: String, keyName: String, portal: (name: String, url: URL)?,
+         onKeyChanged: @escaping () -> Void = {}) {
+        self.title = title
+        self.detail = detail
+        self.keyName = keyName
+        self.portal = portal
+        self.onKeyChanged = onKeyChanged
+    }
     @State private var input = ""
     /// Why there is or is not a key. Three states must never collapse into one
     /// "需要密钥" badge: nothing saved, saved but macOS refuses the read, and
@@ -348,8 +445,8 @@ struct ProviderKeyCard: View {
                 .font(.system(size: 12))
                 .foregroundColor(DS.Colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            if mode == .jev {
-                Link("没有密钥？前往 TypeSafe 控制台", destination: URL(string: "https://console.typesafe.ai/settings/keys")!)
+            if let portal {
+                Link("没有密钥？前往\(portal.name)", destination: portal.url)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(DS.Colors.accentText)
                     .pointerCursor()

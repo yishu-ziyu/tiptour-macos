@@ -23,6 +23,7 @@ enum ThinkingOrbState: String, CaseIterable, Sendable, Equatable {
         switch voiceState {
         case .idle: self = .breathing
         case .processing: self = .connecting
+        case .thinking: self = .weaving
         case .listening: self = .listening
         case .responding: self = .composing
         }

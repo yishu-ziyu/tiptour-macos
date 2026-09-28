@@ -95,6 +95,7 @@ struct CompanionPanelView: View {
         switch companionManager.voiceState {
         case .idle: return nil
         case .processing: return "连接中"
+        case .thinking: return "在想"
         case .listening: return "在听"
         case .responding: return "在说"
         }

@@ -26,6 +26,13 @@ Keep the approximate line counts within 50 lines of the real file; `scripts/chec
 | `TipTour/Voice/StepFunRealtimeSession.swift` | Full-duplex session with a per-session half-duplex fallback after own echo, receipt speech, cancellation and production-path synthetic probe (~1480 lines) |
 | `TipTour/Voice/StepFunRealtimeTools.swift` | Strict task/step parameters, observation-bound indices, goal-declared operation gate, redundant-action normalization and model-facing expected_label guidance; the `remember_names` declaration and its argument decoding (~670 lines) |
 | `TipTour/Voice/StepFunRealtimeToolRouter.swift` | Shared scene identity, constrained routing, task controls, name saving handed to the app, and session-bound access (~559 lines) |
+| `TipTour/Voice/StepAudioTranscriber.swift` | 「声音稳定」 speech-to-text: one utterance to Step Plan `stepaudio-2.5-asr` over HTTP + SSE (~90 lines) |
+| `TipTour/Voice/MiniMaxSpeechClient.swift` | 「声音稳定」 speech: MiniMax `t2a_v2` streamed as 24 kHz PCM16 in the user's own voice; provider errors surfaced (~120 lines) |
+| `TipTour/Voice/StableVoiceConversation.swift` | 「声音稳定」 reply from the Ctrl+K chat model with the shared identity, Ctrl+K context and names as fields; speaking lines shared with realtime voice (~115 lines) |
+| `TipTour/Voice/StableVoiceTurnRunner.swift` | One hold-to-talk turn: heard → reply → names saved → speech, interruption by pressing again, per-step timings (~180 lines) |
+| `TipTour/Voice/StableVoiceSession.swift` | Microphone only while ⌃⌥ is held (own engine), output-only playback engine (~110 lines) |
+| `TipTour/Voice/StableVoiceProbe.swift` | DEBUG `--stable-voice-probe <dir> <turn.pcm>...`: real services, production turn logic, output shaped like the realtime consistency probe (~115 lines) |
+| `TipTourTests/StableVoiceTests.swift` | Stubbed-HTTP speech-to-text and speech parsing, reply/name/transcript rules, and whole turns with a fake microphone and speaker (~330 lines) |
 | `TipTour/Voice/StepFunVisionClient.swift` | Screen understanding, history-aware comparison and bounded general-model decisions (~295 lines) |
 | `TipTourTests/StepFunVisionClientTests.swift` | Vision request format and malformed screen-description regressions (~65 lines) |
 | `TipTour/Voice/DesktopTaskCoordinator.swift` | Task-owned execution, goal revisions, step budget, verified progress, safe continuation and uncertainty (~671 lines) |
@@ -45,7 +52,7 @@ Keep the approximate line counts within 50 lines of the real file; `scripts/chec
 | `TipTour/Perception/DesktopAccessibilityReader.swift` | Bounded read-only AX evidence and local candidate geometry (~110 lines) |
 | `TipTour/Voice/StepFunResponseBoundary.swift` | Stale/duplicate response rejection and verified-receipt transcript matching (~55 lines) |
 | `TipTour/Voice/DesktopVoiceTrace.swift` | Metadata telemetry and explicitly enabled bounded local diagnostics, written under the Her bundle identity (~61 lines) |
-| `TipTour/Voice/VoiceRouteProbe.swift` | DEBUG probes; voice-task uses the production session, JEV fan-out probe never executes actions, receipt-loss/journal-recovery/preflight probe dispatch (~312 lines) |
+| `TipTour/Voice/VoiceRouteProbe.swift` | DEBUG probes; voice-task uses the production session, JEV fan-out probe never executes actions, receipt-loss/journal-recovery/preflight probe dispatch, `--stable-voice-probe` dispatch (~365 lines) |
 | `TipTour/Voice/DiagnosticPreflight.swift` | DEBUG-only read-only acceptance preflight: bundle/team identity, accessibility trust, frontmost identity, no prompts (~132 lines) |
 | `TipTour/Voice/DesktopFaultRecoveryProbe.swift` | DEBUG-only one-shot receipt-loss fault plus receipt-loss and v1 journal-recovery acceptance probes (~724 lines) |
 | `TipTour/Workflow/WorkflowModalPolicy.swift` | Distinguishes blocking modals from unrelated modeless windows (~11 lines) |
@@ -54,16 +61,17 @@ Keep the approximate line counts within 50 lines of the real file; `scripts/chec
 | `TipTourTests/WorkflowModalPolicyTests.swift` | Blocking-dialog and modeless-window rules (~15 lines) |
 | `TipTourTests/NativeElementDetectorTests.swift` | Real OCR regression for Chinese and English control labels (~30 lines) |
 | `TipTourTests/LocalPerceptionTargetCacheTests.swift` | Duplicate preservation, frame identity, window isolation and contradictory-label regressions (~130 lines) |
-| `TipTour/UI/ProviderSetupView.swift` | The two Keychain key cards, the name and user-address fields, the persona.md row and the realtime voice picker |
+| `TipTour/UI/ProviderSetupView.swift` | The Keychain key cards (StepFun, JEV, MiniMax), the name and user-address fields, the persona.md row, the voice-style picker, the realtime voice picker and the MiniMax voice field |
 | `TipTour/UI/CompanionPanelView.swift` | Menu bar panel shell: header with `ThinkingOrb` and live status, setup vs ready vs unusable-key routing, footer (~145 lines) |
 | `TipTour/UI/Panel/PanelStyle.swift` | Panel material, system-adaptive colors, the pill-to-panel reveal and shared keycap/chip/button pieces (~250 lines) |
 | `TipTour/UI/Panel/PanelOnboardingView.swift` | Two-step setup (key with portal link, first-use permissions) and the in-place key field (~195 lines) |
 | `TipTour/UI/Panel/PanelReadyView.swift` | Ready panel: clickable shortcut keys, example phrases, live transcript, receipt, missing permissions (~200 lines) |
 | `TipTour/UI/Panel/PanelPermissionRow.swift` | One permission: reason, request path, granted state (~110 lines) |
-| `TipTour/UI/ThinkingOrb/ThinkingOrbView.swift` | System-layer presence orb and its voice-state mapping (idle breathing, connecting, listening, responding); ink set by surface, not system appearance (~85 lines) |
+| `TipTour/UI/ThinkingOrb/ThinkingOrbView.swift` | System-layer presence orb and its voice-state mapping (idle breathing, connecting, listening, thinking, responding); ink set by surface, not system appearance (~85 lines) |
 | `TipTour/UI/ThinkingOrb/ThinkingOrbEngine.swift` | Dotted-orb Canvas renderer; MIT thinking-orbs lineage, license beside it (~1010 lines) |
 | `TipTour/Voice/VoiceConsistencyProbe.swift` | DEBUG `--voice-consistency-probe <voice> <dir> <turn.pcm>...` (several synthetic turns in one session, production persona or `-probePersonaFile`, each reply's audio saved) and `--vad-probe <out.json> <speech.pcm> <noise_dbfs> <tail_s>` (server-VAD start/stop timing against noise; threshold from `-stepfunVADEnergyThreshold`) (~200 lines) |
 | `scripts/acceptance/voice_consistency_report.py` | Pitch/MFCC speaker-drift measurement between those replies; `--self-check` proves it flags a `say` speaker change |
+| `scripts/acceptance/voice_style_comparison.py` | Same synthetic turns through both voice styles: `inputs` synthesizes them and prints the two probe commands, `page` writes a side-by-side listening page with waits and voice-change results |
 | `scripts/acceptance/voice_latency_report.py` | Streams VoiceTask telemetry during a real-mic session and reports speech-stop→first-audio and estimated barge-in p50 |
 | `TipTour/UI/TipTourSettingsView.swift` | Models, desktop actions, privacy (including silenced hand-off notices with 「恢复」), permissions and advanced options |
 | `TipTour/UI/TipTourSettingsWindowManager.swift` | Settings and log windows, Chinese diagnostic log viewer; default pipeline events store only diagnostic IDs, statuses and counts (~653 lines) |

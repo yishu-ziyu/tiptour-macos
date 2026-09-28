@@ -113,10 +113,18 @@ struct PanelReadyView: View {
 
     private var startHint: String {
         guard isVoiceMode else { return "按一下打开输入框，写下要点击什么" }
+        if companionManager.voiceStyle == .stable {
+            switch companionManager.voiceState {
+            case .listening: return "在听，说完松开 ⌃⌥"
+            case .thinking: return "她在想…"
+            case .responding: return "她在说，按住 ⌃⌥ 可以打断"
+            case .idle, .processing: return "按住 ⌃⌥ 说话，说完松开"
+            }
+        }
         switch companionManager.voiceState {
         case .idle: return "按一下开始说话，再按一下结束"
         case .processing: return "正在连接…"
-        case .listening, .responding: return "对话中，再按一下 ⌃⌥ 结束"
+        case .listening, .thinking, .responding: return "对话中，再按一下 ⌃⌥ 结束"
         }
     }
 

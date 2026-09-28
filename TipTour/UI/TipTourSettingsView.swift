@@ -148,10 +148,20 @@ struct TipTourSettingsView: View {
             }
             if companionManager.selectedMode == .stepfun {
                 VStack(alignment: .leading, spacing: 9) {
+                    Text("说话方式")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(DS.Colors.textPrimary)
+                    VoiceStylePicker(companionManager: companionManager)
+                }
+                VStack(alignment: .leading, spacing: 9) {
                     Text("她的声音")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(DS.Colors.textPrimary)
-                    RealtimeVoicePicker(companionManager: companionManager)
+                    if companionManager.voiceStyle == .stable {
+                        MiniMaxVoiceSettings(companionManager: companionManager)
+                    } else {
+                        RealtimeVoicePicker(companionManager: companionManager)
+                    }
                 }
             }
             ProviderSetupView(companionManager: companionManager)

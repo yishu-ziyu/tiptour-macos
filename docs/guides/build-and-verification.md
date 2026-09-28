@@ -61,10 +61,12 @@ The retry also reproduced a separate Session defect: after an execution failure,
 
 At 22:20, Xcode GUI Build succeeded for that repair in 16.4 seconds with 31 existing warnings; independent read-only review found no blocking issue. The running Her instance was not restarted, preserving its failed-task receipt. The newly built project-retention repair has not yet been re-exercised through a real provider failure. A bounded router metadata inspection found five candidate Luna requests in the attempt windows with `route=official`, response headers status 200 and no matching transport error. No exact Her request correlation was established, and headers alone do not prove stream completion; the source of the observed 502 therefore remains undetermined.
 
+Run `scripts/test-stable-voice.sh` for the 「声音稳定」 voice style: Step Plan speech-to-text and MiniMax speech against a `URLProtocol` fixture (final text, deltas, provider errors, refused keys, chunk order without the aggregated repeat, MiniMax refusals), her reply (shared identity and Ctrl+K context, a capped transcript, no half exchange after a failed turn, names only when given), and whole turns with a fake microphone and speaker (names saved before the first audio, a tap is not speech, pressing again stops her and late audio is not played, failures shown). Real providers are checked with `--stable-voice-probe` (see [acceptance](acceptance.md)).
+
 Run `scripts/test-stepfun-voice-lifecycle.sh` for isolated voice turn-lifecycle, task coordination, audio playback and vision-client tests; it compiles real sources without launching the app or opening the microphone. Vision requests use a local URLProtocol fixture.
 
 The StepFun scripts accept Swift test filters, e.g. `bash scripts/test-stepfun-voice-lifecycle.sh --filter DesktopControlContractTests`.
-`python3 scripts/typecheck-local-app.py --derived-data <existing-checkout-DerivedData>` type-checks against an existing Xcode dependency build without linking, signing, installing or launching. It does not replace Xcode build or runtime acceptance.
+`python3 scripts/typecheck-local-app.py --derived-data <existing-checkout-DerivedData>` type-checks against an existing Xcode dependency build without linking, signing, installing or launching. It enables the same `MemberImportVisibility` upcoming feature as the Xcode project, so a missing module import fails here too (added 2026-09-28 after a missing `import Combine` passed this check and failed in Xcode). It does not replace Xcode build or runtime acceptance.
 
 Every command in this section is a regression or seam check. None of them is a completion criterion: `XCTest` / `Swift Testing` results, exit codes and typechecks never stand in for the E2E gate described in Testing Rules.
 

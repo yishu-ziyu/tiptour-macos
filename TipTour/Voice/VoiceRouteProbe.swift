@@ -116,6 +116,24 @@ final class VoiceRouteProbe {
             }
             return true
         }
+        if let index = arguments.firstIndex(of: "--stable-voice-probe"), arguments.count > index + 2 {
+            SecKeychainSetUserInteractionAllowed(false)
+            Task {
+                let outputDirectory = URL(fileURLWithPath: arguments[index + 1])
+                let turnAudioURLs = arguments[(index + 2)...]
+                    .prefix { !$0.hasPrefix("-") }
+                    .map { URL(fileURLWithPath: $0) }
+                do {
+                    try await StableVoiceProbe.run(companionManager: companionManager,
+                        outputDirectory: outputDirectory, turnAudioURLs: Array(turnAudioURLs))
+                    print("[StableVoiceProbe] Finished: \(outputDirectory.path)")
+                } catch {
+                    print("[StableVoiceProbe] Failed: \(error.localizedDescription)")
+                }
+                NSApplication.shared.terminate(nil)
+            }
+            return true
+        }
         if let index = arguments.firstIndex(of: "--vad-probe"), arguments.count > index + 4 {
             SecKeychainSetUserInteractionAllowed(false)
             Task {

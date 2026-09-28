@@ -87,6 +87,48 @@ enum TipTourDefaults {
         private static let realtimeVoiceKey = "stepfunRealtimeVoice"
     }
 
+    /// How a voice conversation takes turns (user decision 2026-09-28: both
+    /// kept, chosen in Settings → 模型).
+    enum VoiceStyle: String, CaseIterable, Identifiable {
+        /// One StepFun realtime model listens and speaks; the user can talk over her.
+        case realtime
+        /// Hold ⌃⌥ to talk: Step Plan speech-to-text, the Ctrl+K model, MiniMax
+        /// speech with the user's own voice. She is not listening while she speaks.
+        case stable
+
+        var id: String { rawValue }
+        var title: String { self == .realtime ? "随时能插嘴" : "声音稳定" }
+        var detail: String {
+            switch self {
+            case .realtime: return "按一下 ⌃⌥ 开始对话，她说话时你随时能插嘴；反应快，偶尔音色会跳。"
+            case .stable: return "按住 ⌃⌥ 说话，松手她再回，她说话时再按住就停下；用你在 MiniMax 定义的声音，每句都一样。暂时不能看屏幕和点屏幕。你的话发给阶跃转成文字，她的回答发给 MiniMax 念出来。"
+            }
+        }
+    }
+
+    static var voiceStyle: VoiceStyle {
+        get { VoiceStyle(rawValue: UserDefaults.standard.string(forKey: "voiceStyle") ?? "") ?? .realtime }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "voiceStyle") }
+    }
+
+    /// MiniMax speech for the 「声音稳定」 style. The key is in the Keychain
+    /// under `keyName`; the voice is one the user defined in MiniMax.
+    enum MiniMaxConfiguration {
+        static let keyName = "minimaxAPIKey"
+        static let keyPortalURL = URL(string: "https://platform.minimaxi.com/")!
+
+        static var voiceID: String {
+            get { UserDefaults.standard.string(forKey: "minimaxVoiceID")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
+            set { UserDefaults.standard.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "minimaxVoiceID") }
+        }
+
+        /// `defaults write com.yishuziyu.her minimaxSpeechModel speech-2.8-turbo` tries another model.
+        static var speechModel: String {
+            let stored = UserDefaults.standard.string(forKey: "minimaxSpeechModel") ?? ""
+            return stored.isEmpty ? MiniMaxSpeechClient.defaultModel : stored
+        }
+    }
+
     struct RealtimeVoiceOption: Identifiable, Equatable {
         let voiceIdentifier: String
         let displayName: String

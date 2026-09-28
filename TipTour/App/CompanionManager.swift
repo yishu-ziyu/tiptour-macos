@@ -19,6 +19,8 @@ enum CompanionVoiceState {
     case idle
     case listening
     case processing
+    /// 「声音稳定」: the user let go and she is working out her answer.
+    case thinking
     case responding
 }
 
@@ -65,6 +67,32 @@ final class CompanionManager: ObservableObject {
     /// first `session.update` and ignores later changes to it.
     @Published private(set) var selectedRealtimeVoice = TipTourDefaults.StepFunConfiguration.realtimeVoice
 
+    @Published private(set) var voiceStyle = TipTourDefaults.voiceStyle
+
+    /// Switching ends whatever voice conversation is live, so the next press
+    /// starts the chosen style.
+    func setVoiceStyle(_ style: TipTourDefaults.VoiceStyle) {
+        guard style != voiceStyle else { return }
+        stopVoiceSession()
+        TipTourDefaults.voiceStyle = style
+        voiceStyle = style
+    }
+
+    @Published private(set) var miniMaxVoiceID = TipTourDefaults.MiniMaxConfiguration.voiceID
+
+    func setMiniMaxVoiceID(_ voiceID: String) {
+        TipTourDefaults.MiniMaxConfiguration.voiceID = voiceID
+        miniMaxVoiceID = TipTourDefaults.MiniMaxConfiguration.voiceID
+        resetStableVoiceSession()
+    }
+
+    /// A changed key or voice takes effect from the next press. What she
+    /// remembers of this voice conversation goes with the old session.
+    func resetStableVoiceSession() {
+        guard stableVoiceSession != nil else { return }
+        tearDownStableVoiceSession()
+    }
+
     func setRealtimeVoice(_ voiceIdentifier: String) {
         TipTourDefaults.StepFunConfiguration.realtimeVoice = voiceIdentifier
         selectedRealtimeVoice = TipTourDefaults.StepFunConfiguration.realtimeVoice
@@ -93,6 +121,7 @@ final class CompanionManager: ObservableObject {
     /// when it was not.
     func refreshProviderKeyStatus() {
         applySelectedModeKeyState(KeychainStore.presence(forKey: selectedMode.keyName))
+        resetStableVoiceSession()
     }
 
     /// Adopt a freshly read key state.
@@ -389,8 +418,7 @@ final class CompanionManager: ObservableObject {
     static func companionPersonaInstructions(identity: String) -> String {
         """
         \(identity)
-        这是语音对话，要像两个人面对面说话：闲聊一般一两句，最多三句，四十字以内；用户想展开时再多说。
-        不必每次都用提问收尾，偶尔问一句就够。用户只是打招呼时也回得像个人，不要只回一两个字。
+        \(VoiceSpeakingLines.text)
         用户明确给你起名字、或说该怎么称呼自己时，调用 remember_names 保存；只是提到别人的名字不算。它返回已保存后，用一句话说出存下的名字；没保存就不要说记住了。
         被问到 Ctrl+K 里的草稿或交出去的任务，只按【Ctrl+K 里的情况】回答，没有的就说没有；要改草稿、发出去或合并，请用户回 Ctrl+K 面板。
 
@@ -575,6 +603,148 @@ final class CompanionManager: ObservableObject {
     /// True when a StepFun voice session is live or starting.
     private var isStepFunVoiceActive: Bool {
         stepfunSession != nil || (selectedMode == .stepfun && voiceStartTask != nil)
+    }
+
+    // MARK: - 「声音稳定」 voice style
+
+    private var stableVoiceSession: StableVoiceSession?
+    private var stableVoiceCancellables = Set<AnyCancellable>()
+
+    private var usesStableVoice: Bool { selectedMode == .stepfun && voiceStyle == .stable }
+
+    /// The shortcut went down in the 「声音稳定」 style: stop her and listen.
+    private func pressStableVoice() {
+        guard hasCompletedOnboarding else {
+            presentTransientOverlayHint("先点菜单栏里的 Her 完成设置。")
+            return
+        }
+        guard !isTextCommandRunning else { return }
+        guard hasMicrophonePermission else {
+            voiceSessionErrorMessage = "缺少麦克风权限：在面板里点「去授权」，允许后重新开始语音。"
+            presentTransientOverlayHint(voiceSessionErrorMessage ?? "")
+            return
+        }
+        if stepfunSession != nil { stopVoiceSession() }
+        guard let session = stableVoiceSession ?? makeStableVoiceSession() else { return }
+        stableVoiceSession = session
+        voiceSessionErrorMessage = nil
+        NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
+        if let refusal = session.press() {
+            voiceSessionErrorMessage = refusal
+            presentTransientOverlayHint(refusal)
+        }
+    }
+
+    /// The shortcut came up: what she heard goes out.
+    private func releaseStableVoice() {
+        stableVoiceSession?.release()
+    }
+
+    /// Reads both keys and the voice now, so a missing one is a visible
+    /// refusal at the press rather than a failure after the user has spoken.
+    private func makeStableVoiceSession() -> StableVoiceSession? {
+        let stepfunKey = KeychainStore.readItem(forKey: TipTourMode.stepfun.keyName)
+        guard stepfunKey.state == .available, let stepfunAPIKey = stepfunKey.value, !stepfunAPIKey.isEmpty else {
+            publishVoiceKeyFailure(stepfunKey.state.userMessage(subject: "阶跃密钥"))
+            presentTransientOverlayHint(voiceSessionErrorMessage ?? "")
+            return nil
+        }
+        let miniMaxKey = KeychainStore.readItem(forKey: TipTourDefaults.MiniMaxConfiguration.keyName)
+        guard miniMaxKey.state == .available, let miniMaxAPIKey = miniMaxKey.value, !miniMaxAPIKey.isEmpty else {
+            publishVoiceKeyFailure(miniMaxKey.state.userMessage(subject: "MiniMax 密钥"))
+            presentTransientOverlayHint(voiceSessionErrorMessage ?? "")
+            return nil
+        }
+        let voiceID = TipTourDefaults.MiniMaxConfiguration.voiceID
+        guard !voiceID.isEmpty else {
+            voiceSessionErrorMessage = "还没填 MiniMax 音色：在「设置 → 模型」填你定义的音色编号。"
+            presentTransientOverlayHint(voiceSessionErrorMessage ?? "")
+            return nil
+        }
+
+        let session = StableVoiceSession(services: Self.stableVoiceServices(
+            stepfunAPIKey: stepfunAPIKey, miniMaxAPIKey: miniMaxAPIKey, voiceID: voiceID, personaStore: personaStore))
+
+        // Records survive a restart, so voice builds the Ctrl+K conversation
+        // too, the same as the realtime style.
+        _ = delegationSessionIfAvailable()
+        let runner = session.runner
+        runner.companionContext = { [weak self] in self?.delegationSession?.voiceContext }
+        runner.onNames = { [weak self] companionName, userAddress in
+            if let companionName { self?.setCompanionName(companionName) }
+            if let userAddress { self?.setUserAddress(userAddress) }
+        }
+        runner.onTurnFinished = { timing in
+            DesktopVoiceTrace.event("stable_voice_turn", turnID: "stable", fields: timing.fields)
+        }
+        DesktopVoiceTrace.event("voice_session_starting", turnID: "stable",
+            fields: ["style": "stable", "voice": voiceID, "speech_model": TipTourDefaults.MiniMaxConfiguration.speechModel,
+                     "companion_name_set": String(!companionName.isEmpty)])
+
+        stableVoiceCancellables.removeAll()
+        runner.$phase.receive(on: DispatchQueue.main).sink { [weak self] phase in
+            guard let self, self.stableVoiceSession === session || self.stableVoiceSession == nil else { return }
+            switch phase {
+            case .idle: self.voiceState = .idle
+            case .listening: self.voiceState = .listening
+            case .thinking: self.voiceState = .thinking
+            case .speaking: self.voiceState = .responding
+            }
+        }.store(in: &stableVoiceCancellables)
+        runner.$heard.receive(on: DispatchQueue.main).sink { [weak self] heard in
+            guard let self, let heard, runner.phase == .thinking else { return }
+            self.lastTranscript = "你：\(heard)"
+        }.store(in: &stableVoiceCancellables)
+        runner.$said.receive(on: DispatchQueue.main).sink { [weak self] said in
+            guard let self, let said else { return }
+            self.lastTranscript = said
+        }.store(in: &stableVoiceCancellables)
+        runner.$failure.receive(on: DispatchQueue.main).sink { [weak self] failure in
+            guard let self, let failure else { return }
+            self.voiceSessionErrorMessage = failure
+            self.presentTransientOverlayHint(failure)
+        }.store(in: &stableVoiceCancellables)
+        return session
+    }
+
+    /// The real services behind one 「声音稳定」 conversation. The DEBUG probe
+    /// builds them here too, so it hears what the user hears.
+    static func stableVoiceServices(stepfunAPIKey: String, miniMaxAPIKey: String, voiceID: String,
+                                    personaStore: PersonaStore) -> StableVoiceTurnRunner.Services {
+        // One session per provider host, so the connection opened while the
+        // user talks is the one the turn then uses.
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 60
+        let stepfunSession = URLSession(configuration: configuration)
+        let miniMaxSession = URLSession(configuration: configuration)
+        let transcriber = StepAudioTranscriber(apiKey: stepfunAPIKey, session: stepfunSession)
+        let chat = DelegationModelClient(apiKey: stepfunAPIKey, session: stepfunSession)
+        let conversation = StableVoiceConversation(
+            complete: { messages in
+                try await chat.complete(messages.map {
+                    DelegationChatMessage(role: DelegationChatMessage.Role(rawValue: $0.role.rawValue) ?? .user, content: $0.content)
+                })
+            },
+            identity: { CompanionManager.currentIdentity(personaStore: personaStore) })
+        let speech = MiniMaxSpeechClient(apiKey: miniMaxAPIKey, voiceID: voiceID,
+                                         model: TipTourDefaults.MiniMaxConfiguration.speechModel, session: miniMaxSession)
+        return .init(
+            transcribe: { try await transcriber.transcribe(pcm16: $0) },
+            reply: { try await conversation.reply(to: $0, companionContext: $1) },
+            speak: { try await speech.speak($0, onAudio: $1) },
+            warmUp: {
+                // Any answer, even a refusal, leaves the connection open for reuse.
+                async let stepfun: Void = { _ = try? await stepfunSession.data(from: URL(string: "https://api.stepfun.com/step_plan/v1/models")!) }()
+                async let miniMax: Void = { _ = try? await miniMaxSession.data(from: URL(string: "https://api.minimaxi.com/v1/models")!) }()
+                _ = await (stepfun, miniMax)
+            })
+    }
+
+    private func tearDownStableVoiceSession() {
+        stableVoiceSession?.stop()
+        stableVoiceSession = nil
+        stableVoiceCancellables.removeAll()
+        voiceState = .idle
     }
 
     private func normalizedWorkflowSteps(
@@ -1422,6 +1592,16 @@ final class CompanionManager: ObservableObject {
     }
 
     private func handleShortcutTransition(_ transition: PushToTalkShortcut.ShortcutTransition) {
+        if usesStableVoice {
+            switch transition {
+            case .pressed:
+                captureTargetAppContextForShortcutPress(reason: "hotkey press")
+                pressStableVoice()
+            case .released: releaseStableVoice()
+            case .none: break
+            }
+            return
+        }
         guard case .pressed = transition else { return }
         startVoiceInputFromUserGesture(reason: "hotkey press")
     }
@@ -1437,6 +1617,11 @@ final class CompanionManager: ObservableObject {
         }
         guard !isTextCommandRunning else { return }
         captureTargetAppContextForShortcutPress(reason: reason)
+        // A click has no release: the first starts listening, the next sends.
+        if usesStableVoice {
+            if stableVoiceSession?.isRecording == true { releaseStableVoice() } else { pressStableVoice() }
+            return
+        }
 
         // The panel is dismissed below only when a session actually starts (or
         // toggles off) — a refused start needs the panel to stay open so its
@@ -1449,9 +1634,8 @@ final class CompanionManager: ObservableObject {
         onboardingPromptText = ""
         onboardingPromptOpacity = 0.0
 
-        // Voice is intentionally a single realtime path. Text commands can
-        // use JEV, while speech should not branch into
-        // a second STT/TTS stack.
+        // The realtime style: one realtime path for listening and speaking.
+        // The 「声音稳定」 style returned above, before reaching here.
         if isStepFunVoiceActive {
             stopVoiceSession()
             voiceState = .idle
@@ -2542,6 +2726,7 @@ final class CompanionManager: ObservableObject {
         else { WorkflowRunner.shared.stop() }
         if selectedMode == .stepfun {
             tearDownStepFunVoiceSession()
+            tearDownStableVoiceSession()
         } else {
             voiceState = .idle
         }
