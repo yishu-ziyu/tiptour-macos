@@ -62,6 +62,7 @@ Three kinds of document, and how to treat them:
 | [research/2026-09-26-today-incredible-experience.md](research/2026-09-26-today-incredible-experience.md) | Dated research: Today live recall tests, Incredible installation and design sources, with verification limits |
 | [research/2026-09-26-coordination-architecture.md](research/2026-09-26-coordination-architecture.md) | Dated research: Grok Bot, Today, Incredible, OpenMausBot and OpenMuse; coordination mechanisms, source provenance and Her-specific tradeoffs |
 | [research/2026-09-26-today-proactivity.md](research/2026-09-26-today-proactivity.md) | Dated research: actual proactive messages, official claims, a factual counterexample and Her-specific proposals |
+| [research/2026-09-28-interest-discovery.md](research/2026-09-28-interest-discovery.md) | 3.2 设计：从 Claude Code、Codex、git、Obsidian 看出「你在意的方向」，每条带出处；材料实测、做法、验收和待定的外发授权 |
 | [research/2026-09-26-open-connector-pilot.md](research/2026-09-26-open-connector-pilot.md) | Live pilot: GitHub HTTP/MCP reads and write denial verified; temporary credential cleanup; Notion awaiting its own page-scoped authorization |
 | [development/2026-09-25-claude-code-delegation-map.md](development/2026-09-25-claude-code-delegation-map.md) | Stage 4 detailed contract and evidence; current scheduling belongs to ROADMAP.md |
 | [development/2026-09-25-listen-and-baseline-map.md](development/2026-09-25-listen-and-baseline-map.md) | Dated contract: parked map — Her hears you, then the first failure list from the acceptance tasks |
