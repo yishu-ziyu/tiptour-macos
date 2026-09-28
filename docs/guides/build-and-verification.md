@@ -70,6 +70,8 @@ The StepFun scripts accept Swift test filters, e.g. `bash scripts/test-stepfun-v
 
 `python3 scripts/measure-sloppiness.py [--details] [--json FILE]` measures the Swift sources under `TipTour/` with the two metrics from [Measuring the Sloppiness of Code](https://earendil.com/posts/measuring-code-sloppiness/): verbosity (lines matched by `scripts/sloppiness-rules.yml` or inside clones found by jscpd, over source lines) and erosion (share of `CC × √SLOC` held by functions with cyclomatic complexity above 10, via lizard). The article's reference values are 0.15 / 0.31 for established repositories and 0.33 / 0.68 for agent-written code. On 2026-09-28 the code measured 0.044 / 0.409 before the first cleanup and 0.033 / 0.299 after it. The rule file is a small Swift set, so verbosity here is mostly clones and reads lower than the article's numbers. Flat dispatch switches (the harness route table, the realtime client's event switch) still count as eroded. Use it to find where complexity collects, not as a target; a lower number is not a behavior check.
 
+`python3 scripts/interest-discovery.py` is the offline run of roadmap 3.2 (see [interest discovery](../research/2026-09-28-interest-discovery.md)): it sends excerpts of the user's own typing to Her's chat model (key from Her's Keychain; `--endpoint/--model/--key-account` switch models), keeps each batch's answer under `out/interest-discovery/<date>/` so a rerun only repeats what failed, and `--serve` opens the marking page on `127.0.0.1:19480`.
+
 Every command in this section is a regression or seam check. None of them is a completion criterion: `XCTest` / `Swift Testing` results, exit codes and typechecks never stand in for the E2E gate described in Testing Rules.
 
 ## Kimi Code and Step Code follow-up
