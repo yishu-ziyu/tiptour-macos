@@ -1678,6 +1678,30 @@ struct DelegationSessionTests {
         #expect(!prompt.contains("长期伙伴"))
     }
 
+    @Test func voiceIsToldWhatIsInCtrlKAtEachStage() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: "print world > greeting.txt; git commit -qam greet"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "目标：把 greeting.txt 改成 world\n范围：只改这一个文件")],
+            history: DelegationHistory(fileURL: historyURL))
+        #expect(session.voiceContext == "当前草稿：没有\n等用户决定的改动：没有\n正在执行：没有\n最近交出去的任务：没有记录")
+
+        await session.send("把问候语改成 world")
+        #expect(session.voiceContext.hasPrefix("当前草稿：「目标：把 greeting.txt 改成 world」，项目 \(project.name)，执行工具 Claude Code，还没发出去"))
+
+        await session.sendCurrentDraft()
+        let waiting = session.voiceContext
+        #expect(waiting.contains("当前草稿：没有"))
+        #expect(waiting.contains("等用户决定的改动（\(project.name)）：工作区里有改动：涉及 1 个文件。"))
+        #expect(waiting.contains("1. ") && waiting.contains("交给 Claude Code 的「把问候语改成 world」：改了 1 个文件（greeting.txt）"))
+
+        await session.mergePendingChange()
+        let merged = session.voiceContext
+        #expect(merged.contains("等用户决定的改动：没有"))
+        #expect(merged.contains("改了 1 个文件（greeting.txt），用户已合进项目"))
+    }
+
     @Test func claudeCodesClosingQuestionIsRelayed() {
         let workspace = DelegationWorkspace(project: DelegationProject(repositoryPath: "/p"), branchName: "b", worktreePath: "/w", baseCommit: "c")
         let receipt = DelegationReceipt(workspace: workspace, outcome: .changed,

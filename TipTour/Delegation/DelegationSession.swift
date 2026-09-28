@@ -255,6 +255,37 @@ final class DelegationSession: ObservableObject {
         conversation.noteAppEvent(line)
     }
 
+    /// What voice is told about Ctrl+K, so she can answer "刚才那个任务怎么样了"
+    /// from what is here. Read-only: acting on any of it stays in the panel.
+    var voiceContext: String {
+        var lines: [String] = []
+        if let draft = currentDraft {
+            let firstLine = draft.body.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+            let clipped = firstLine.count > 40 ? String(firstLine.prefix(40)) + "…" : firstLine
+            lines.append("当前草稿：「\(clipped)」，项目 \(draft.project?.name ?? "还没选")，执行工具 \(draft.tool.displayName)，还没发出去")
+        } else {
+            lines.append("当前草稿：没有")
+        }
+        if let pendingReceipt {
+            lines.append("等用户决定的改动（\(pendingReceipt.workspace.project.name)）：\(DelegationReport(receipt: pendingReceipt).headline)")
+        } else {
+            lines.append("等用户决定的改动：没有")
+        }
+        if case .running(_, let progress) = phase {
+            lines.append("正在执行：\(progress)")
+        } else {
+            lines.append("正在执行：没有")
+        }
+        let recent = history?.recentSummaries(3) ?? []
+        if recent.isEmpty {
+            lines.append("最近交出去的任务：没有记录")
+        } else {
+            lines.append("最近交出去的任务：")
+            lines += recent.enumerated().map { "\($0.offset + 1). \($0.element)" }
+        }
+        return lines.joined(separator: "\n")
+    }
+
     /// Where the panel rests after a turn: offering the draft, the pending change, or nothing.
     private var restingPhase: Phase {
         currentDraft == nil ? (pendingWorkspace == nil ? .idle : .awaitingDecision) : .awaitingSend

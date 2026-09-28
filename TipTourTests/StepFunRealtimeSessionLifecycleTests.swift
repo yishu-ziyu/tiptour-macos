@@ -20,6 +20,16 @@ import Testing
 @MainActor
 @Suite("Realtime audio playback")
 struct RealtimeAudioPlaybackTests {
+    @Test func ctrlKStateIsSentAgainOnlyWhenItChanged() {
+        var relay = CompanionContextRelay()
+        #expect(relay.textToSend(nil) == nil)
+        #expect(relay.textToSend("当前草稿：没有") == "当前草稿：没有")
+        #expect(relay.textToSend("当前草稿：没有") == nil, "An unchanged state is not sent twice")
+        #expect(relay.textToSend("当前草稿：「改成 world」") == "当前草稿：「改成 world」")
+        relay.reset()
+        #expect(relay.textToSend("当前草稿：「改成 world」") == "当前草稿：「改成 world」", "A new connection hears it again")
+    }
+
     @Test func responseCreateReliesOnSessionVoiceInsteadOfOverridingItAgain() throws {
         let event = StepFunRealtimeClient.responseCreateEvent(exactSpokenResponse: "已完成。")
         let response = try #require(event["response"] as? [String: Any])

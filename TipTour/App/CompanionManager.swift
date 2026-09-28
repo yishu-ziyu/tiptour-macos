@@ -392,6 +392,7 @@ final class CompanionManager: ObservableObject {
         这是语音对话，要像两个人面对面说话：闲聊一般一两句，最多三句，四十字以内；用户想展开时再多说。
         不必每次都用提问收尾，偶尔问一句就够。用户只是打招呼时也回得像个人，不要只回一两个字。
         用户明确给你起名字、或说该怎么称呼自己时，调用 remember_names 保存；只是提到别人的名字不算。它返回已保存后，用一句话说出存下的名字；没保存就不要说记住了。
+        被问到 Ctrl+K 里的草稿或交出去的任务，只按【Ctrl+K 里的情况】回答，没有的就说没有；要改草稿、发出去或合并，请用户回 Ctrl+K 面板。
 
         """
     }
@@ -449,6 +450,10 @@ final class CompanionManager: ObservableObject {
                      "companion_name_set": String(!companionName.isEmpty)])
         router.onWindowContextChanged = { [weak session] context in session?.updateScreenContext(context) }
         router.onRememberNames = { [weak self] memory in self?.rememberNames(memory) }
+        // After a restart Ctrl+K may not have been opened yet; its records are
+        // still on disk, so voice builds the conversation too (same StepFun key).
+        _ = delegationSessionIfAvailable()
+        session.companionContext = { [weak self] in self?.delegationSession?.voiceContext }
         router.onTaskReceiptChanged = { [weak self, weak session] receipt in
             self?.desktopTaskReceipt = receipt
             guard let self, let session, self.stepfunSession === session else { return }

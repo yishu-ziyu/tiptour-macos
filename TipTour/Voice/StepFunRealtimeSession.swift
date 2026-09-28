@@ -477,6 +477,11 @@ final class StepFunRealtimeSession {
     func updateScreenContext(_ context: String) {
         client.updateScreenContext(context)
     }
+
+    /// What Ctrl+K holds right now; set by the app. Sent when a session is
+    /// ready and before each user turn, only when it changed.
+    var companionContext: (() -> String?)?
+    private var companionContextRelay = CompanionContextRelay()
     private let instructions: String
 
     private var audioEngine = AVAudioEngine()
@@ -926,6 +931,7 @@ final class StepFunRealtimeSession {
         switch event {
         case .sessionReady:
             print("[StepFunRealtimeSession] Session ready")
+            companionContextRelay.reset()
             refreshTaskContext()
 
         case .sessionConfigured(let voiceMatchesRequest, let effectiveVoice):
@@ -1429,6 +1435,9 @@ final class StepFunRealtimeSession {
     }
 
     func refreshTaskContext() {
+        if let text = companionContextRelay.textToSend(companionContext?()) {
+            client.updateCompanionContext(text)
+        }
         guard let context = toolHandler.taskContext else { return }
         client.updateTaskContext(context)
     }
@@ -1475,4 +1484,18 @@ extension NSLock {
         defer { unlock() }
         return try body()
     }
+}
+
+/// Sends Ctrl+K's state again only when it changed, so the voice
+/// conversation does not grow by a copy each turn. A new socket starts empty.
+struct CompanionContextRelay {
+    private var lastSent: String?
+
+    mutating func textToSend(_ current: String?) -> String? {
+        guard let current, !current.isEmpty, current != lastSent else { return nil }
+        lastSent = current
+        return current
+    }
+
+    mutating func reset() { lastSent = nil }
 }

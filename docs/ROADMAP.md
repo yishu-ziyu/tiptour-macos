@@ -32,7 +32,7 @@ Her 主动告诉你在意的新东西（新模型、黑客松、电影……）�
 
 **第 2 段 一个她**（顺序即方案顺序）
 - [ ] 2.1 她是谁写进 `persona.md`；语音里起的名字和称呼能存下，两边都认（方案第 3 条）。2026-09-28 用户选 A：听到明确起名就直接存，并说出存下的名字。代码与隔离测试完成（委派 99、StepFun 20 项）：persona.md、设置里的称呼和 persona.md 入口、语音 `remember_names`、Ctrl+K 每句重读。借了 openhanako「身份只有一处」、CowAgent「每轮重读」「说记住了就要真写入」；没借内心独白、模型自改人格。待真机：语音起名 → Ctrl+K 问名字 → 重启再问；重跑声线一致性探针。Ctrl+K 里起名暂不支持，她会如实说。参考：`today-study/refs-analysis/capabilities/persona.md`、`openhanako/subsystems/persona.md`、`CowAgent/subsystems/persona-prompt.md`
-- [ ] 2.2 语音看得见 Ctrl+K 的草稿和最近结果（方案第 1a 条）。参考：`today-study/refs-analysis/CowAgent/subsystems/voice.md`、`openhanako/subsystems/session.md`
+- [ ] 2.2 语音看得见 Ctrl+K 的草稿和最近结果（方案第 1a 条）。2026-09-28：语音看到当前草稿、等你决定的改动、正在执行、最近 3 件结果（按验收标准定，不含 Ctrl+K 对话原文），变了才发；改、发、合仍回面板。代码与隔离测试完成（委派 100、语音生命周期 38 项），待真机。参考：`today-study/refs-analysis/CowAgent/subsystems/voice.md`、`openhanako/subsystems/session.md`
 - [ ] 2.3 Ctrl+K 对话重启后还在：旧消息保留（淡显），隔久了或重启过的地方插一行时间；「刚才」按时间对到最近那件，对不上时说出时间和内容来问（用户 2026-09-27 选 A，示意见 `out/acceptance/2026-09-27-restart-options/index.html` 的选项 A）。同时：进模型的内容设上限；记录编号不再随新任务后移（方案第 2 条）。参考：`today-study/refs-analysis/capabilities/persistence-sessions.md`、`openhanako/subsystems/session.md`；差距表 UI-07
 - [ ] 2.4 回复里提到换项目时必须同时给出草稿（真机测试中出现 3 次）。参考：`today-study/refs-analysis/capabilities/task-execution.md`
 - [ ] 2.5 两个入口都知道自己现在能做什么、缺什么、去哪开（方案第 5 条）。参考：`today-study/refs-analysis/CowAgent/subsystems/skills.md`、`CowAgent/subsystems/tools.md`、`capabilities/tools-connectors.md`

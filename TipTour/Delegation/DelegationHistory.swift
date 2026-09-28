@@ -200,6 +200,13 @@ final class DelegationHistory {
         return "\(Self.timeFormatter.string(from: record.sentAt)) 交给 \(Self.toolName(record)) 的\(task)：\(Self.resultText(record, withToolExplanation: false))"
     }
 
+    /// One line each for the newest hand-offs, with the user's decision, for voice.
+    func recentSummaries(_ count: Int) -> [String] {
+        records.suffix(count).reversed().compactMap { record in
+            summary(of: record.id).map { $0 + Self.decisionText(record) }
+        }
+    }
+
     /// What the user first said about the record numbered `number` in `promptText`.
     func request(forNumber number: Int) -> String? {
         record(forNumber: number)?.userWords.first
