@@ -26,6 +26,10 @@ let package = Package(
 SWIFT
 
 cp "$project_dir/TipTour/Delegation/"*.swift "$test_dir/Sources/Delegation/"
+cp "$project_dir/TipTour/Utilities/PersonaStore.swift" "$test_dir/Sources/Delegation/"
+sed 's/@testable import TipTour/@testable import Delegation/' \
+    "$project_dir/TipTourTests/PersonaStoreTests.swift" \
+    > "$test_dir/Tests/DelegationTests/PersonaStoreTests.swift"
 sed 's/@testable import TipTour/@testable import Delegation/' \
     "$project_dir/TipTourTests/CodingAgentDelegationTests.swift" \
     > "$test_dir/Tests/DelegationTests/CodingAgentDelegationTests.swift"

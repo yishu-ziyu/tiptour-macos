@@ -33,7 +33,7 @@ final class VoiceConsistencyProbe {
         // wording can be compared on the same inputs without rebuilding.
         let personaInstructions = UserDefaults.standard.string(forKey: "probePersonaFile")
             .flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }
-            ?? CompanionManager.companionPersonaInstructions(companionName: TipTourDefaults.companionName)
+            ?? CompanionManager.companionPersonaInstructions(identity: CompanionManager.currentIdentity(personaStore: PersonaStore()))
         // `-probeInstructionsFile <path>` replaces persona AND tool contract,
         // for comparing how the whole instruction text shapes delivery.
         let sessionInstructions = UserDefaults.standard.string(forKey: "probeInstructionsFile")

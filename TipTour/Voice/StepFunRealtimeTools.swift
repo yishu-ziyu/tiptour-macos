@@ -2,8 +2,8 @@
 //  StepFunRealtimeTools.swift
 //  TipTour
 //
-//  The two tools the realtime voice model is allowed to call, and the handler
-//  that turns those calls into desktop actions.
+//  The tools the realtime voice model is allowed to call: two desktop tools,
+//  and one that saves the names the user gives.
 //
 //  Task parameters and observation identities are explicit. This route uses
 //  locally grounded targets; it makes no general claim about visual models'
@@ -18,7 +18,7 @@ import Foundation
 
 /// The tool declarations sent in `session.update`.
 ///
-/// Deliberately two tools. A voice model that can also invent coordinates or
+/// Deliberately two desktop tools. A voice model that can also invent coordinates or
 /// free-form action kinds is a voice model that can click the wrong thing
 /// confidently, and the failure is invisible until it happens.
 enum StepFunRealtimeToolDeclarations {
@@ -39,7 +39,7 @@ enum StepFunRealtimeToolDeclarations {
         "expected_label": ["type": "string", "description": "Visible result expected AFTER this step, not a declaration of success. It must be a verifiable on-screen control or label name that can be matched exactly against what is on screen — ideally the control the next step of the same plan depends on, such as the control the following step operates. Never write an outcome sentence such as 页面已打开 or 显示设置页面已打开: no control on screen is ever named that way, so the step could never be verified. When no exact control name is known, omit this field."]
     ]
 
-    static let all: [[String: Any]] = [describeScreen, actOnScreen]
+    static let all: [[String: Any]] = [describeScreen, actOnScreen, rememberNames]
     static let withTaskControls: [[String: Any]] = all + [taskControl]
 
     static let taskControl: [String: Any] = [
@@ -53,6 +53,20 @@ enum StepFunRealtimeToolDeclarations {
                     "target_version": ["type": "integer", "minimum": 1],
                     "turn_id": ["type": "string", "description": "Exact control_turn_id from current task context; never reuse an old turn."]
                 ], "required": ["action"]]
+        ]
+    ]
+
+    /// Saves the name the user gives her or what she should call the user,
+    /// so "就叫你小满" is kept instead of only being agreed to.
+    static let rememberNames: [String: Any] = [
+        "type": "function", "function": [
+            "name": "remember_names",
+            "description": "Save a name only when the user explicitly names you (就叫你小满) or says what to call them (叫我奕枢). Merely mentioning someone's name is not naming. After it returns saved, say the saved name in one sentence; never claim to remember a name it did not save.",
+            "parameters": ["type": "object", "additionalProperties": false,
+                "properties": [
+                    "companion_name": ["type": "string", "description": "Your new name, exactly as the user said it."],
+                    "user_address": ["type": "string", "description": "What the user asked to be called, exactly as said."]
+                ]]
         ]
     ]
 
@@ -624,4 +638,33 @@ struct StepFunTaskControlArguments: Decodable {
         }
         return try JSONDecoder().decode(Self.self, from: data)
     }
+}
+
+
+/// The names in one `remember_names` call, trimmed to what fits in the prompt.
+struct StepFunNameMemory: Equatable {
+    var companionName: String?
+    var userAddress: String?
+
+    /// Nil when the call carries no usable name.
+    static func decode(_ argumentsJSON: String) -> StepFunNameMemory? {
+        let arguments = (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8))) as? [String: Any] ?? [:]
+        func name(_ key: String) -> String? {
+            let raw = (arguments[key] as? String ?? "").components(separatedBy: .newlines).joined(separator: " ")
+            let trimmed = String(raw.trimmingCharacters(in: .whitespaces).prefix(20))
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        let memory = StepFunNameMemory(companionName: name("companion_name"), userAddress: name("user_address"))
+        return memory.companionName == nil && memory.userAddress == nil ? nil : memory
+    }
+
+    /// What the model hears back once the names are saved.
+    var savedReceipt: String {
+        var parts: [String] = []
+        if let companionName { parts.append("你的名字「\(companionName)」") }
+        if let userAddress { parts.append("对用户的称呼「\(userAddress)」") }
+        return "已保存：\(parts.joined(separator: "，"))。从现在起按这个说，用一句话告诉用户存下的名字。"
+    }
+
+    static let nothingSaved = "没有可保存的名字，什么都没存。不要说记住了。"
 }

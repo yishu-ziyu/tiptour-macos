@@ -61,13 +61,36 @@ private func makeDescription(capturedAt: Date = Date()) -> StepFunScreenDescript
 
 // MARK: - The tool declarations the model sees
 
-@Test func toolDeclarationsExposeExactlyTheTwoSupportedTools() {
+@Test func toolDeclarationsExposeTheTwoDesktopToolsAndNameSaving() {
     let names = StepFunRealtimeToolDeclarations.all.compactMap { declaration -> String? in
         let function = declaration["function"] as? [String: Any]
         return function?["name"] as? String
     }
 
-    #expect(names.sorted() == ["act_on_screen", "describe_screen"])
+    #expect(names.sorted() == ["act_on_screen", "describe_screen", "remember_names"])
+}
+
+@Test func namesAreSavedOnlyWhenTheCallCarriesOne() throws {
+    let both = try #require(StepFunNameMemory.decode(#"{"companion_name":" 小满 ","user_address":"奕枢"}"#))
+    #expect(both == StepFunNameMemory(companionName: "小满", userAddress: "奕枢"))
+    #expect(both.savedReceipt.contains("你的名字「小满」"))
+    #expect(both.savedReceipt.contains("对用户的称呼「奕枢」"))
+
+    let addressOnly = try #require(StepFunNameMemory.decode(#"{"user_address":"奕枢"}"#))
+    #expect(addressOnly.companionName == nil)
+    #expect(!addressOnly.savedReceipt.contains("你的名字"))
+
+    #expect(StepFunNameMemory.decode(#"{"companion_name":"   "}"#) == nil)
+    #expect(StepFunNameMemory.decode("{}") == nil)
+    #expect(StepFunNameMemory.decode("not json") == nil)
+    #expect(StepFunNameMemory.nothingSaved.contains("不要说记住了"))
+}
+
+@Test func aSavedNameFitsOnOnePromptLine() throws {
+    let long = try #require(StepFunNameMemory.decode(#"{"companion_name":"一二三四五\n六七八九十一二三四五六七八九十一二三"}"#))
+    let name = try #require(long.companionName)
+    #expect(name.count == 20)
+    #expect(!name.contains("\n"))
 }
 
 @Test func actOnScreenRequiresACompleteGoal() {

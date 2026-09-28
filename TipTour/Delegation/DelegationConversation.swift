@@ -130,10 +130,17 @@ final class DelegationModelClient: @unchecked Sendable {
 /// Keeps the transcript and asks the model for her next turn.
 final class DelegationConversation: @unchecked Sendable {
     private let complete: @Sendable ([DelegationChatMessage]) async throws -> String
+    /// Who she is, read again for every turn so a new name or an edited
+    /// persona.md counts from the next sentence.
+    private let identity: @Sendable () -> String
     private(set) var transcript: [DelegationChatMessage] = []
 
-    init(complete: @escaping @Sendable ([DelegationChatMessage]) async throws -> String) {
+    init(complete: @escaping @Sendable ([DelegationChatMessage]) async throws -> String,
+         identity: @escaping @Sendable () -> String = {
+             PersonaStore.identity(persona: PersonaStore.defaultText, companionName: "", userAddress: "")
+         }) {
         self.complete = complete
+        self.identity = identity
     }
 
     func reset() { transcript = [] }
@@ -154,7 +161,7 @@ final class DelegationConversation: @unchecked Sendable {
                  recentHandOffs: String = "（还没有记录）", herCode: String = "（不知道在哪）") async throws -> DelegationTurn {
         transcript.append(DelegationChatMessage(role: .user, content: userText))
         let systemMessage = DelegationChatMessage(role: .system, content: Self.instructions(
-            projectContext: projectContext, tool: tool, recentHandOffs: recentHandOffs, herCode: herCode))
+            projectContext: projectContext, tool: tool, recentHandOffs: recentHandOffs, herCode: herCode, identity: identity()))
         var turn = try Self.parse(try await complete([systemMessage] + transcript))
         var neededCorrection = false
         if Self.promisesActionWithoutOne(turn) {
@@ -172,9 +179,12 @@ final class DelegationConversation: @unchecked Sendable {
     // MARK: - Prompt
 
     static func instructions(projectContext: String, tool: DelegationAgentTool = .claudeCode,
-                             recentHandOffs: String = "（还没有记录）", herCode: String = "（不知道在哪）") -> String {
+                             recentHandOffs: String = "（还没有记录）", herCode: String = "（不知道在哪）",
+                             identity: String = PersonaStore.identity(persona: PersonaStore.defaultText,
+                                                                      companionName: "", userAddress: "")) -> String {
         """
-        你是住在用户 Mac 上的中文伙伴。用户在 ⌃K 输入框里用文字跟你说话。
+        \(identity)
+        用户在 ⌃K 输入框里用文字跟你说话。
         你能做两件事：整理写代码、改项目的任务草稿；或者让 JEV 在屏幕上点一个控件。
         用户在草稿里选择执行工具，当前选的是 \(tool.displayName)。可选 \(DelegationAgentTool.allCases.map(\.displayName).joined(separator: "、"))，你不能自行切换。
         执行工具会在当前项目的一个单独工作区里改，改完由用户看差异再决定合不合，所以用户手上的改动不会被碰。
@@ -193,6 +203,7 @@ final class DelegationConversation: @unchecked Sendable {
         - 你自己不会发出或修改任何东西。say 里不要用「我」做修改或发送的主语（如「我来改」「我准备改」「已经交出去了」）：改东西的是执行工具，要等用户点「发出去」，那句话由应用来说。
         - 用户要在屏幕上点某个东西时，action 为 "screen"，screen_goal 写清要点哪个控件。
         - 闲聊或问问题时 action 为 "none"，简短自然地回一两句。
+        - 用户在这里给你起名字或说该怎么称呼他时，这里存不下：如实说可以在语音里告诉你，或去「设置」里填；不要说记住了。
         - say 不超过两句，不空夸，不用「好问题」这类客套。
 
         只输出一个 JSON 对象：{"say": "...", "action": "none" | "draft" | "screen", "draft": "...", "screen_goal": "...", "refers_to": 0, "project": "current" | "record" | "her"}。不用的文字字段留空字符串。

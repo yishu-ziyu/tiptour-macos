@@ -134,6 +134,14 @@ enum TipTourDefaults {
 
     private static let companionNameKey = "companionName"
 
+    /// What she calls the user. Empty means the user has not said.
+    static var userAddress: String {
+        get { UserDefaults.standard.string(forKey: userAddressKey) ?? "" }
+        set { UserDefaults.standard.set(sanitizedCompanionName(newValue), forKey: userAddressKey) }
+    }
+
+    private static let userAddressKey = "userAddress"
+
     static var hasCompletedOnboarding: Bool {
         get { bool(for: .hasCompletedOnboarding) }
         set { set(newValue, for: .hasCompletedOnboarding) }

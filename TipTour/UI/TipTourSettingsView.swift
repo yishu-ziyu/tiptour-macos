@@ -134,6 +134,18 @@ struct TipTourSettingsView: View {
                     .foregroundColor(DS.Colors.textPrimary)
                 CompanionNameField(companionManager: companionManager)
             }
+            VStack(alignment: .leading, spacing: 9) {
+                Text("她怎么称呼你")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(DS.Colors.textPrimary)
+                UserAddressField(companionManager: companionManager)
+            }
+            VStack(alignment: .leading, spacing: 9) {
+                Text("她是谁")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(DS.Colors.textPrimary)
+                PersonaFileRow(personaStore: companionManager.personaStore)
+            }
             if companionManager.selectedMode == .stepfun {
                 VStack(alignment: .leading, spacing: 9) {
                     Text("她的声音")

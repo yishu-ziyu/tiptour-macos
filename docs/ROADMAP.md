@@ -31,15 +31,15 @@ Her 主动告诉你在意的新东西（新模型、黑客松、电影……）�
 - [ ] 1.4 屏幕操作没真正开始前，她不说「正在点击」（2026-09-28 用户选 A：先查能不能开始，能开始才显示她那句，不能开始只写「没去点：原因」。代码与隔离测试完成（委派 92 项），待真实构建看一眼）。参考：`today-study/refs-analysis/capabilities/tools-connectors.md`（结果类型）
 
 **第 2 段 一个她**（顺序即方案顺序）
-- [ ] 2.1 她是谁写进 `persona.md`；语音里起的名字和称呼能存下，两边都认（方案第 3 条）。参考：`today-study/refs-analysis/capabilities/persona.md`、`openhanako/subsystems/persona.md`、`CowAgent/subsystems/persona-prompt.md`
+- [ ] 2.1 她是谁写进 `persona.md`；语音里起的名字和称呼能存下，两边都认（方案第 3 条）。2026-09-28 用户选 A：听到明确起名就直接存，并说出存下的名字。代码与隔离测试完成（委派 99、StepFun 20 项）：persona.md、设置里的称呼和 persona.md 入口、语音 `remember_names`、Ctrl+K 每句重读。借了 openhanako「身份只有一处」、CowAgent「每轮重读」「说记住了就要真写入」；没借内心独白、模型自改人格。待真机：语音起名 → Ctrl+K 问名字 → 重启再问；重跑声线一致性探针。Ctrl+K 里起名暂不支持，她会如实说。参考：`today-study/refs-analysis/capabilities/persona.md`、`openhanako/subsystems/persona.md`、`CowAgent/subsystems/persona-prompt.md`
 - [ ] 2.2 语音看得见 Ctrl+K 的草稿和最近结果（方案第 1a 条）。参考：`today-study/refs-analysis/CowAgent/subsystems/voice.md`、`openhanako/subsystems/session.md`
 - [ ] 2.3 Ctrl+K 对话重启后还在：旧消息保留（淡显），隔久了或重启过的地方插一行时间；「刚才」按时间对到最近那件，对不上时说出时间和内容来问（用户 2026-09-27 选 A，示意见 `out/acceptance/2026-09-27-restart-options/index.html` 的选项 A）。同时：进模型的内容设上限；记录编号不再随新任务后移（方案第 2 条）。参考：`today-study/refs-analysis/capabilities/persistence-sessions.md`、`openhanako/subsystems/session.md`；差距表 UI-07
 - [ ] 2.4 回复里提到换项目时必须同时给出草稿（真机测试中出现 3 次）。参考：`today-study/refs-analysis/capabilities/task-execution.md`
 - [ ] 2.5 两个入口都知道自己现在能做什么、缺什么、去哪开（方案第 5 条）。参考：`today-study/refs-analysis/CowAgent/subsystems/skills.md`、`CowAgent/subsystems/tools.md`、`capabilities/tools-connectors.md`
 
 **第 3 段 主动推荐**
-- [ ] 3.1 书桌：你写给她的话（她只读）＋「她以为你在意的」列表，设置里可看可删（方案第 4 条）。参考：`today-study/refs-analysis/openhanako/subsystems/desktop-ui-desk-workspace.md`、`capabilities/memory.md`；差距表 ME-01…ME-08
-- [ ] 3.2 从 Claude Code、Codex 对话、git 项目、Obsidian 推断「你在意的方向」，每条带出处；你判断 10 条里至少 8 条对。开工前先补一篇「兴趣发现」设计：`today-study/refs-analysis/QUESTIONS.md` 第 11 题只答了一部分，素材是 openhanako 记忆提取提示词（抽兴趣和近期关注）和巡检提示词。参考：`today-study/refs-analysis/capabilities/memory.md`、`openhanako/subsystems/memory.md`、`QUESTIONS.md` 第 11 题
+- [ ] 3.1 书桌：你写给她的话（她只读）＋「她以为你在意的」列表，设置里可看可删（方案第 4 条）。参考：`today-study/refs-analysis/openhanako/subsystems/desktop-ui-desk-workspace.md`、`capabilities/memory.md`；差距表 ME-01…ME-08；待对照：EverOS（github.com/EverMind-AI/EverOS，Apache-2.0，2026-09-28 用户推荐）的「用户亲口说的 / 模型推断的」两类信息分开存（`explicit_info` / `implicit_traits`），以及 Markdown 为准、索引可重建的做法。整体接入不适用：它是 Python 服务，默认把数据发给阿里云百炼；核心算法在另外的 `everalgo` 包里，许可证未核对
+- [ ] 3.2 从 Claude Code、Codex 对话、git 项目、Obsidian 推断「你在意的方向」，每条带出处；你判断 10 条里至少 8 条对。开工前先补一篇「兴趣发现」设计：`today-study/refs-analysis/QUESTIONS.md` 第 11 题只答了一部分，素材是 openhanako 记忆提取提示词（抽兴趣和近期关注）和巡检提示词。参考：`today-study/refs-analysis/capabilities/memory.md`、`openhanako/subsystems/memory.md`、`QUESTIONS.md` 第 11 题；待对照 EverOS 的用户画像提取（`src/everos/memory/strategies/extract_user_profile.py`）
 - [ ] 3.3 你：给 flomo MCP Token、建只读 Notion 集成、授权 Gmail 只读（我逐步带）；接入 OpenConnector，密钥加密钥匙放钥匙串。参考：`today-study/refs-analysis/capabilities/tools-connectors.md`；`docs/research/2026-09-26-open-connector-pilot.md`
 - [ ] 3.4 每天找一次新东西（网页搜索限定最近一天或一周、Hacker News），值得说才发通知，写明为什么现在；消息写法、去重和频率按 `today-study/spec/her-gap.md` 的 PR-03、PR-05、PR-08，每条附来源（BR-07）。参考：`today-study/refs-analysis/capabilities/proactive.md`、`CowAgent/subsystems/scheduler-proactive.md`、`openhanako/subsystems/hub-scheduler-heartbeat.md`；差距表 PR-01…PR-10、BR-07
 - [ ] 3.5 你：连续用 7 天，判断有用和打扰程度；对照 Today 7 天记录（10 月 4 日结束）。参考：`today-study/refs-analysis/../spec/difftest.md`

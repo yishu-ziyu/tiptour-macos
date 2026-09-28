@@ -26,6 +26,8 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
     private var currentTurnID = UUID().uuidString
     private let injectedCoordinator: DesktopTaskCoordinator?
     var onWindowContextChanged: ((String) -> Void)?
+    /// Stores names from `remember_names`; set by the app.
+    var onRememberNames: ((StepFunNameMemory) -> Void)?
     private lazy var executor = DesktopTaskExecutor(engine: engine, currentContext: { [weak self] in
         self?.executionContext()
     })
@@ -189,6 +191,12 @@ final class StepFunRealtimeToolRouter: StepFunRealtimeToolHandling {
             let receipt = await coordinator.continueTask(taskID: taskID, targetVersion: version,
                 turnID: turnID, onlyAfterUserInput: control.action == .statusAndContinue)
             return receipt?.toolOutput ?? rejectedAction("当前任务不满足继续条件，保持暂停。")
+        case "remember_names":
+            guard let memory = StepFunNameMemory.decode(argumentsJSON), let onRememberNames else {
+                return StepFunNameMemory.nothingSaved
+            }
+            onRememberNames(memory)
+            return memory.savedReceipt
         case "describe_screen":
             return await describeScreen(intent: arguments["intent"] as? String ?? "描述当前屏幕")
         case "act_on_screen":

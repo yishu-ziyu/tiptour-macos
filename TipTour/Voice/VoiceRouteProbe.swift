@@ -252,7 +252,7 @@ final class VoiceRouteProbe {
             let session = StepFunRealtimeSession(apiKey: key,
                 model: TipTourDefaults.StepFunConfiguration.realtimeModel,
                 voice: TipTourDefaults.StepFunConfiguration.realtimeVoice,
-                instructions: CompanionManager.voiceSessionInstructions(companionName: TipTourDefaults.companionName),
+                instructions: CompanionManager.voiceSessionInstructions(identity: CompanionManager.currentIdentity(personaStore: PersonaStore())),
                 tools: StepFunRealtimeToolDeclarations.all, turnDetection: .manual,
                 toolHandler: recordingTools)
             let startedAt = Date()
@@ -274,7 +274,7 @@ final class VoiceRouteProbe {
         let client = StepFunRealtimeClient(
             apiKey: key, model: TipTourDefaults.StepFunConfiguration.realtimeModel,
             voice: TipTourDefaults.StepFunConfiguration.realtimeVoice,
-            instructions: CompanionManager.voiceSessionInstructions(companionName: TipTourDefaults.companionName),
+            instructions: CompanionManager.voiceSessionInstructions(identity: CompanionManager.currentIdentity(personaStore: PersonaStore())),
             tools: StepFunRealtimeToolDeclarations.all, turnDetection: .manual
         ) { [weak self] event in self?.receive(event) }
         defer { client.disconnect() }

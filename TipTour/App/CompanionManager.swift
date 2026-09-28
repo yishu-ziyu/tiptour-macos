@@ -31,13 +31,34 @@ final class CompanionManager: ObservableObject {
     /// of each re-deriving "saved / not saved".
     @Published private(set) var selectedModeKeyState: KeychainItemState = .absent
     @Published private(set) var hasCompletedOnboarding = TipTourDefaults.hasCompletedOnboarding
-    /// Takes effect from the next voice session: the name is part of the
-    /// instructions sent once in `session.update`.
+    /// Set in Settings, voice takes it from the next session: the name is part
+    /// of the instructions sent once in `session.update`. Ctrl+K reads it every turn.
     @Published private(set) var companionName = TipTourDefaults.companionName
+    /// What she calls the user; read the same way as `companionName`.
+    @Published private(set) var userAddress = TipTourDefaults.userAddress
+    let personaStore = PersonaStore()
 
     func setCompanionName(_ rawName: String) {
         TipTourDefaults.companionName = rawName
         companionName = TipTourDefaults.companionName
+    }
+
+    func setUserAddress(_ rawAddress: String) {
+        TipTourDefaults.userAddress = rawAddress
+        userAddress = TipTourDefaults.userAddress
+    }
+
+    /// Names given in a voice session. The session already heard them in the
+    /// tool's result, so they are used there at once.
+    private func rememberNames(_ memory: StepFunNameMemory) {
+        if let name = memory.companionName { setCompanionName(name) }
+        if let address = memory.userAddress { setUserAddress(address) }
+    }
+
+    /// Who she is for any prompt: persona.md plus the two names, read now.
+    nonisolated static func currentIdentity(personaStore: PersonaStore) -> String {
+        PersonaStore.identity(persona: personaStore.read().text,
+                              companionName: TipTourDefaults.companionName, userAddress: TipTourDefaults.userAddress)
     }
 
     /// Takes effect from the next voice session: StepFun fixes the voice in the
@@ -361,30 +382,25 @@ final class CompanionManager: ObservableObject {
         涉及操作时回复一两句；不要在工具前长篇说要怎么做。
         """
 
-    /// Who she is, from docs/PRODUCT.md. Kept separate from the tool contract in
+    /// Who she is (shared with Ctrl+K through `PersonaStore`) plus the lines that
+    /// only fit speech. Kept separate from the tool contract in
     /// `stepfunVoiceInstructions` so persona wording can change without touching
     /// the rules the desktop acceptance depends on.
-    static func companionPersonaInstructions(companionName: String) -> String {
-        let nameLine = companionName.isEmpty
-            ? "用户还没有给你起名字。被问到名字时如实说还没有，可以请用户起一个；不要自己编一个名字。"
-            : "你的名字是「\(companionName)」，是用户给你起的。"
-        return """
-            \(nameLine)
-            你是住在这台 Mac 里的长期伙伴，不是客服、助理腔或科幻管家。默认说中文，自然、有温度、有好奇心。
-            这是语音对话，要像两个人面对面说话：闲聊一般一两句，最多三句，四十字以内；用户想展开时再多说。
-            认真接住用户的话，可以补一句你自己的看法。用户问你在想什么、喜欢什么，就真的说说你的想法，不要把问题推回给用户；但不编造经历。
-            不必每次都用提问收尾，偶尔问一句就够。用户只是打招呼时也回得像个人，不要只回一两个字。
-            不空夸，不撒娇，不说「好问题」「希望对你有帮助」，不总结收尾，不复述用户原话。
-            不假装看过没看过的东西，不假装做完没验证的事。模型名和供应商不是你的身份。
+    static func companionPersonaInstructions(identity: String) -> String {
+        """
+        \(identity)
+        这是语音对话，要像两个人面对面说话：闲聊一般一两句，最多三句，四十字以内；用户想展开时再多说。
+        不必每次都用提问收尾，偶尔问一句就够。用户只是打招呼时也回得像个人，不要只回一两个字。
+        用户明确给你起名字、或说该怎么称呼自己时，调用 remember_names 保存；只是提到别人的名字不算。它返回已保存后，用一句话说出存下的名字；没保存就不要说记住了。
 
-            """
+        """
     }
 
     /// The full instructions for one voice session. The production session and
     /// the DEBUG route probe both build them here, so the probe hears the same
     /// persona the user does.
-    static func voiceSessionInstructions(companionName: String) -> String {
-        companionPersonaInstructions(companionName: companionName) + stepfunVoiceInstructions
+    static func voiceSessionInstructions(identity: String) -> String {
+        companionPersonaInstructions(identity: identity) + stepfunVoiceInstructions
     }
 
     static let taskContinuityVoiceInstructions = """
@@ -417,7 +433,7 @@ final class CompanionManager: ObservableObject {
             apiKey: apiKey,
             model: TipTourDefaults.StepFunConfiguration.realtimeModel,
             voice: TipTourDefaults.StepFunConfiguration.realtimeVoice,
-            instructions: Self.voiceSessionInstructions(companionName: companionName)
+            instructions: Self.voiceSessionInstructions(identity: Self.currentIdentity(personaStore: personaStore))
                 + (isTaskContinuityEnabled ? Self.taskContinuityVoiceInstructions : ""),
             tools: isTaskContinuityEnabled ? StepFunRealtimeToolDeclarations.withTaskControls : StepFunRealtimeToolDeclarations.all,
             turnDetection: .serverVAD,
@@ -432,6 +448,7 @@ final class CompanionManager: ObservableObject {
             fields: ["voice": TipTourDefaults.StepFunConfiguration.realtimeVoice,
                      "companion_name_set": String(!companionName.isEmpty)])
         router.onWindowContextChanged = { [weak session] context in session?.updateScreenContext(context) }
+        router.onRememberNames = { [weak self] memory in self?.rememberNames(memory) }
         router.onTaskReceiptChanged = { [weak self, weak session] receipt in
             self?.desktopTaskReceipt = receipt
             guard let self, let session, self.stepfunSession === session else { return }
@@ -1601,7 +1618,8 @@ final class CompanionManager: ObservableObject {
         let modelClient = DelegationModelClient(apiKey: apiKey)
         let worktreesRootPath = CodingAgentDelegation.defaultWorktreesRootPath
         let session = DelegationSession(
-            conversation: DelegationConversation(complete: { try await modelClient.complete($0) }),
+            conversation: DelegationConversation(complete: { try await modelClient.complete($0) },
+                                                 identity: { [personaStore] in Self.currentIdentity(personaStore: personaStore) }),
             delegation: CodingAgentDelegation(worktreesRootPath: worktreesRootPath),
             findProject: {
                 await DelegationProjectLocator.mostRecentProject(

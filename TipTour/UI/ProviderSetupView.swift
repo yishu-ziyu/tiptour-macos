@@ -93,12 +93,73 @@ struct CompanionNameField: View {
                 .onChange(of: nameDraft) { _, newNameDraft in
                     companionManager.setCompanionName(newNameDraft)
                 }
-            Text("她会用这个名字回应你，从下一次语音会话开始生效。可以先空着，之后在「设置」里起。")
+            Text("在语音里说「就叫你小满」也会存到这里。改了之后，Ctrl+K 下一句、语音下一次会话生效。可以先空着。")
                 .font(.system(size: 11))
                 .foregroundColor(DS.Colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .onAppear { nameDraft = companionManager.companionName }
+        // A name given in voice while Settings is open shows up here too.
+        .onChange(of: companionManager.companionName) { _, saved in
+            if saved != TipTourDefaults.sanitizedCompanionName(nameDraft) { nameDraft = saved }
+        }
+    }
+}
+
+/// What she calls the user, beside her own name.
+struct UserAddressField: View {
+    @ObservedObject var companionManager: CompanionManager
+    @State private var addressDraft = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("例如：奕枢", text: $addressDraft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundColor(DS.Colors.textPrimary)
+                .tint(DS.Colors.accentText)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(DS.Colors.surface2))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(DS.Colors.borderStrong))
+                .accessibilityLabel("她怎么称呼你")
+                .onChange(of: addressDraft) { _, newAddressDraft in
+                    companionManager.setUserAddress(newAddressDraft)
+                }
+            Text("可以空着，空着她就不称呼你。在语音里说「叫我奕枢」也会存到这里。")
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .onAppear { addressDraft = companionManager.userAddress }
+        .onChange(of: companionManager.userAddress) { _, saved in
+            if saved != TipTourDefaults.sanitizedCompanionName(addressDraft) { addressDraft = saved }
+        }
+    }
+}
+
+/// Where persona.md is, and whether it is still the default.
+struct PersonaFileRow: View {
+    let personaStore: PersonaStore
+    @State private var isDefault = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("写在 persona.md 里，语音和 Ctrl+K 都读它。你可以直接改：Ctrl+K 下一句、语音下一次会话生效。")
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                Button("在访达中显示") {
+                    isDefault = personaStore.read().isDefault
+                    NSWorkspace.shared.activateFileViewerSelecting([personaStore.fileURL])
+                }
+                Text(isDefault ? "默认" : "已改过")
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textSecondary)
+            }
+        }
+        .onAppear { isDefault = personaStore.read().isDefault }
     }
 }
 

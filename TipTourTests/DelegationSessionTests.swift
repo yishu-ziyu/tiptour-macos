@@ -85,13 +85,15 @@ struct DelegationSessionTests {
         notices: RecordingNoticePoster? = nil,
         noticeRules: DelegationNoticeRules? = nil,
         isUserLooking: @escaping @MainActor () -> Bool = { false },
-        keepAwake: DelegationKeepAwake? = nil
+        keepAwake: DelegationKeepAwake? = nil,
+        identity: (@Sendable () -> String)? = nil
     ) throws -> DelegationSession {
         ScriptedStepFun.queue(replies)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ScriptedStepFun.self]
         let client = DelegationModelClient(apiKey: "test-key", session: URLSession(configuration: configuration))
-        let conversation = DelegationConversation(complete: { try await client.complete($0) })
+        let conversation = identity.map { DelegationConversation(complete: { try await client.complete($0) }, identity: $0) }
+            ?? DelegationConversation(complete: { try await client.complete($0) })
         let delegation = CodingAgentDelegation(claudeCommand: claude, worktreesRootPath: try makeTemporaryDirectory(),
                                                codexCommand: codex, kimiCommand: kimi, stepCommand: step)
         return DelegationSession(conversation: conversation, delegation: delegation,
@@ -1650,6 +1652,32 @@ struct DelegationSessionTests {
         #expect(DelegationReport(receipt: receipt).followUpQuestion == nil)
     }
 
+    @Test func aNameGivenElsewhereAndAnEditedPersonaCountFromTheNextSentence() async throws {
+        let project = try await makeProject()
+        let file = URL(fileURLWithPath: try makeTemporaryDirectory() + "/persona.md")
+        let store = PersonaStore(fileURL: file)
+        let names = NameBox()
+        let session = try makeSession(project: project, claude: try makeStubClaude(body: ":"),
+                                      replies: [modelReply(say: "还没有名字。"), modelReply(say: "小满。")],
+                                      identity: { PersonaStore.identity(persona: store.read().text,
+                                                                        companionName: names.companion, userAddress: names.address) })
+
+        await session.send("你叫什么？")
+        #expect(ScriptedStepFun.systemMessages.last?.contains("用户还没有给你起名字") == true)
+        #expect(ScriptedStepFun.systemMessages.last?.contains("长期伙伴") == true, "Ctrl+K has the same persona as voice")
+
+        // As if said in voice: 「就叫你小满，叫我奕枢」; and the user edits persona.md.
+        names.companion = "小满"
+        names.address = "奕枢"
+        try "回答再短一点。".write(to: file, atomically: true, encoding: .utf8)
+        await session.send("你叫什么？")
+        let prompt = try #require(ScriptedStepFun.systemMessages.last)
+        #expect(prompt.contains("你的名字是「小满」"))
+        #expect(prompt.contains("称呼用户「奕枢」"))
+        #expect(prompt.contains("回答再短一点。"))
+        #expect(!prompt.contains("长期伙伴"))
+    }
+
     @Test func claudeCodesClosingQuestionIsRelayed() {
         let workspace = DelegationWorkspace(project: DelegationProject(repositoryPath: "/p"), branchName: "b", worktreePath: "/w", baseCommit: "c")
         let receipt = DelegationReceipt(workspace: workspace, outcome: .changed,
@@ -1661,6 +1689,11 @@ struct DelegationSessionTests {
         #expect(report.followUpQuestion == "另外三节还是英文，你要的话我可以接着改")
         #expect(report.costText == "用了 72 秒，约 $0.40 订阅额度")
     }
+}
+
+final class NameBox: @unchecked Sendable {
+    var companion = ""
+    var address = ""
 }
 
 @MainActor
