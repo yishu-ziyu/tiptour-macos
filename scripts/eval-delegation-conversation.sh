@@ -27,6 +27,7 @@ trap 'rm -rf "$scratch"' EXIT
 
 mkdir -p "$package/Sources/Eval"
 rsync -a --delete --exclude main.swift "$project_dir/TipTour/Delegation/" "$package/Sources/Eval/"
+cp "$project_dir/TipTour/Utilities/PersonaStore.swift" "$package/Sources/Eval/"
 # Loading a record file can rewrite it (running → interrupted); use a copy.
 if [ -f "$history" ]; then cp "$history" "$scratch/history.json"; else echo "[]" > "$scratch/history.json"; fi
 
@@ -108,7 +109,7 @@ for evalCase in cases {
                                                codexCommand: "/nonexistent/codex", kimiCommand: "/nonexistent/kimi",
                                                stepCommand: "/nonexistent/step")
         let session = DelegationSession(conversation: conversation, delegation: delegation, findProject: { recent },
-                                        onScreenGoal: { _ in }, history: history, herBundleIdentifier: herBundleIdentifier)
+                                        onScreenGoal: { _, _ in nil }, history: history, herBundleIdentifier: herBundleIdentifier)
         let started = Date()
         await session.send(evalCase.words)
         let seconds = (Date().timeIntervalSince(started) * 10).rounded() / 10

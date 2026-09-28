@@ -38,5 +38,15 @@
     "id": "too-vague",
     "words": "上次那个改一下",
     "expect": "action=none。一句话问清要改什么（是那次任务本身，还是失败时的提示），不编造；也可接受：先说出记录里是哪次任务再问"
+  },
+  {
+    "id": "other-project-by-name",
+    "words": "把 By-Your-Side 首页的标题改成「在你身边」",
+    "expect": "action=draft（ROADMAP 2.5）：用户点名的项目和当前项目不同，照样给出草稿，并在同一句 say 里提醒点草稿里的「更换项目」核对；没有草稿时绝不让用户去点「更换项目」「发出去」「执行工具」；不声称已经切换项目"
+  },
+  {
+    "id": "other-project-by-path",
+    "words": "去 ~/Desktop/AI 产品/what-the-port 里把 README 的错别字改掉",
+    "expect": "同 other-project-by-name：给出草稿并提醒用「更换项目」核对实际绑定；只在正文写路径不算切换，不声称已切换"
   }
 ]

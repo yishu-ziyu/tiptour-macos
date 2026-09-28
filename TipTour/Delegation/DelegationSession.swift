@@ -220,16 +220,7 @@ final class DelegationSession: ObservableObject {
         phase = .thinking
         // Only a project found from recent use is a guess the model may replace.
         let projectIsGuess = currentDraft == nil && pendingWorkspace == nil && explicitlySelectedProject == nil
-        let project: DelegationProject?
-        if let currentDraft {
-            project = currentDraft.project
-        } else if let pendingWorkspace {
-            project = pendingWorkspace.project
-        } else if let explicitlySelectedProject {
-            project = explicitlySelectedProject
-        } else {
-            project = await findProject()
-        }
+        let project = await currentProject()
         let context = await Self.projectContext(for: project)
         let herProject = Self.herOwnProject(bundleIdentifier: herBundleIdentifier,
                                             among: [project?.repositoryPath].compactMap { $0 } + (history?.projectPaths ?? []))
@@ -237,7 +228,8 @@ final class DelegationSession: ObservableObject {
             let turn = try await conversation.respond(
                 to: trimmed, projectContext: context, tool: selectedAgentTool,
                 recentHandOffs: history?.promptText() ?? "（还没有记录）",
-                herCode: herProject.map { "\($0.name)（\($0.repositoryPath)）" } ?? "（不知道在哪：最近用过的项目里没有 Her 的代码）")
+                herCode: herProject.map { "\($0.name)（\($0.repositoryPath)）" } ?? "（不知道在哪：最近用过的项目里没有 Her 的代码）",
+                draftIsShowing: currentDraft != nil)
             if case .draft = turn.action, pendingWorkspace != nil {
                 say("先决定上一份改动：点「合进来」或「丢掉」，再发新任务。")
                 phase = .awaitingDecision
@@ -251,36 +243,10 @@ final class DelegationSession: ObservableObject {
             case .reply:
                 phase = restingPhase
             case .draft(let body):
-                // A revision keeps the background of the draft it revises.
-                let background = turn.refersTo.flatMap { history?.background(forReference: $0) } ?? currentDraft?.background
-                let bound = projectIsGuess ? (chosenProject(for: turn, herProject: herProject) ?? project) : project
-                let request = currentDraft?.request ?? turn.refersTo.flatMap { history?.request(forReference: $0) } ?? trimmed
-                // Carrying on a change in its own project keeps the tool that made it,
-                // unless the user names another. Said aloud, since the picker otherwise
-                // shows the last choice.
-                if currentDraft == nil, Self.toolAskedFor(in: trimmed) == nil,
-                   let reference = turn.refersTo, bound?.repositoryPath == history?.projectPath(forReference: reference),
-                   let earlierTool = history?.toolThatMadeChange(forReference: reference), earlierTool != selectedAgentTool {
-                    selectedAgentTool = earlierTool
-                    say("执行工具沿用那次的 \(earlierTool.displayName)；要换，在草稿的「执行工具」里选。")
-                }
-                let draft = Draft(request: request, body: body, background: background, project: bound, tool: selectedAgentTool)
-                retireCurrentDraft()
-                currentDraft = draft
-                append(.draft(id: UUID(), text: draft.text, project: bound, tool: selectedAgentTool, isCurrent: true), as: .draft)
-                phase = .awaitingSend
-                if projectIsGuess, turn.project == .her, herProject == nil, let bound {
-                    say("没找到 Her 自己的代码在哪，草稿先绑在 \(bound.name)；发出去前点「更换项目」选 Her 的仓库。")
-                }
+                showDraft(body, from: turn, userText: trimmed, project: project,
+                          projectIsGuess: projectIsGuess, herProject: herProject)
             case .screen(let goal):
-                phase = pendingWorkspace == nil ? .idle : .awaitingDecision
-                if let refusal = onScreenGoal(goal, { [weak self] result in self?.screenGoalEnded(result) }) {
-                    let line = "没去点：\(refusal)"
-                    say(line)
-                    conversation.noteAppEvent(line)
-                } else if !turn.say.isEmpty {
-                    append(.message(id: UUID(), speaker: .her, text: turn.say), as: .her)
-                }
+                startScreenGoal(goal, from: turn)
             }
             if currentDraft != nil, let reminder = Self.toolReminder(words: trimmed, say: turn.say, selected: selectedAgentTool) {
                 say(reminder)
@@ -292,6 +258,97 @@ final class DelegationSession: ObservableObject {
                 say("没连上阶跃，这句没处理：\(error.localizedDescription)")
             }
             phase = restingPhase
+        }
+    }
+
+    /// The draft's project, then the pending change's, then the user's explicit
+    /// choice; only without any of them is the project found from recent use.
+    private func currentProject() async -> DelegationProject? {
+        if let currentDraft { return currentDraft.project }
+        if let pendingWorkspace { return pendingWorkspace.project }
+        if let explicitlySelectedProject { return explicitlySelectedProject }
+        return await findProject()
+    }
+
+    private func showDraft(_ body: String, from turn: DelegationTurn, userText: String, project: DelegationProject?,
+                           projectIsGuess: Bool, herProject: DelegationProject?) {
+        // A revision keeps the background of the draft it revises.
+        let background = turn.refersTo.flatMap { history?.background(forReference: $0) } ?? currentDraft?.background
+        var bound = projectIsGuess ? (chosenProject(for: turn, herProject: herProject) ?? project) : project
+        let namedProject = Self.projectNamed(in: userText, near: bound ?? project, recorded: history?.projectPaths ?? [])
+            .flatMap { $0 == bound ? nil : $0 }
+        if projectIsGuess, let namedProject { bound = namedProject }
+        let request = currentDraft?.request ?? turn.refersTo.flatMap { history?.request(forReference: $0) } ?? userText
+        // Carrying on a change in its own project keeps the tool that made it,
+        // unless the user names another. Said aloud, since the picker otherwise
+        // shows the last choice.
+        if currentDraft == nil, Self.toolAskedFor(in: userText) == nil,
+           let reference = turn.refersTo, bound?.repositoryPath == history?.projectPath(forReference: reference),
+           let earlierTool = history?.toolThatMadeChange(forReference: reference), earlierTool != selectedAgentTool {
+            selectedAgentTool = earlierTool
+            say("执行工具沿用那次的 \(earlierTool.displayName)；要换，在草稿的「执行工具」里选。")
+        }
+        let draft = Draft(request: request, body: body, background: background, project: bound, tool: selectedAgentTool)
+        retireCurrentDraft()
+        currentDraft = draft
+        append(.draft(id: UUID(), text: draft.text, project: bound, tool: selectedAgentTool, isCurrent: true), as: .draft)
+        phase = .awaitingSend
+        if let namedProject {
+            if bound == namedProject {
+                say("草稿绑到了你说的 \(namedProject.name)；不对就点「更换项目」。")
+            } else if let bound {
+                say("你说的是 \(namedProject.name)，草稿绑在 \(bound.name)；要换就点「更换项目」。")
+            }
+        } else if projectIsGuess, turn.project == .her, herProject == nil, let bound {
+            say("没找到 Her 自己的代码在哪，草稿先绑在 \(bound.name)；发出去前点「更换项目」选 Her 的仓库。")
+        }
+    }
+
+    /// The one Git repository the user's words name: a folder next to the
+    /// draft's project, or one from the hand-off records. A name inside a longer
+    /// English word ("port" in "report") does not count; with two candidates
+    /// the longer name wins ("os-slop" over "os"), and a tie names none.
+    static func projectNamed(in words: String, near project: DelegationProject?, recorded: [String]) -> DelegationProject? {
+        var paths = Set(recorded)
+        if let project {
+            let folder = URL(fileURLWithPath: project.repositoryPath).deletingLastPathComponent()
+            let siblings = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+            paths.formUnion(siblings.map { folder.appendingPathComponent($0).path })
+        }
+        let lowercasedWords = words.lowercased()
+        let named = paths.filter { path in
+            let name = URL(fileURLWithPath: path).lastPathComponent.lowercased()
+            return !name.hasPrefix(".") && Self.containsAsWord(lowercasedWords, name)
+                && FileManager.default.fileExists(atPath: path + "/.git")
+        }
+        let longest = named.filter { path in
+            let name = URL(fileURLWithPath: path).lastPathComponent.lowercased()
+            return !named.contains { other in
+                let otherName = URL(fileURLWithPath: other).lastPathComponent.lowercased()
+                return otherName != name && otherName.contains(name)
+            }
+        }
+        guard longest.count == 1, let path = longest.first else { return nil }
+        return DelegationProject(repositoryPath: path)
+    }
+
+    private static func containsAsWord(_ text: String, _ name: String) -> Bool {
+        let isWordCharacter = { (character: Character) in character.isASCII && (character.isLetter || character.isNumber) }
+        return text.ranges(of: name).contains { range in
+            let before = range.lowerBound == text.startIndex ? nil : text[text.index(before: range.lowerBound)]
+            let after = range.upperBound == text.endIndex ? nil : text[range.upperBound]
+            return !(before.map(isWordCharacter) ?? false) && !(after.map(isWordCharacter) ?? false)
+        }
+    }
+
+    private func startScreenGoal(_ goal: String, from turn: DelegationTurn) {
+        phase = pendingWorkspace == nil ? .idle : .awaitingDecision
+        if let refusal = onScreenGoal(goal, { [weak self] result in self?.screenGoalEnded(result) }) {
+            let line = "没去点：\(refusal)"
+            say(line)
+            conversation.noteAppEvent(line)
+        } else if !turn.say.isEmpty {
+            append(.message(id: UUID(), speaker: .her, text: turn.say), as: .her)
         }
     }
 

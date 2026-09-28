@@ -214,18 +214,21 @@ final class DelegationConversation: @unchecked Sendable {
     ///
     /// Say-do guard (from sambuild04/screen-voice-agent, adapted): if she says
     /// she will write or send something but returns no draft, she is asked
-    /// once more to either produce the draft or say why she cannot. At most
-    /// once per user message, so it cannot loop.
+    /// once more to either produce the draft or say why she cannot. The same
+    /// happens when she points at a draft's buttons while no draft is showing.
+    /// At most once per user message, so it cannot loop.
     func respond(to userText: String, projectContext: String, tool: DelegationAgentTool = .claudeCode,
-                 recentHandOffs: String = "（还没有记录）", herCode: String = "（不知道在哪）") async throws -> DelegationTurn {
+                 recentHandOffs: String = "（还没有记录）", herCode: String = "（不知道在哪）",
+                 draftIsShowing: Bool = false) async throws -> DelegationTurn {
         transcript.append(DelegationChatMessage(role: .user, content: userText))
         let systemMessage = DelegationChatMessage(role: .system, content: Self.instructions(
-            projectContext: projectContext, tool: tool, recentHandOffs: recentHandOffs, herCode: herCode, identity: identity()))
+            projectContext: projectContext, tool: tool, recentHandOffs: recentHandOffs, herCode: herCode,
+            draftIsShowing: draftIsShowing, identity: identity()))
         var turn = try Self.parse(try await complete([systemMessage] + transcript))
         var neededCorrection = false
-        if Self.promisesActionWithoutOne(turn) {
+        if let correctionText = Self.correction(for: turn, draftIsShowing: draftIsShowing) {
             neededCorrection = true
-            let correction = DelegationChatMessage(role: .system, content: Self.correction)
+            let correction = DelegationChatMessage(role: .system, content: correctionText)
             let retried = try Self.parse(try await complete([systemMessage] + transcript
                 + [DelegationChatMessage(role: .assistant, content: Self.encode(turn)), correction]))
             turn = retried
@@ -240,6 +243,7 @@ final class DelegationConversation: @unchecked Sendable {
 
     static func instructions(projectContext: String, tool: DelegationAgentTool = .claudeCode,
                              recentHandOffs: String = "（还没有记录）", herCode: String = "（不知道在哪）",
+                             draftIsShowing: Bool = false,
                              identity: String = PersonaStore.identity(persona: PersonaStore.defaultText,
                                                                       companionName: "", userAddress: "")) -> String {
         """
@@ -252,7 +256,7 @@ final class DelegationConversation: @unchecked Sendable {
         规则：
         - 默认先听。用户想要的效果、取舍或范围没说清时，用一句话问清楚，action 为 "none"。
         - 不要问文件名、路径或代码细节：执行工具会自己在项目里找。只问用户才知道的事，比如想要什么效果、有没有参考、哪些不能动。
-        - 当前项目只是从最近使用记录中找到的，不保证是用户这次的目标。用户点名的项目或路径与当前项目不符时，提醒用户在草稿里点「更换项目」核对实际绑定；仅在正文写路径不会切换项目，不能声称已经切换。
+        - 用户点名的项目或路径和下面的当前项目不同时，照样按要求写 draft：应用会按用户说的名字绑定项目并告诉用户，say 里不要提项目绑定或「更换项目」。界面上没有草稿时，不要让用户去点「更换项目」「发出去」「执行工具」这些草稿里的按钮。
         - 要求清楚了，就写 draft：给执行工具的完整要求，写明目标、范围和约束（只改需要改的；先读项目说明；不要运行 xcodebuild；改完自检；提交一次，不要推送；最后用两三句话说明改了什么）。草稿只描述任务，不写「请用某某执行」，也不替执行工具写示例文案。action 为 "draft"，say 用一句话请用户看一眼草稿，确认后点「发出去」。
         - 执行工具由用户在草稿的「执行工具」里选，应用会自己提醒；say 里不要提这次用哪个执行工具。Codex 当前用用户选定的 GPT-6 Luna、High 推理档位，仅对本次执行生效；其他执行工具沿用各自本机配置。你不能通过对话修改模型，不要声称已换模型或自动升级。
         - 用户提到以前的事（「上次」「刚才」「那次失败」）时，对照下面「以前交出去的任务」：能确定是哪次就直接用，不要让用户重述；不确定是哪次，或听不出他要改的是那件事本身还是 Her 当时的提示，用一句话问清。用户说「刚才」「上次」时，按时间对到离现在最近的那件；拿不准是哪件时，说出那件的时间和内容来问。这次和以前某次任务有关时，refers_to 填下面列表里那次方括号中的编号（如 a1b2c3，编号不会变；无关留空字符串）：应用会把那次的背景和 Her 当时给用户看的原话原样放在草稿最前面，draft 里不用再写；重做时在 draft 里写明是重做。记录里没有的事不要编。
@@ -267,6 +271,8 @@ final class DelegationConversation: @unchecked Sendable {
         - say 不超过两句，不空夸，不用「好问题」这类客套。
 
         只输出一个 JSON 对象：{"say": "...", "action": "none" | "draft" | "screen", "draft": "...", "screen_goal": "...", "refers_to": "", "project": "current" | "record" | "her"}。不用的文字字段留空字符串。
+
+        界面上现在\(draftIsShowing ? "有一份草稿" : "没有草稿")。
 
         当前项目：
         \(projectContext)
@@ -283,6 +289,23 @@ final class DelegationConversation: @unchecked Sendable {
     static let correction = """
     你上一句说要写草稿或要去做，但没有给出 draft，也没有给出 screen_goal。现在要么给出对应的 draft 或 screen_goal，要么用一句话说明为什么做不了；不要重复上一句。
     """
+
+    static let missingDraftCorrection = """
+    你上一句让用户去点草稿里的按钮，但界面上现在没有草稿。要求清楚就给出 draft（project 按规则填）；不清楚就用一句话问清，不要提草稿里的按钮；不要重复上一句。
+    """
+
+    /// The one correction a turn gets, if it needs any.
+    private static func correction(for turn: RawTurn, draftIsShowing: Bool) -> String? {
+        if promisesActionWithoutOne(turn) { return correction }
+        if !draftIsShowing, pointsAtDraftButtons(turn) { return missingDraftCorrection }
+        return nil
+    }
+
+    /// A reply naming a button that only exists on a draft.
+    private static func pointsAtDraftButtons(_ turn: RawTurn) -> Bool {
+        guard case .reply = turn.action else { return false }
+        return ["更换项目", "发出去", "「执行工具」"].contains { turn.say.contains($0) }
+    }
 
     // MARK: - Parsing
 

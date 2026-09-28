@@ -15,8 +15,8 @@ struct DelegationSessionTests {
         return path
     }
 
-    private func makeProject(directoryName: String? = nil) async throws -> DelegationProject {
-        var repository = try makeTemporaryDirectory()
+    private func makeProject(directoryName: String? = nil, parentDirectory: String? = nil) async throws -> DelegationProject {
+        var repository = try parentDirectory ?? makeTemporaryDirectory()
         if let directoryName {
             repository += "/" + directoryName
             try FileManager.default.createDirectory(atPath: repository, withIntermediateDirectories: true)
@@ -856,6 +856,96 @@ struct DelegationSessionTests {
         #expect(ScriptedStepFun.remaining == 0)
         #expect(reports(session).isEmpty)
         #expect(try greeting(project) == "hello\n")
+    }
+
+    @Test(arguments: ["当前项目不是 os，请在草稿里点「更换项目」选 os。", "确认后点「发出去」就行。"])
+    func pointingAtDraftButtonsWithoutADraftIsCorrectedOnce(reply: String) async throws {
+        let project = try await makeProject()
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: ":"),
+            replies: [modelReply(say: reply),
+                      modelReply(say: "草稿在这，看一眼项目对不对。", action: "draft", draft: "把 os 的问候语改成 world")])
+
+        await session.send("把 os 的问候语改成 world")
+
+        #expect(session.phase == .awaitingSend)
+        #expect(herLines(session) == ["草稿在这，看一眼项目对不对。"], "A button on a draft that does not exist is never shown")
+        let draft = try #require(session.entries.last)
+        #expect(draft == .draft(id: draft.id, text: "把 os 的问候语改成 world", project: project, isCurrent: true))
+        #expect(ScriptedStepFun.remaining == 0)
+        #expect(reports(session).isEmpty)
+    }
+
+    @Test func draftButtonsMayBeNamedWhileADraftIsShowing() async throws {
+        let project = try await makeProject()
+        let session = try makeSession(
+            project: project, claude: try makeStubClaude(body: ":"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改成 world"),
+                      modelReply(say: "要改别的项目，在草稿里点「更换项目」。")])
+
+        await session.send("把问候语改成 world")
+        await session.send("项目好像不对")
+
+        #expect(ScriptedStepFun.remaining == 0, "exactly two model calls: no correction")
+        #expect(herLines(session).last == "要改别的项目，在草稿里点「更换项目」。")
+        #expect(session.phase == .awaitingSend)
+        #expect(reports(session).isEmpty)
+    }
+
+    @Test func aGuessedProjectGivesWayToTheOneTheUserNamed() async throws {
+        let folder = try makeTemporaryDirectory()
+        let recentProject = try await makeProject(directoryName: "os", parentDirectory: folder)
+        let namedProject = try await makeProject(directoryName: "By-Your-Side", parentDirectory: folder)
+        let session = try makeSession(
+            project: recentProject,
+            claude: try makeStubClaude(body: "print world > greeting.txt; git commit -qam greet"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "把问候语改成 world")])
+
+        await session.send("把 by-your-side 的问候语改成 world")
+
+        let draft = try #require(session.entries.last { if case .draft = $0 { return true }; return false })
+        guard case .draft(_, _, let boundProject, _, true) = draft else { Issue.record("no current draft"); return }
+        #expect(boundProject == namedProject)
+        #expect(herLines(session).last == "草稿绑到了你说的 By-Your-Side；不对就点「更换项目」。")
+        await session.sendCurrentDraft()
+        await session.mergePendingChange()
+        #expect(try greeting(namedProject) == "world\n", "The change lands in the project the user named")
+        #expect(try greeting(recentProject) == "hello\n")
+    }
+
+    @Test func aProjectTheUserChoseIsNotReplacedOnlyRemindedAbout() async throws {
+        let folder = try makeTemporaryDirectory()
+        let chosenProject = try await makeProject(directoryName: "os", parentDirectory: folder)
+        let namedProject = try await makeProject(directoryName: "what-the-port", parentDirectory: folder)
+        let session = try makeSession(
+            project: nil, claude: try makeStubClaude(body: ":"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改问候语"),
+                      modelReply(say: "改好了，再看一眼。", action: "draft", draft: "把 what-the-port 的问候语也改掉")])
+        await session.send("改问候语")
+        await session.selectDraftProject(chosenProject.repositoryPath)
+
+        await session.send("what-the-port 的也一起改")
+
+        let draft = try #require(session.entries.last { if case .draft = $0 { return true }; return false })
+        guard case .draft(_, _, let boundProject, _, true) = draft else { Issue.record("no current draft"); return }
+        #expect(boundProject == chosenProject)
+        #expect(herLines(session).last == "你说的是 what-the-port，草稿绑在 os；要换就点「更换项目」。")
+    }
+
+    @Test func aProjectNamePartOfAnotherWordIsNotAProject() async throws {
+        let folder = try makeTemporaryDirectory()
+        let recentProject = try await makeProject(directoryName: "os", parentDirectory: folder)
+        _ = try await makeProject(directoryName: "port", parentDirectory: folder)
+        let session = try makeSession(
+            project: recentProject, claude: try makeStubClaude(body: ":"),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改 report 页")])
+
+        await session.send("把 report 页的标题改短")
+
+        let draft = try #require(session.entries.last { if case .draft = $0 { return true }; return false })
+        guard case .draft(_, _, let boundProject, _, true) = draft else { Issue.record("no current draft"); return }
+        #expect(boundProject == recentProject)
+        #expect(herLines(session) == ["看一眼草稿。"])
     }
 
     @Test(arguments: [false, true])
