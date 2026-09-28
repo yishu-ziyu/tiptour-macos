@@ -178,6 +178,10 @@ final class DelegationConversation: @unchecked Sendable {
                 return nil
             }
         }
+        if !transcript.isEmpty {
+            transcript.append(DelegationChatMessage(role: .user, content: Self.appRecord(
+                "Her 在 \(Self.nowText()) 重启过，上面是重启前的记录。重启前没发出去的草稿不能再发，面板上没有它的「发出去」按钮；用户要继续那件事，按原来的要求重新写一份 draft。")))
+        }
         trimTranscript()
     }
 

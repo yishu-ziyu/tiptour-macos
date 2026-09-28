@@ -1762,6 +1762,24 @@ struct DelegationSessionTests {
         #expect(!sent.contains { $0.hasPrefix("assistant: ") && $0.contains("合好了") }, "The app's words are never put in her mouth")
     }
 
+    @Test func anUnsentDraftFromBeforeARestartIsNotOfferedForSending() async throws {
+        let project = try await makeProject()
+        let logURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/ctrlk-conversation.jsonl")
+        let before = try makeSession(project: project, claude: "/nonexistent/claude",
+                                     replies: [modelReply(say: "看一眼草稿，确认后点「发出去」。", action: "draft", draft: "在 greeting.txt 加一行 bye")],
+                                     log: DelegationConversationLog(fileURL: logURL))
+        await before.send("greeting.txt 加一行 bye")
+
+        let after = try makeSession(project: project, claude: "/nonexistent/claude", replies: [modelReply(say: "好。")],
+                                    log: DelegationConversationLog(fileURL: logURL))
+        await after.send("刚才那个准备得怎样了？")
+        let sent = try #require(ScriptedStepFun.transcripts.last)
+        let restartRecord = try #require(sent.firstIndex { $0.hasPrefix("user: 【应用记录，不是用户说的话】Her 在 ") && $0.contains("重启前没发出去的草稿不能再发") })
+        #expect(restartRecord == sent.count - 2, "The restart is the last thing before the user's new words")
+        await after.sendCurrentDraft()
+        #expect(after.entries.allSatisfy { if case .draft(_, _, _, _, true) = $0 { return false }; return true }, "Nothing from before can be sent")
+    }
+
     @Test func startingOverIsRespectedAfterARestart() async throws {
         let project = try await makeProject()
         let logURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/ctrlk-conversation.jsonl")
