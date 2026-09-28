@@ -64,7 +64,7 @@ struct DelegationSessionTests {
     }
 
     private func modelReply(say: String, action: String = "none", draft: String = "", screenGoal: String = "",
-                            refersTo: Int = 0, project: String = "current") -> String {
+                            refersTo: String = "", project: String = "current") -> String {
         let content = try! JSONSerialization.data(withJSONObject: ["say": say, "action": action, "draft": draft,
                                                                    "screen_goal": screenGoal, "refers_to": refersTo,
                                                                    "project": project])
@@ -86,7 +86,8 @@ struct DelegationSessionTests {
         noticeRules: DelegationNoticeRules? = nil,
         isUserLooking: @escaping @MainActor () -> Bool = { false },
         keepAwake: DelegationKeepAwake? = nil,
-        identity: (@Sendable () -> String)? = nil
+        identity: (@Sendable () -> String)? = nil,
+        log: DelegationConversationLog? = nil
     ) throws -> DelegationSession {
         ScriptedStepFun.queue(replies)
         let configuration = URLSessionConfiguration.ephemeral
@@ -105,7 +106,12 @@ struct DelegationSessionTests {
                                  },
                                  history: history, herBundleIdentifier: herBundleIdentifier,
                                  noticePoster: notices, noticeRules: noticeRules, isUserLooking: isUserLooking,
-                                 keepAwake: keepAwake)
+                                 keepAwake: keepAwake, log: log)
+    }
+
+    /// The fixed reference of the newest recorded hand-off, as the model sees it.
+    private func newestReference(_ historyURL: URL) -> String {
+        DelegationHistory(fileURL: historyURL).records.last?.reference ?? ""
     }
 
     private func herLines(_ session: DelegationSession) -> [String] {
@@ -1056,7 +1062,7 @@ struct DelegationSessionTests {
 
         let after = try makeSession(
             project: project, claude: "/nonexistent/claude",
-            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改 Her 显示失败的写法", refersTo: 1),
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改 Her 显示失败的写法", refersTo: newestReference(historyURL)),
                       modelReply(say: "改好了，再看一眼。", action: "draft", draft: "改 Her 显示失败的写法，下一步写在前面")],
             history: DelegationHistory(fileURL: historyURL))
         await after.send("上次 Codex 那个失败提示我看不懂，改一下")
@@ -1091,7 +1097,7 @@ struct DelegationSessionTests {
 
         let after = try makeSession(
             project: project, claude: "/nonexistent/claude",
-            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "问候语改成 world!", refersTo: 1)],
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "问候语改成 world!", refersTo: newestReference(historyURL))],
             history: DelegationHistory(fileURL: historyURL))
         await after.send("刚才那个再调一下，加个感叹号")
         #expect(after.selectedAgentTool == .codex, "The earlier task went to Codex and the user named no other tool")
@@ -1110,7 +1116,7 @@ struct DelegationSessionTests {
         _ = try await recordFailedCodexHandOff(project: project, historyURL: historyURL)
         let after = try makeSession(
             project: project, claude: "/nonexistent/claude",
-            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "把日志窗口改成中文", refersTo: 1)],
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "把日志窗口改成中文", refersTo: newestReference(historyURL))],
             history: DelegationHistory(fileURL: historyURL))
         await after.send("上次那个失败的，重做一遍")
         #expect(after.selectedAgentTool == .claudeCode, "Codex failed that run; which tool to try is the user's call")
@@ -1123,7 +1129,7 @@ struct DelegationSessionTests {
         _ = try await recordFailedCodexHandOff(project: project, historyURL: historyURL)
         let session = try makeSession(
             project: project, claude: try makeStubClaude(body: "print world > greeting.txt"),
-            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改 Her 显示失败的写法", refersTo: 1)],
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改 Her 显示失败的写法", refersTo: newestReference(historyURL))],
             history: DelegationHistory(fileURL: historyURL))
         await session.send("上次那个失败提示改一下")
         await session.sendCurrentDraft()
@@ -1138,7 +1144,7 @@ struct DelegationSessionTests {
         let project = try await makeProject()
         let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
         let session = try makeSession(project: project, claude: "/nonexistent/claude",
-                                      replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改问候语", refersTo: 3)],
+                                      replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改问候语", refersTo: "ffffff")],
                                       history: DelegationHistory(fileURL: historyURL))
         await session.send("上次那个")
         #expect(currentDraftText(session) == "改问候语")
@@ -1167,7 +1173,7 @@ struct DelegationSessionTests {
         let session = try makeSession(
             project: testsOnly, claude: "/nonexistent/claude",
             replies: [modelReply(say: "那句是说本机服务返回了 502。", action: "draft", draft: "改 Her 显示失败的写法",
-                                 refersTo: 1, project: "her")],
+                                 refersTo: newestReference(historyURL), project: "her")],
             history: DelegationHistory(fileURL: historyURL), herBundleIdentifier: "com.example.her")
 
         await session.send("上次 Codex 那个失败提示我看不懂，改一下")
@@ -1185,7 +1191,7 @@ struct DelegationSessionTests {
         _ = try await recordFailedCodexHandOff(project: original, historyURL: historyURL)
         let session = try makeSession(
             project: recent, claude: "/nonexistent/claude",
-            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "重做：把日志窗口改成中文", refersTo: 1, project: "record")],
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "重做：把日志窗口改成中文", refersTo: newestReference(historyURL), project: "record")],
             history: DelegationHistory(fileURL: historyURL))
 
         await session.send("上次 Codex 那个任务再交一次")
@@ -1217,7 +1223,7 @@ struct DelegationSessionTests {
         let session = try makeSession(
             project: recent, claude: "/nonexistent/claude",
             replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "改问候语"),
-                      modelReply(say: "改好了。", action: "draft", draft: "改问候语和提示", refersTo: 1, project: "her")],
+                      modelReply(say: "改好了。", action: "draft", draft: "改问候语和提示", refersTo: newestReference(historyURL), project: "her")],
             history: DelegationHistory(fileURL: historyURL), herBundleIdentifier: "com.example.her")
         await session.send("问候语改一下")
         await session.selectDraftProject(chosen.repositoryPath)
@@ -1445,7 +1451,7 @@ struct DelegationSessionTests {
         let notices = RecordingNoticePoster()
         let session = try makeSession(
             project: project, claude: try makeStubClaude(body: "print world > greeting.txt"),
-            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "重做", refersTo: 1, project: "record")],
+            replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "重做", refersTo: newestReference(historyURL), project: "record")],
             history: DelegationHistory(fileURL: historyURL), notices: notices)
         await session.send("上次那个再做一次")
         await session.sendCurrentDraft()
@@ -1702,6 +1708,149 @@ struct DelegationSessionTests {
         #expect(merged.contains("改了 1 个文件（greeting.txt），用户已合进项目"))
     }
 
+    // MARK: - The Ctrl+K conversation across restarts (2.3)
+
+    private func messageTexts(_ session: DelegationSession) -> [String] {
+        session.entries.compactMap {
+            if case .message(_, _, let text) = $0 { return text }
+            return nil
+        }
+    }
+
+    @Test func theConversationComesBackGreyedAfterARestartAndTheModelStillHasIt() async throws {
+        let project = try await makeProject()
+        let logURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/ctrlk-conversation.jsonl")
+        let before = try makeSession(project: project, claude: "/nonexistent/claude",
+                                     replies: [modelReply(say: "周五下午不在，记下了。")],
+                                     log: DelegationConversationLog(fileURL: logURL))
+        await before.send("这周五下午我不在")
+        #expect(before.restartedAt == nil)
+
+        let after = try makeSession(project: project, claude: "/nonexistent/claude",
+                                    replies: [modelReply(say: "周五下午你不在。")],
+                                    log: DelegationConversationLog(fileURL: logURL))
+        #expect(messageTexts(after) == ["这周五下午我不在", "周五下午不在，记下了。"])
+        #expect(after.entries.allSatisfy { after.restoredEntryIDs.contains($0.id) }, "Everything from before is greyed")
+        #expect(after.restartedAt != nil)
+        #expect(after.entryTimes.count == after.entries.count)
+
+        await after.send("我周五什么安排来着")
+        let sent = try #require(ScriptedStepFun.transcripts.last)
+        #expect(sent.first == "user: 这周五下午我不在")
+        #expect(sent.contains { $0.hasPrefix("assistant: ") && $0.contains("周五下午不在，记下了。") })
+        #expect(!after.restoredEntryIDs.contains(after.entries.last!.id), "What is said now is not greyed")
+    }
+
+    @Test func herAppSentencesComeBackAsAppRecordsNotAsHerWords() async throws {
+        let project = try await makeProject()
+        let logURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/ctrlk-conversation.jsonl")
+        let before = try makeSession(project: project, claude: try makeStubClaude(body: "print world > greeting.txt; git commit -qam greet"),
+                                     replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "把 greeting.txt 改成 world")],
+                                     log: DelegationConversationLog(fileURL: logURL))
+        await before.send("把问候语改成 world")
+        await before.sendCurrentDraft()
+        await before.mergePendingChange()
+
+        let after = try makeSession(project: project, claude: "/nonexistent/claude", replies: [modelReply(say: "好。")],
+                                    log: DelegationConversationLog(fileURL: logURL))
+        #expect(reports(after).count == 1, "The receipt is shown again")
+        #expect(after.entries.contains { if case .draft(_, "把 greeting.txt 改成 world", _, _, false) = $0 { return true }; return false })
+        await after.send("刚才那个合好了吗")
+        let sent = try #require(ScriptedStepFun.transcripts.last)
+        #expect(sent.contains { $0.hasPrefix("user: 【应用记录，不是用户说的话】合好了（") })
+        #expect(sent.contains { $0.hasPrefix("user: 【应用记录，不是用户说的话】写过一份草稿：把 greeting.txt 改成 world") })
+        #expect(!sent.contains { $0.hasPrefix("assistant: ") && $0.contains("合好了") }, "The app's words are never put in her mouth")
+    }
+
+    @Test func startingOverIsRespectedAfterARestart() async throws {
+        let project = try await makeProject()
+        let logURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/ctrlk-conversation.jsonl")
+        let before = try makeSession(project: project, claude: "/nonexistent/claude",
+                                     replies: [modelReply(say: "好。"), modelReply(say: "嗯。")],
+                                     log: DelegationConversationLog(fileURL: logURL))
+        await before.send("旧话题")
+        before.startOver()
+        await before.send("新话题")
+
+        let after = try makeSession(project: project, claude: "/nonexistent/claude", replies: [],
+                                    log: DelegationConversationLog(fileURL: logURL))
+        #expect(messageTexts(after) == ["新话题", "嗯。"])
+    }
+
+    @Test func aDamagedLineIsSkippedAndTheFileIsNeverRewritten() async throws {
+        let project = try await makeProject()
+        let logURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/ctrlk-conversation.jsonl")
+        let before = try makeSession(project: project, claude: "/nonexistent/claude", replies: [modelReply(say: "好。")],
+                                     log: DelegationConversationLog(fileURL: logURL))
+        await before.send("第一句")
+        let handle = try FileHandle(forWritingTo: logURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("{not json\n".utf8))
+        try handle.close()
+        let onDisk = try Data(contentsOf: logURL)
+
+        let after = try makeSession(project: project, claude: "/nonexistent/claude", replies: [],
+                                    log: DelegationConversationLog(fileURL: logURL))
+        #expect(messageTexts(after) == ["第一句", "好。"])
+        #expect(try Data(contentsOf: logURL) == onDisk)
+    }
+
+    @Test func timeLinesMarkTheStartPausesAndTheRestart() async throws {
+        let project = try await makeProject()
+        let logURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/ctrlk-conversation.jsonl")
+        let lines = [("2026-01-05T13:31:00Z", "user", "改 greeting"), ("2026-01-05T13:33:00Z", "her", "看一眼草稿。"),
+                     ("2026-01-05T13:45:00Z", "user", "再加一行")]
+        let jsonl = lines.map { at, kind, text in
+            #"{"at":"\#(at)","id":"\#(UUID().uuidString)","kind":"\#(kind)","text":"\#(text)"}"#
+        }.joined(separator: "\n") + "\n"
+        try jsonl.write(to: logURL, atomically: true, encoding: .utf8)
+
+        let session = try makeSession(project: project, claude: "/nonexistent/claude", replies: [modelReply(say: "好。")],
+                                      log: DelegationConversationLog(fileURL: logURL))
+        await session.send("接着来")
+        let shown = session.entries.map { session.timeLine(before: $0.id) }
+        let clock = { (iso: String) in ISO8601DateFormatter().date(from: iso)!
+            .formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits)) }
+        #expect(shown[0] == "1月5日 \(clock("2026-01-05T13:31:00Z"))", "Where the conversation starts")
+        #expect(shown[1] == nil, "Two minutes later: no line")
+        #expect(shown[2] == clock("2026-01-05T13:45:00Z"), "After a twelve-minute pause")
+        #expect(shown[3]?.hasPrefix("── Her 重启过 · 今天 ") == true, "Where this launch begins")
+        #expect(shown[4] == nil)
+    }
+
+    @Test func theModelSeesAtMostTwelveMessagesAndOnlyTheLatestDraftInFull() async throws {
+        let project = try await makeProject()
+        var replies = (1...8).map { modelReply(say: "第 \($0) 句。") }
+        replies.append(modelReply(say: "看一眼。", action: "draft", draft: "第一份草稿的全文"))
+        replies.append(modelReply(say: "改好了。", action: "draft", draft: "第二份草稿的全文"))
+        replies.append(modelReply(say: "好。"))
+        let session = try makeSession(project: project, claude: "/nonexistent/claude", replies: replies)
+        for index in 1...11 { await session.send("第 \(index) 句话") }
+
+        let sent = try #require(ScriptedStepFun.transcripts.last)
+        #expect(sent.count <= DelegationConversation.keptMessages + 1, "Twelve kept plus this turn's words")
+        #expect(!sent.contains { $0.contains("第一份草稿的全文") })
+        #expect(sent.contains { $0.contains("第二份草稿的全文") })
+    }
+
+    @Test func aRecordKeepsItsReferenceWhenNewerOnesArrive() async throws {
+        let project = try await makeProject()
+        let historyURL = URL(fileURLWithPath: try makeTemporaryDirectory() + "/delegation-history.json")
+        _ = try await recordFailedCodexHandOff(project: project, historyURL: historyURL)
+        let firstReference = newestReference(historyURL)
+        let history = DelegationHistory(fileURL: historyURL)
+        _ = history.begin(userWords: ["另一件事"], draft: "另一件事", project: project, tool: .kimiCode)
+
+        let text = DelegationHistory(fileURL: historyURL).promptText()
+        #expect(text.contains("[\(firstReference)] "), "The older record keeps its name")
+        let session = try makeSession(project: project, claude: "/nonexistent/claude",
+                                      replies: [modelReply(say: "看一眼草稿。", action: "draft", draft: "重做", refersTo: firstReference)],
+                                      history: DelegationHistory(fileURL: historyURL))
+        await session.send("那个失败的再来一次")
+        #expect(currentDraftText(session)?.contains("日志窗口改成中文") == true, "The reference still names the older record")
+        #expect(ScriptedStepFun.systemMessages.last?.contains("现在是 ") == true)
+    }
+
     @Test func claudeCodesClosingQuestionIsRelayed() {
         let workspace = DelegationWorkspace(project: DelegationProject(repositoryPath: "/p"), branchName: "b", worktreePath: "/w", baseCommit: "c")
         let receipt = DelegationReceipt(workspace: workspace, outcome: .changed,
@@ -1756,14 +1905,18 @@ final class ScriptedStepFun: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) private static var replies: [String] = []
     nonisolated(unsafe) private static var recordedSystemMessages: [String] = []
     nonisolated(unsafe) private static var recordedUserMessages: [String] = []
+    nonisolated(unsafe) private static var recordedTranscripts: [[String]] = []
 
     static func queue(_ contents: [String]) {
         lock.withLock {
             replies = contents
             recordedSystemMessages = []
             recordedUserMessages = []
+            recordedTranscripts = []
         }
     }
+    /// Per request, every non-system message as "role: content".
+    static var transcripts: [[String]] { lock.withLock { recordedTranscripts } }
     static var remaining: Int { lock.withLock { replies.count } }
     static var systemMessages: [String] { lock.withLock { recordedSystemMessages } }
     /// Per request, every user-role message it carried, joined by newlines.
@@ -1782,6 +1935,8 @@ final class ScriptedStepFun: URLProtocol, @unchecked Sendable {
             Self.lock.withLock { Self.recordedSystemMessages.append(systemMessage) }
             let users = messages.filter { $0["role"] == "user" }.compactMap { $0["content"] }.joined(separator: "\n")
             Self.lock.withLock { Self.recordedUserMessages.append(users) }
+            let rest = messages.filter { $0["role"] != "system" }.map { "\($0["role"] ?? ""): \($0["content"] ?? "")" }
+            Self.lock.withLock { Self.recordedTranscripts.append(rest) }
         }
         let content: String? = Self.lock.withLock { Self.replies.isEmpty ? nil : Self.replies.removeFirst() }
         let status = content == nil ? 500 : 200

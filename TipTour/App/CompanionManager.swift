@@ -1638,7 +1638,8 @@ final class CompanionManager: ObservableObject {
             noticePoster: delegationNoticeCenter,
             noticeRules: delegationNoticeRules,
             isUserLooking: { [weak self] in self?.userIsLookingAtConversation() == true },
-            keepAwake: delegationKeepAwake
+            keepAwake: delegationKeepAwake,
+            log: DelegationConversationLog()
         )
         delegationSession = session
         return session

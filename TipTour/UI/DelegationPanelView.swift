@@ -129,7 +129,18 @@ struct DelegationPanelView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     ForEach(session.entries) { entry in
-                        entryView(entry).id(entry.id)
+                        VStack(alignment: .leading, spacing: 18) {
+                            if let timeLine = session.timeLine(before: entry.id) {
+                                Text(timeLine)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity)
+                            }
+                            // From before this launch: kept for reading, greyed so it is not taken for now.
+                            entryView(entry)
+                                .opacity(isGreyedAsRestored(entry) ? 0.55 : 1)
+                        }
+                        .id(entry.id)
                     }
                     if session.phase == .thinking {
                         HStack(spacing: 9) {
@@ -169,6 +180,13 @@ struct DelegationPanelView: View {
                        onMerge: { Task { await session.mergePendingChange() } },
                        onDiscard: { Task { await session.discardPendingChange() } })
         }
+    }
+
+    /// A replaced receipt is already dimmed by its card; dimming it twice would make it unreadable.
+    private func isGreyedAsRestored(_ entry: DelegationSession.Entry) -> Bool {
+        guard session.restoredEntryIDs.contains(entry.id) else { return false }
+        if case .report(let id, let report) = entry { return !isSuperseded(id, report) }
+        return true
     }
 
     /// A later receipt for the same workspace replaces this one.

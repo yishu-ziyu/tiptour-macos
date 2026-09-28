@@ -43,9 +43,9 @@ struct DelegationTurn: Equatable, Sendable {
     let action: DelegationTurnAction
     /// True when the say-do guard had to ask the model a second time.
     let neededCorrection: Bool
-    /// The earlier hand-off this turn is about: its number in the list the
-    /// model was shown (1 = newest), or nil.
-    let refersTo: Int?
+    /// The earlier hand-off this turn is about: its fixed reference in the
+    /// list the model was shown (such as "a1b2c3"), or nil.
+    let refersTo: String?
     let project: DelegationProjectChoice
 }
 
@@ -145,10 +145,65 @@ final class DelegationConversation: @unchecked Sendable {
 
     func reset() { transcript = [] }
 
+    /// How many messages the model sees at most; older ones stay in the panel.
+    static let keptMessages = 12
+
     /// Something that happened outside the conversation, recorded in the
     /// model's view as data, never as the user's words.
     func noteAppEvent(_ text: String) {
-        transcript.append(DelegationChatMessage(role: .user, content: "【应用记录，不是用户说的话】\(text)"))
+        transcript.append(DelegationChatMessage(role: .user, content: Self.appRecord(text)))
+        trimTranscript()
+    }
+
+    /// The last turns before a restart, so "刚才那个" still has something to
+    /// point at. Only the model's own replies come back as hers; the app's
+    /// sentences, drafts and receipts come back as app records.
+    func restore(_ lines: [DelegationConversationLog.Line]) {
+        transcript = lines.compactMap { line in
+            let text = (line.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            switch line.kind {
+            case .user:
+                return text.isEmpty ? nil : DelegationChatMessage(role: .user, content: text)
+            case .her:
+                return text.isEmpty ? nil : DelegationChatMessage(role: .assistant, content: Self.encode(
+                    RawTurn(say: text, action: .reply, refersTo: nil, project: .current)))
+            case .app:
+                return text.isEmpty ? nil : DelegationChatMessage(role: .user, content: Self.appRecord(text))
+            case .draft:
+                let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+                return DelegationChatMessage(role: .user, content: Self.appRecord("写过一份草稿：\(firstLine)"))
+            case .report:
+                return line.report.map { DelegationChatMessage(role: .user, content: Self.appRecord("回执：\($0.headline)")) }
+            case .startOver:
+                return nil
+            }
+        }
+        trimTranscript()
+    }
+
+    private static func nowText() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter.string(from: Date())
+    }
+
+    private static func appRecord(_ text: String) -> String { "【应用记录，不是用户说的话】\(text)" }
+
+    /// Keeps what goes to the model bounded: the newest `keptMessages`, and
+    /// only the latest draft in full.
+    private func trimTranscript() {
+        let isDraft: (DelegationChatMessage) -> Bool = { message in
+            guard message.role == .assistant, let turn = try? Self.parse(message.content), case .draft = turn.action else { return false }
+            return true
+        }
+        let latestDraft = transcript.lastIndex(where: isDraft)
+        transcript = transcript.enumerated().map { index, message in
+            guard index != latestDraft, isDraft(message), let turn = try? Self.parse(message.content) else { return message }
+            return DelegationChatMessage(role: .assistant, content: Self.encode(
+                RawTurn(say: turn.say, action: .draft("（较早的草稿，已省略）"), refersTo: turn.refersTo, project: turn.project)))
+        }
+        if transcript.count > Self.keptMessages { transcript = Array(transcript.suffix(Self.keptMessages)) }
     }
 
     /// Adds the user's words and returns her turn.
@@ -172,6 +227,7 @@ final class DelegationConversation: @unchecked Sendable {
             turn = retried
         }
         transcript.append(DelegationChatMessage(role: .assistant, content: Self.encode(turn)))
+        trimTranscript()
         return DelegationTurn(say: turn.say, action: turn.action, neededCorrection: neededCorrection,
                               refersTo: turn.refersTo, project: turn.project)
     }
@@ -195,7 +251,7 @@ final class DelegationConversation: @unchecked Sendable {
         - 当前项目只是从最近使用记录中找到的，不保证是用户这次的目标。用户点名的项目或路径与当前项目不符时，提醒用户在草稿里点「更换项目」核对实际绑定；仅在正文写路径不会切换项目，不能声称已经切换。
         - 要求清楚了，就写 draft：给执行工具的完整要求，写明目标、范围和约束（只改需要改的；先读项目说明；不要运行 xcodebuild；改完自检；提交一次，不要推送；最后用两三句话说明改了什么）。草稿只描述任务，不写「请用某某执行」，也不替执行工具写示例文案。action 为 "draft"，say 用一句话请用户看一眼草稿，确认后点「发出去」。
         - 执行工具由用户在草稿的「执行工具」里选，应用会自己提醒；say 里不要提这次用哪个执行工具。Codex 当前用用户选定的 GPT-6 Luna、High 推理档位，仅对本次执行生效；其他执行工具沿用各自本机配置。你不能通过对话修改模型，不要声称已换模型或自动升级。
-        - 用户提到以前的事（「上次」「刚才」「那次失败」）时，对照下面「以前交出去的任务」：能确定是哪次就直接用，不要让用户重述；不确定是哪次，或听不出他要改的是那件事本身还是 Her 当时的提示，用一句话问清。这次和以前某次任务有关时，refers_to 填下面列表里那次的序号（无关填 0）：应用会把那次的背景和 Her 当时给用户看的原话原样放在草稿最前面，draft 里不用再写；重做时在 draft 里写明是重做。记录里没有的事不要编。
+        - 用户提到以前的事（「上次」「刚才」「那次失败」）时，对照下面「以前交出去的任务」：能确定是哪次就直接用，不要让用户重述；不确定是哪次，或听不出他要改的是那件事本身还是 Her 当时的提示，用一句话问清。用户说「刚才」「上次」时，按时间对到离现在最近的那件；拿不准是哪件时，说出那件的时间和内容来问。这次和以前某次任务有关时，refers_to 填下面列表里那次方括号中的编号（如 a1b2c3，编号不会变；无关留空字符串）：应用会把那次的背景和 Her 当时给用户看的原话原样放在草稿最前面，draft 里不用再写；重做时在 draft 里写明是重做。记录里没有的事不要编。
         - 用户嫌 Her 自己说过或显示过的话看不懂、不好时，要改的是 Her 产生这类话的方式，不是重做那次任务：say 先用一句大白话讲清那句话的意思；知道 Her 自己的代码在哪就写 draft（project 填 "her"），要求 Her 以后先说发生了什么和下一步、原始报错放在后面；不知道就问一句要不要改 Her。
         - draft 要改哪个项目由 project 说：默认 "current"（下面的当前项目）；重做以前某次任务填 "record"（refers_to 那次的项目）；改 Her 自己的话或做法填 "her"。应用按它绑定项目，用户还能在草稿里「更换项目」。
         - 解释报错只说原文能证明的。地址是 127.0.0.1 或 localhost，说明错误是这台 Mac 上的本机服务返回的；502 表示中间的转发服务收到了请求，但没从后面的服务拿到有效回应，具体原因报错里看不出来。
@@ -206,7 +262,7 @@ final class DelegationConversation: @unchecked Sendable {
         - 用户在这里给你起名字或说该怎么称呼他时，这里存不下：如实说可以在语音里告诉你，或去「设置」里填；不要说记住了。
         - say 不超过两句，不空夸，不用「好问题」这类客套。
 
-        只输出一个 JSON 对象：{"say": "...", "action": "none" | "draft" | "screen", "draft": "...", "screen_goal": "...", "refers_to": 0, "project": "current" | "record" | "her"}。不用的文字字段留空字符串。
+        只输出一个 JSON 对象：{"say": "...", "action": "none" | "draft" | "screen", "draft": "...", "screen_goal": "...", "refers_to": "", "project": "current" | "record" | "her"}。不用的文字字段留空字符串。
 
         当前项目：
         \(projectContext)
@@ -214,6 +270,7 @@ final class DelegationConversation: @unchecked Sendable {
         Her 自己的代码（你说的话、回执和这些规则都在这里）：
         \(herCode)
 
+        现在是 \(Self.nowText())。
         以前交出去的任务（Her 本机记录，新的在前，重启后仍在）：
         \(recentHandOffs)
         """
@@ -228,7 +285,7 @@ final class DelegationConversation: @unchecked Sendable {
     private struct RawTurn {
         let say: String
         let action: DelegationTurnAction
-        let refersTo: Int?
+        let refersTo: String?
         let project: DelegationProjectChoice
     }
 
@@ -242,7 +299,8 @@ final class DelegationConversation: @unchecked Sendable {
         let say = (object["say"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let draft = (object["draft"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let screenGoal = (object["screen_goal"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let reference = object["refers_to"] as? Int ?? Int(object["refers_to"] as? String ?? "") ?? 0
+        let reference = (object["refers_to"] as? String ?? "")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[] ").union(.whitespacesAndNewlines)).lowercased()
         let action: DelegationTurnAction
         switch object["action"] as? String {
         case "draft" where !draft.isEmpty: action = .draft(draft)
@@ -250,11 +308,11 @@ final class DelegationConversation: @unchecked Sendable {
         default: action = .reply
         }
         let project = DelegationProjectChoice(rawValue: (object["project"] as? String ?? "").lowercased()) ?? .current
-        return RawTurn(say: say, action: action, refersTo: reference > 0 ? reference : nil, project: project)
+        return RawTurn(say: say, action: action, refersTo: reference.isEmpty || reference == "0" ? nil : reference, project: project)
     }
 
     private static func encode(_ turn: RawTurn) -> String {
-        var object: [String: Any] = ["say": turn.say, "action": "none", "draft": "", "screen_goal": "", "refers_to": turn.refersTo ?? 0,
+        var object: [String: Any] = ["say": turn.say, "action": "none", "draft": "", "screen_goal": "", "refers_to": turn.refersTo ?? "",
                                      "project": turn.project.rawValue]
         switch turn.action {
         case .reply: break

@@ -41,6 +41,12 @@ final class DelegationSession: ObservableObject {
     }
 
     @Published private(set) var entries: [Entry] = []
+    /// When each entry appeared, for the time lines between them.
+    private(set) var entryTimes: [UUID: Date] = [:]
+    /// Entries shown again from before this launch; the panel greys them.
+    private(set) var restoredEntryIDs: Set<UUID> = []
+    /// When this launch began, if it brought earlier entries back.
+    private(set) var restartedAt: Date?
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var selectedAgentTool: DelegationAgentTool = .claudeCode
 
@@ -59,6 +65,7 @@ final class DelegationSession: ObservableObject {
     /// Whether the user is looking at the panel right now; then the receipt is enough.
     private let isUserLooking: @MainActor () -> Bool
     private let keepAwake: DelegationKeepAwake?
+    private let log: DelegationConversationLog?
     private struct Draft {
         /// The user's words that asked for this task; a notice quotes them.
         let request: String
@@ -95,7 +102,8 @@ final class DelegationSession: ObservableObject {
         noticePoster: DelegationNoticePoster? = nil,
         noticeRules: DelegationNoticeRules? = nil,
         isUserLooking: @escaping @MainActor () -> Bool = { false },
-        keepAwake: DelegationKeepAwake? = nil
+        keepAwake: DelegationKeepAwake? = nil,
+        log: DelegationConversationLog? = nil
     ) {
         self.conversation = conversation
         self.delegation = delegation
@@ -107,7 +115,78 @@ final class DelegationSession: ObservableObject {
         self.noticeRules = noticeRules
         self.isUserLooking = isUserLooking
         self.keepAwake = keepAwake
+        self.log = log
+        restoreConversation()
         restorePendingDecision()
+    }
+
+    /// What was said before the last quit comes back, greyed, and the model
+    /// gets its last turns, so "刚才那个" still means something.
+    private func restoreConversation() {
+        guard let lines = log?.restore(), !lines.isEmpty else { return }
+        for line in lines {
+            let entry: Entry
+            switch line.kind {
+            case .user: entry = .message(id: line.id, speaker: .user, text: line.text ?? "")
+            case .her, .app: entry = .message(id: line.id, speaker: .her, text: line.text ?? "")
+            case .draft:
+                entry = .draft(id: line.id, text: line.text ?? "", project: line.projectPath.map { DelegationProject(repositoryPath: $0) },
+                               tool: line.tool.flatMap(DelegationAgentTool.init(rawValue:)) ?? .claudeCode, isCurrent: false)
+            case .report:
+                guard let report = line.report else { continue }
+                entry = .report(id: line.id, report: report)
+            case .startOver:
+                continue
+            }
+            entries.append(entry)
+            entryTimes[line.id] = line.at
+            restoredEntryIDs.insert(line.id)
+        }
+        restartedAt = Date()
+        conversation.restore(lines)
+    }
+
+    /// The line shown above an entry: where Her restarted, where the
+    /// conversation starts, or where it picks up after a pause; nil otherwise.
+    func timeLine(before id: UUID) -> String? {
+        guard let index = entries.firstIndex(where: { $0.id == id }), let time = entryTimes[id] else { return nil }
+        let previous = index > 0 ? entryTimes[entries[index - 1].id] : nil
+        if let restartedAt, index > 0, restoredEntryIDs.contains(entries[index - 1].id), !restoredEntryIDs.contains(id) {
+            return "── Her 重启过 · \(Self.timeText(restartedAt, sameDayAs: previous)) ──"
+        }
+        guard let previous else { return Self.timeText(time, sameDayAs: nil) }
+        guard time.timeIntervalSince(previous) >= Self.pauseBeforeTimeLine else { return nil }
+        return Self.timeText(time, sameDayAs: previous)
+    }
+
+    /// A gap at least this long gets a time line.
+    static let pauseBeforeTimeLine: TimeInterval = 5 * 60
+
+    private static func timeText(_ time: Date, sameDayAs previous: Date?) -> String {
+        let calendar = Calendar.current
+        let clock = time.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits))
+        if let previous, calendar.isDate(time, inSameDayAs: previous) { return clock }
+        if calendar.isDateInToday(time) { return "今天 \(clock)" }
+        if calendar.isDateInYesterday(time) { return "昨天 \(clock)" }
+        let components = calendar.dateComponents([.month, .day], from: time)
+        return "\(components.month ?? 0)月\(components.day ?? 0)日 \(clock)"
+    }
+
+    /// Every entry goes through here: it gets a time and is kept on disk.
+    private func append(_ entry: Entry, as kind: DelegationConversationLog.Line.Kind) {
+        let now = Date()
+        entries.append(entry)
+        entryTimes[entry.id] = now
+        var line = DelegationConversationLog.Line(id: entry.id, at: now, kind: kind)
+        switch entry {
+        case .message(_, _, let text): line.text = text
+        case .draft(_, let text, let project, let tool, _):
+            line.text = text
+            line.projectPath = project?.repositoryPath
+            line.tool = tool.rawValue
+        case .report(_, let report): line.report = report
+        }
+        log?.append(line)
     }
 
     /// A change still waiting for merge or discard when Her last quit comes
@@ -120,7 +199,7 @@ final class DelegationSession: ObservableObject {
         if let summary = history?.summary(of: id) {
             say("Her 重启前的这件事还在等你决定：\(summary)。")
         }
-        entries.append(.report(id: UUID(), report: DelegationReport(receipt: receipt, sinceShown: sinceShown)))
+        append(.report(id: UUID(), report: DelegationReport(receipt: receipt, sinceShown: sinceShown)), as: .report)
         phase = .awaitingDecision
     }
 
@@ -136,7 +215,7 @@ final class DelegationSession: ObservableObject {
     func send(_ userText: String) async {
         let trimmed = userText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isBusy else { return }
-        entries.append(.message(id: UUID(), speaker: .user, text: trimmed))
+        append(.message(id: UUID(), speaker: .user, text: trimmed), as: .user)
         userWordsSinceLastSend.append(trimmed)
         phase = .thinking
         // Only a project found from recent use is a guess the model may replace.
@@ -167,28 +246,28 @@ final class DelegationSession: ObservableObject {
             // A screen reply ("正在点击…") is shown only once the goal has started.
             var isScreen = false
             if case .screen = turn.action { isScreen = true }
-            if !turn.say.isEmpty, !isScreen { entries.append(.message(id: UUID(), speaker: .her, text: turn.say)) }
+            if !turn.say.isEmpty, !isScreen { append(.message(id: UUID(), speaker: .her, text: turn.say), as: .her) }
             switch turn.action {
             case .reply:
                 phase = restingPhase
             case .draft(let body):
                 // A revision keeps the background of the draft it revises.
-                let background = turn.refersTo.flatMap { history?.background(forNumber: $0) } ?? currentDraft?.background
+                let background = turn.refersTo.flatMap { history?.background(forReference: $0) } ?? currentDraft?.background
                 let bound = projectIsGuess ? (chosenProject(for: turn, herProject: herProject) ?? project) : project
-                let request = currentDraft?.request ?? turn.refersTo.flatMap { history?.request(forNumber: $0) } ?? trimmed
+                let request = currentDraft?.request ?? turn.refersTo.flatMap { history?.request(forReference: $0) } ?? trimmed
                 // Carrying on a change in its own project keeps the tool that made it,
                 // unless the user names another. Said aloud, since the picker otherwise
                 // shows the last choice.
                 if currentDraft == nil, Self.toolAskedFor(in: trimmed) == nil,
-                   let number = turn.refersTo, bound?.repositoryPath == history?.projectPath(forNumber: number),
-                   let earlierTool = history?.toolThatMadeChange(forNumber: number), earlierTool != selectedAgentTool {
+                   let reference = turn.refersTo, bound?.repositoryPath == history?.projectPath(forReference: reference),
+                   let earlierTool = history?.toolThatMadeChange(forReference: reference), earlierTool != selectedAgentTool {
                     selectedAgentTool = earlierTool
                     say("执行工具沿用那次的 \(earlierTool.displayName)；要换，在草稿的「执行工具」里选。")
                 }
                 let draft = Draft(request: request, body: body, background: background, project: bound, tool: selectedAgentTool)
                 retireCurrentDraft()
                 currentDraft = draft
-                entries.append(.draft(id: UUID(), text: draft.text, project: bound, tool: selectedAgentTool, isCurrent: true))
+                append(.draft(id: UUID(), text: draft.text, project: bound, tool: selectedAgentTool, isCurrent: true), as: .draft)
                 phase = .awaitingSend
                 if projectIsGuess, turn.project == .her, herProject == nil, let bound {
                     say("没找到 Her 自己的代码在哪，草稿先绑在 \(bound.name)；发出去前点「更换项目」选 Her 的仓库。")
@@ -200,7 +279,7 @@ final class DelegationSession: ObservableObject {
                     say(line)
                     conversation.noteAppEvent(line)
                 } else if !turn.say.isEmpty {
-                    entries.append(.message(id: UUID(), speaker: .her, text: turn.say))
+                    append(.message(id: UUID(), speaker: .her, text: turn.say), as: .her)
                 }
             }
             if currentDraft != nil, let reminder = Self.toolReminder(words: trimmed, say: turn.say, selected: selectedAgentTool) {
@@ -222,7 +301,7 @@ final class DelegationSession: ObservableObject {
         case .current: return nil
         case .her: return herProject
         case .record:
-            guard let path = turn.refersTo.flatMap({ history?.projectPath(forNumber: $0) }),
+            guard let path = turn.refersTo.flatMap({ history?.projectPath(forReference: $0) }),
                   FileManager.default.fileExists(atPath: path) else { return nil }
             return DelegationProject(repositoryPath: path)
         }
@@ -378,7 +457,7 @@ final class DelegationSession: ObservableObject {
         if let recordID { history?.finish(recordID, receipt: receipt) }
         tellIfAway(recordID: recordID, receipt: receipt, task: draft.request)
         let report = DelegationReport(receipt: receipt)
-        entries.append(.report(id: UUID(), report: report))
+        append(.report(id: UUID(), report: report), as: .report)
         lastReportRecordID = recordID
         if receipt.outcome == .changed {
             pendingReceipt = receipt
@@ -416,7 +495,7 @@ final class DelegationSession: ObservableObject {
             say(reviewed.diffDigest.isEmpty
                 ? "这份改动是重启前记下的，没法确认你看到的还是不是现在的内容，所以没有合进去。下面是工作区现在的改动，看过再决定。"
                 : "你看过之后工作区又变了，没有合进去。下面是现在的改动，看过再决定。")
-            entries.append(.report(id: UUID(), report: DelegationReport(receipt: now, sinceShown: sinceShown)))
+            append(.report(id: UUID(), report: DelegationReport(receipt: now, sinceShown: sinceShown)), as: .report)
             phase = .awaitingDecision
         } catch DelegationError.branchMoved(let expected, let current) {
             say("任务开始时 \(reviewed.workspace.project.name) 在 \(expected) 分支，现在在 \(current.isEmpty ? "一个没有分支名的提交上" : current + " 分支")，所以没有合进去。切回 \(expected) 再点「合进来」，或者丢掉。")
@@ -452,6 +531,9 @@ final class DelegationSession: ObservableObject {
         explicitlySelectedProject = nil
         userWordsSinceLastSend = []
         currentDraft = nil
+        log?.append(DelegationConversationLog.Line(id: UUID(), at: Date(), kind: .startOver))
+        restoredEntryIDs = []
+        restartedAt = nil
         entries = entries.filter {
             if case .report = $0, pendingWorkspace != nil { return true }
             return false
@@ -462,7 +544,7 @@ final class DelegationSession: ObservableObject {
     // MARK: - Helpers
 
     private func say(_ text: String) {
-        entries.append(.message(id: UUID(), speaker: .her, text: text))
+        append(.message(id: UUID(), speaker: .her, text: text), as: .app)
     }
 
     private func retireCurrentDraft() {
@@ -555,7 +637,7 @@ enum DelegationChangeSinceShown: Codable, Equatable, Sendable {
 
 /// What Her tells the user about one hand-off. Every sentence is chosen from
 /// the git readback; Claude Code's own words are shown only as a quote.
-struct DelegationReport: Equatable {
+struct DelegationReport: Codable, Equatable {
     let receipt: DelegationReceipt
     /// Set when this receipt replaced one the user had already seen.
     var sinceShown: DelegationChangeSinceShown? = nil

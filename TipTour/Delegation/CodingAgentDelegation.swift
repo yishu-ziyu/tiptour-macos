@@ -17,14 +17,14 @@ import CryptoKit
 import Foundation
 
 /// A git repository the user works in.
-struct DelegationProject: Equatable, Sendable {
+struct DelegationProject: Codable, Equatable, Sendable {
     let repositoryPath: String
 
     var name: String { URL(fileURLWithPath: repositoryPath).lastPathComponent }
 }
 
 /// One hand-off's private worktree and branch, created from the project's HEAD.
-struct DelegationWorkspace: Equatable, Sendable {
+struct DelegationWorkspace: Codable, Equatable, Sendable {
     let project: DelegationProject
     let branchName: String
     let worktreePath: String
@@ -34,7 +34,7 @@ struct DelegationWorkspace: Equatable, Sendable {
     var projectBranch: String? = nil
 }
 
-enum DelegationOutcome: Equatable, Sendable {
+enum DelegationOutcome: Codable, Equatable, Sendable {
     /// Independent readback found commits or tracked edits since the base.
     case changed
     /// The agent finished, but the worktree holds nothing new.
@@ -44,7 +44,7 @@ enum DelegationOutcome: Equatable, Sendable {
     case cancelled
 }
 
-enum DelegationAgentTool: String, CaseIterable, Sendable {
+enum DelegationAgentTool: String, CaseIterable, Codable, Sendable {
     case claudeCode, codex, kimiCode, stepCode
 
     var displayName: String {
@@ -57,7 +57,7 @@ enum DelegationAgentTool: String, CaseIterable, Sendable {
     }
 }
 
-struct DelegationReceipt: Equatable, Sendable {
+struct DelegationReceipt: Codable, Equatable, Sendable {
     let workspace: DelegationWorkspace
     let outcome: DelegationOutcome
     /// The agent's own closing words. Shown to the user, never used to decide

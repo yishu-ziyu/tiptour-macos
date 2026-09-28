@@ -48,6 +48,12 @@ struct DelegationRecord: Codable, Equatable, Sendable {
     var sinceShown: DelegationChangeSinceShown? = nil
 }
 
+extension DelegationRecord {
+    /// A short fixed name for the model: the first six characters of the id.
+    /// Unlike a position, it does not move when a newer hand-off arrives.
+    var reference: String { String(id.uuidString.prefix(6)).lowercased() }
+}
+
 @MainActor
 final class DelegationHistory {
     static var defaultFileURL: URL {
@@ -132,15 +138,15 @@ final class DelegationHistory {
     /// How many of the newest records the conversation sees.
     private static let promptedCount = 5
 
-    /// The records the conversation sees, newest first; `refers_to` numbers count from 1 in this order.
+    /// The records the conversation sees, newest first; `refers_to` names one by its fixed reference.
     private var promptedRecords: [DelegationRecord] { records.suffix(Self.promptedCount).reversed() }
 
     /// The newest records, newest first, as the conversation sees them.
     func promptText() -> String {
         guard !promptedRecords.isEmpty else { return "（还没有记录）" }
-        return promptedRecords.enumerated().map { index, record in
+        return promptedRecords.map { record in
             let project = DelegationProject(repositoryPath: record.projectPath).name
-            var lines = ["\(index + 1). \(Self.timeFormatter.string(from: record.sentAt)) · 项目 \(project)（\(record.projectPath)）· \(Self.toolName(record))"]
+            var lines = ["[\(record.reference)] \(Self.timeFormatter.string(from: record.sentAt)) · 项目 \(project)（\(record.projectPath)）· \(Self.toolName(record))"]
             if !record.userWords.isEmpty {
                 lines.append("   用户原话：" + record.userWords.map { Self.clip($0, 300) }.joined(separator: " / "))
             }
@@ -157,12 +163,12 @@ final class DelegationHistory {
     }
 
     /// What a draft about one of those records starts with, written from the
-    /// record itself so the date, tool and Her's words are exact. `number`
-    /// is the record's number in `promptText` (1 = newest).
+    /// record itself so the date, tool and Her's words are exact. `reference`
+    /// is the record's fixed reference in `promptText`.
     /// Short, because the user reads it at the top of the draft; the tool's
     /// own explanation stays out, the repository's history has the detail.
-    func background(forNumber number: Int) -> String? {
-        guard let record = record(forNumber: number) else { return nil }
+    func background(forReference reference: String) -> String? {
+        guard let record = record(forReference: reference) else { return nil }
         let project = DelegationProject(repositoryPath: record.projectPath).name
         let goal = record.draft.split(whereSeparator: \.isNewline).first.map(String.init) ?? record.draft
         var lines = ["背景：接着 \(Self.timeFormatter.string(from: record.sentAt)) 交给 \(Self.toolName(record)) 的任务（项目 \(project)）：\(Self.clip(goal, 120))",
@@ -207,20 +213,20 @@ final class DelegationHistory {
         }
     }
 
-    /// What the user first said about the record numbered `number` in `promptText`.
-    func request(forNumber number: Int) -> String? {
-        record(forNumber: number)?.userWords.first
+    /// What the user first said about the record with this reference.
+    func request(forReference reference: String) -> String? {
+        record(forReference: reference)?.userWords.first
     }
 
-    /// The tool that made the change of the record numbered `number` in
-    /// `promptText`; nil when that run changed nothing, since its tool may be why.
-    func toolThatMadeChange(forNumber number: Int) -> DelegationAgentTool? {
-        record(forNumber: number).flatMap { $0.result == .changed ? DelegationAgentTool(rawValue: $0.tool) : nil }
+    /// The tool that made the change of the record with this reference; nil
+    /// when that run changed nothing, since its tool may be why.
+    func toolThatMadeChange(forReference reference: String) -> DelegationAgentTool? {
+        record(forReference: reference).flatMap { $0.result == .changed ? DelegationAgentTool(rawValue: $0.tool) : nil }
     }
 
-    /// The repository of the record numbered `number` in `promptText`.
-    func projectPath(forNumber number: Int) -> String? {
-        record(forNumber: number)?.projectPath
+    /// The repository of the record with this reference.
+    func projectPath(forReference reference: String) -> String? {
+        record(forReference: reference)?.projectPath
     }
 
     /// Every repository a hand-off went to, newest first, each once.
@@ -231,10 +237,10 @@ final class DelegationHistory {
 
     // MARK: - Helpers
 
-    private func record(forNumber number: Int) -> DelegationRecord? {
-        let recent = promptedRecords
-        guard number >= 1, number <= recent.count else { return nil }
-        return recent[number - 1]
+    /// Any kept record, not only the ones in the prompt, so a reference the
+    /// model saw earlier still names the same hand-off after new ones arrive.
+    private func record(forReference reference: String) -> DelegationRecord? {
+        records.last { $0.reference == reference.lowercased() }
     }
 
     /// Records written before `shownToUser` existed were failures shown as
