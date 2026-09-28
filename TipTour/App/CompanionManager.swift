@@ -289,9 +289,17 @@ final class CompanionManager: ObservableObject {
     private lazy var textCommandPanelManager = TextCommandPanelManager(companionManager: self)
     /// 「这类不再提醒」 rules, shared by hand-off notices and Settings.
     let delegationNoticeRules = DelegationNoticeRules(fileURL: DelegationNoticeRules.defaultFileURL)
-    private lazy var delegationNoticeCenter = DelegationNoticeCenter(
+    private lazy var delegationNoticeCenter: DelegationNoticeCenter = DelegationNoticeCenter(
         onOpen: { [weak self] recordID in self?.openDelegationNotice(recordID) },
-        onSilence: { [weak self] category, recordID in self?.silenceDelegationNotices(category, from: recordID) })
+        onSilence: { [weak self] category, recordID in self?.silenceDelegationNotices(category, from: recordID) },
+        onSilenceDiscovery: { [weak self] direction in
+            self?.discoveryNotices.silence(direction: direction)
+            self?.delegationNoticeCenter.confirmDiscoverySilenced(direction)
+        })
+    /// Roadmap 3.4 trial: today's new things from `scripts/daily-discovery.py`.
+    private lazy var discoveryNotices: DiscoveryNotices = DiscoveryNotices { [weak self] pick in
+        self?.delegationNoticeCenter.postDiscovery(pick)
+    }
     private let delegationKeepAwake = SystemKeepAwake()
     private var detectionOverlayTask: Task<Void, Never>?
     private var nativeDetectionGeneration = 0
@@ -1073,6 +1081,7 @@ final class CompanionManager: ObservableObject {
         refreshAllPermissions()
         print("🔑 TipTour start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
+        discoveryNotices.startChecking()
 
         // Cap how long any AX query can hang waiting for a target app's
         // accessibility server. Default is 6 seconds, which freezes the

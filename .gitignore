@@ -31,3 +31,4 @@ buildServer.json
 
 # Acceptance evidence artifacts — regenerated per run, never source
 out/
+__pycache__/

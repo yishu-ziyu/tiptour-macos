@@ -6,8 +6,7 @@ git projects under ~/Desktop/AI 产品, and recently edited Obsidian notes (last
 30 days; Obsidian 90). Keys, e-mail addresses and phone numbers are removed
 before anything leaves the machine. Excerpts go to whichever chat model Her
 uses (today StepFun step-3.7-flash; any OpenAI-compatible endpoint works, set
-by --endpoint/--model/--key-account). The user approved sending excerpts to
-Her's model, not to one vendor (2026-09-28). The model only proposes directions with material IDs,
+by --endpoint/--model/--key-account; see her_model.py). The model only proposes directions with material IDs,
 and this script keeps a direction only when its quotes are really in the
 material, from at least two places on at least two days.
 
@@ -24,7 +23,6 @@ import concurrent.futures
 import datetime
 import hashlib
 import glob
-import http.server
 import json
 import os
 import re
@@ -32,16 +30,15 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.request
 from collections import defaultdict
 from pathlib import Path
+
+from her_model import HerModel, add_model_arguments, serve_marking_page
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 HOME = Path.home()
 PROJECTS_FOLDER = HOME / "Desktop" / "AI 产品"
 OBSIDIAN_FOLDER = HOME / "Desktop" / "黑曜石"
-ENDPOINT = "https://api.stepfun.com/step_plan/v1/chat/completions"
-MODEL = "step-3.7-flash"
 DAYS = 30
 MESSAGES_PER_BATCH = 90
 CHARACTERS_PER_MESSAGE = 280
@@ -170,33 +167,6 @@ def collect_material() -> list[dict]:
     return material
 
 
-def model_key(account: str) -> str:
-    completed = subprocess.run(["security", "find-generic-password", "-s", "com.yishuziyu.her",
-                                "-a", account, "-w"], capture_output=True, text=True)
-    if completed.returncode != 0 or not completed.stdout.strip():
-        sys.exit(f"没读到 Her 钥匙串里的 {account}（拒绝或不存在），什么都没发出去。")
-    return completed.stdout.strip()
-
-
-def ask_model(key: str, system: str, user: str, max_tokens: int = 6000) -> dict:
-    body = json.dumps({"model": settings.model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                       "max_tokens": max_tokens, "temperature": 0.2, "reasoning_effort": "low",
-                       "response_format": {"type": "json_object"}}).encode()
-    for attempt in range(3):
-        request = urllib.request.Request(settings.endpoint, data=body, headers={
-            "Authorization": f"Bearer {key}", "Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(request, timeout=180) as response:
-                content = json.load(response)["choices"][0]["message"]["content"]
-            return json.loads(content[content.index("{"):content.rindex("}") + 1])
-        except Exception as error:  # network, refusal or unreadable JSON: retry, then give up on this batch
-            if attempt == 2:
-                print(f"  一批没有结果：{error}", file=sys.stderr)
-                return {}
-            time.sleep(3)
-    return {}
-
-
 PROPOSE = """你在帮一个人整理「他最近在意的方向」，以后用来替他留意外面的新东西（新模型、新工具、活动、文章）。
 下面是他自己打的字和他项目的提交标题，每行开头是编号。
 
@@ -253,7 +223,7 @@ def run(output_folder: Path) -> None:
         sources[message["source"]] += 1
     print(f"材料 {len(material)} 条（{dict(sources)}），{len(by_project)} 个项目，{len(batches)} 批发给 {settings.model}")
 
-    key = model_key(settings.key_account)
+    model = HerModel.from_arguments(settings)
     output_folder.mkdir(parents=True, exist_ok=True)
     candidates_file = output_folder / "candidates.json"
     # Each batch's answer is kept as soon as it arrives, so a crash or a rerun
@@ -267,7 +237,7 @@ def run(output_folder: Path) -> None:
         batch_key = f"{project}:{messages[0]['id']}:{len(messages)}"
         if batch_key not in answers:
             lines = "\n".join(f"{m['id']} [{m['date']} {m['source']}] {m['text']}" for m in messages)
-            directions = ask_model(key, PROPOSE, f"项目：{project}\n\n{lines}").get("directions", [])
+            directions = model.ask_json(PROPOSE, f"项目：{project}\n\n{lines}").get("directions", [])
             if directions:
                 with answers_lock:
                     answers[batch_key] = directions
@@ -290,7 +260,7 @@ def run(output_folder: Path) -> None:
         f"{c['id']} {c.get('title', '')}（{c.get('kind', '')}）：{c.get('why', '')}"
         f"｜项目 {', '.join(sorted({e['project'] for e in c['evidence']}))}"
         f"｜日期 {', '.join(sorted({e['date'] for e in c['evidence']}))}" for c in candidates)
-    merged = ask_model(key, MERGE, listing, max_tokens=16000).get("directions", [])
+    merged = model.ask_json(MERGE, listing, max_tokens=16000).get("directions", [])
     print(f"合并后 {len(merged)} 条")
     candidate_by_id = {c["id"]: c for c in candidates}
     directions = []
@@ -359,35 +329,14 @@ main()
 </script>"""
 
 
-def serve(folder: Path) -> None:
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=str(folder), **kwargs)
-
-        def do_POST(self):
-            body = self.rfile.read(int(self.headers["Content-Length"]))
-            (folder / "marks.json").write_bytes(body)
-            self.send_response(204)
-            self.end_headers()
-
-        def log_message(self, *args):
-            pass
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 19480), Handler)
-    print("http://127.0.0.1:19480/  （标记存到 marks.json；Ctrl+C 结束）")
-    server.serve_forever()
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--serve", action="store_true", help="only serve the latest run's page for marking")
-    parser.add_argument("--endpoint", default=ENDPOINT, help="OpenAI-compatible chat completions URL")
-    parser.add_argument("--model", default=MODEL)
-    parser.add_argument("--key-account", default="stepfunAPIKey", help="account of the key in Her's Keychain")
+    add_model_arguments(parser)
     arguments = parser.parse_args()
     settings = arguments
     output = REPOSITORY_ROOT / "out" / "interest-discovery" / datetime.date.today().isoformat()
     if arguments.serve:
-        serve(output)
+        serve_marking_page(output, 19480)
     else:
         run(output)
